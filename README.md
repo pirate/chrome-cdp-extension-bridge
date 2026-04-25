@@ -43,7 +43,7 @@ Normal protocol methods stay on the browser CDP socket. Custom methods are "smug
 ```mermaid
 sequenceDiagram
   box Node process
-    participant App as Browser SDK
+    participant App as SDK
     participant Cdp as Cdp WebSocket client
   end
   box Chrome browser process
@@ -64,7 +64,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   box Node process
-    participant App as Browser SDK
+    participant App as SDK
     participant Cdp as Cdp EventEmitter
   end
   box Chrome browser process
@@ -89,7 +89,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   box Node process
-    participant App as Browser SDK
+    participant App as SDK
     participant WorkerCdp as Cdp client for extension SW
   end
   box Chrome browser process
@@ -116,7 +116,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   box Node process
-    participant App as Browser SDK / EventEmitter
+    participant App as SDK / EventEmitter
     participant WorkerCdp as Cdp client for extension SW
   end
   box Chrome browser process
