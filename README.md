@@ -105,7 +105,9 @@ flowchart LR
     direction LR
     SDK["SDK"]
     WS["WS client"]
+    Smuggle["CDP++ layer<br/>Runtime.evaluate Custom.ping"]
     SDK -->|"browser.ping(...)"| WS
+    WS <-->|"smuggled call / response"| Smuggle
   end
 
   subgraph Browser["Browser"]
@@ -117,12 +119,9 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  Smuggle["CDP++ inside CDP<br/>Runtime.evaluate Custom.ping"]
-
-  WS <-->|"smuggled call / response"| Smuggle
   Smuggle <-->|"dispatch via CDP router"| CDP
-  SW -->|"WebSocket CDP loopback<br/>out of Browser and back in"| Smuggle
-  Smuggle -->|"loopback result"| SW
+  SW -->|"WebSocket CDP loopback<br/>out of Browser"| Smuggle
+  Smuggle -->|"loopback result<br/>back into Browser"| SW
   SW -->|"return result to CDP router"| CDP
 ```
 
@@ -134,8 +133,10 @@ flowchart LR
     direction LR
     SDK["SDK<br/>EventEmitter"]
     WS["WS client"]
+    Smuggle["CDP++ layer<br/>Runtime.evaluate Custom.*"]
     SDK -->|"browser.on(...)"| WS
     SDK -->|"browser.firecustomevent(...)"| WS
+    WS -->|"smuggled subscribe/trigger"| Smuggle
   end
 
   subgraph Browser["Browser"]
@@ -147,13 +148,10 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  Smuggle["CDP++ inside CDP<br/>Runtime.evaluate Custom.*"]
-
   WS -->|"CDP Runtime.addBinding"| CDP
-  WS -->|"smuggled subscribe/trigger"| Smuggle
   Smuggle -->|"dispatch via CDP router"| CDP
-  SW -->|"WebSocket CDP loopback<br/>out of Browser and back in"| Smuggle
-  Smuggle -->|"service worker emits EventTarget event"| SW
+  SW -->|"WebSocket CDP loopback<br/>out of Browser"| Smuggle
+  Smuggle -->|"loopback result<br/>service worker emits EventTarget event"| SW
   SW -->|"Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
   CDP -->|"CDP event"| WS
   WS -->|"emit('customevent')"| SDK
