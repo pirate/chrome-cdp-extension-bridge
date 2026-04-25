@@ -123,7 +123,7 @@ flowchart LR
   Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(Custom.*)"]
 
   WS <-->|"2. Runtime.evaluate(Custom.act)<br/>9. => {ok, action, target}"| Socket
-  Socket <-->|"3. Standard CDP<br/>8. Runtime.evaluate(Custom.act) result"| CDP
+  Socket <-->|"3. Runtime.evaluate(Custom.act)<br/>8. Runtime.evaluate(Custom.act) result"| CDP
   SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| Socket
   Socket -->|"6. Input.dispatchMouseEvent result<br/>back into Browser"| SW
   SW -->|"7. return result to CDP router"| CDP
@@ -154,7 +154,7 @@ flowchart LR
 
   WS -->|"2. CDP Runtime.addBinding"| Socket
   WS -->|"3. smuggled subscribe<br/>7. smuggled trigger"| Socket
-  Socket <-->|"4. Standard CDP subscribe<br/>8. Standard CDP trigger"| CDP
+  Socket <-->|"4. Runtime.evaluate(Custom.on)<br/>8. Runtime.evaluate(Custom.firecustomevent)"| CDP
   SW -->|"9. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| Socket
   Socket -->|"10. Input.dispatchMouseEvent result<br/>service worker emits EventTarget event"| SW
   SW -->|"11. Runtime.bindingCalled<br/>{name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| CDP
