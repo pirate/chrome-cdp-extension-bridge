@@ -54,9 +54,7 @@ flowchart LR
     CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context"]
     Page["Page target"]
-    CDP -. "can dispatch to target" .-> SW
     CDP -. "can dispatch to target" .-> Page
-    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
   Socket["CDP socket"]
@@ -85,9 +83,7 @@ flowchart LR
     CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context"]
     Page["Page target<br/>about:blank"]
-    CDP -. "can dispatch to target" .-> SW
     CDP -->|"5. dispatch to page target"| Page
-    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
   Socket["CDP socket"]
