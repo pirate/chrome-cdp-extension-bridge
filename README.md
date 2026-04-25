@@ -34,7 +34,7 @@ external Node client
      - custom events: Runtime.addBinding("__bbCustomEvent")
 ```
 
-Normal protocol methods stay on the browser CDP socket. Custom methods are "smuggled" by evaluating a known `globalThis.Custom.*` method inside the extension service worker target. Custom events come back through `Runtime.addBinding`, which emits `Runtime.bindingCalled` on the service worker CDP connection.
+Normal protocol methods stay on the browser CDP socket. Custom methods are "smuggled" by evaluating a known `globalThis.Custom.*` method inside the extension service worker target. From there, the extension can initiate its own WebSocket connection out to `localhost:<port>` and re-enter Chrome through the public CDP port. Custom events come back through `Runtime.addBinding`, which emits `Runtime.bindingCalled` on the service worker CDP connection.
 
 ## Flow Diagrams
 
@@ -56,6 +56,7 @@ flowchart LR
     Page["Page target"]
     CDP -. "can dispatch to target" .-> SW
     CDP -. "can dispatch to target" .-> Page
+    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
   WS <-->|"CDP Browser.getVersion<br/>request / response"| CDP
@@ -83,6 +84,7 @@ flowchart LR
     Page["Page target<br/>about:blank"]
     CDP -. "can dispatch to target" .-> SW
     CDP -->|"dispatch to page target"| Page
+    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
   WS -->|"CDP Target.attachToTarget"| CDP
@@ -113,10 +115,17 @@ flowchart LR
     Page["Page target"]
     CDP -->|"dispatch Runtime.evaluate<br/>to service worker target"| SW
     CDP -. "can dispatch to page target" .-> Page
+    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
+
+  Loop(("outside Browser<br/>localhost loopback"))
 
   WS <-->|"CDP++ inside CDP<br/>Runtime.evaluate Custom.ping"| CDP
   CDP -->|"dispatch Runtime.evaluate<br/>into service worker JS context"| SW
+  SW -->|"WebSocket CDP<br/>Browser.getVersion"| Loop
+  Loop -->|"re-enter public CDP port"| CDP
+  CDP -->|"Browser.getVersion response"| Loop
+  Loop -->|"result back to service worker"| SW
   SW -->|"return result to CDP router"| CDP
   CDP -. "not used in this benchmark" .-> Page
 ```
@@ -140,11 +149,18 @@ flowchart LR
     Page["Page target"]
     CDP -->|"dispatch Runtime.evaluate<br/>to service worker target"| SW
     CDP -. "can dispatch to page target" .-> Page
+    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
+
+  Loop(("outside Browser<br/>localhost loopback"))
 
   WS -->|"CDP Runtime.addBinding"| CDP
   WS -->|"CDP++ subscribe/trigger<br/>Runtime.evaluate Custom.*"| CDP
   CDP -->|"dispatch into service worker JS context"| SW
+  SW -->|"WebSocket CDP<br/>Browser.getVersion"| Loop
+  Loop -->|"re-enter public CDP port"| CDP
+  CDP -->|"CDP result via loopback"| Loop
+  Loop -->|"service worker emits EventTarget event"| SW
   SW -->|"Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
   CDP -->|"CDP event"| WS
   WS -->|"emit('customevent')"| SDK
@@ -181,10 +197,10 @@ console.log(await browser.ping("test"));
 await browser.firecustomevent("test");
 ```
 
-`browser.ping(value)` calls `Custom.ping` in the extension and returns:
+`browser.ping(value)` calls `Custom.ping` in the extension. The extension performs a cheap loopback `Browser.getVersion` through the public CDP port and returns:
 
 ```js
-{ value, from: "extension-service-worker" }
+{ value, from: "extension-service-worker", browserProduct: "Chrome/..." }
 ```
 
 ## Constraints
@@ -209,16 +225,16 @@ await browser.firecustomevent("test");
 Latest local run uses only low-overhead local operations:
 
 - normal call: `Browser.getVersion`
-- custom call: `Custom.ping`
+- custom call: `Custom.ping`, including extension -> localhost CDP loopback -> browser
 - normal event: `Target.attachedToTarget` on the existing `about:blank` page
-- custom event: service-worker `EventTarget` -> `Runtime.addBinding`
+- custom event: extension -> localhost CDP loopback -> service-worker `EventTarget` -> `Runtime.addBinding`
 
 ```js
 latencyMs {
-  launchToFirstBrowserGetVersion: 865.18,
-  normalBrowserGetVersionRoundTrip: 0.308,
-  smuggledCustomPingRoundTrip: 0.558,
-  normalOnSubscribeTriggerEvent: 1.397,
-  smuggledCustomOnSubscribeTriggerEvent: 0.978
+  launchToFirstBrowserGetVersion: 1262.603,
+  normalBrowserGetVersionRoundTrip: 0.654,
+  smuggledCustomPingRoundTrip: 9.345,
+  normalOnSubscribeTriggerEvent: 1.836,
+  smuggledCustomOnSubscribeTriggerEvent: 29.592
 }
 ```
