@@ -34,7 +34,7 @@ external Node client
      - custom events: Runtime.addBinding("__bbCustomEvent")
 ```
 
-Normal protocol methods stay on the browser CDP socket. Custom methods are "smuggled" by evaluating a known `globalThis.Custom.*` method inside the extension service worker target. From there, the extension can initiate its own WebSocket connection out to `localhost:<port>` and re-enter Chrome through the public CDP port. Custom events come back through `Runtime.addBinding`, which emits `Runtime.bindingCalled` on the service worker CDP connection.
+Normal protocol methods stay on the browser CDP socket. Custom methods are "smuggled" by evaluating a known `globalThis.Custom.*` method inside the extension service worker target. From there, the extension can initiate its own WebSocket connection out to `localhost:9222` and re-enter Chrome through the public CDP port. Custom events come back through `Runtime.addBinding`, which emits `Runtime.bindingCalled` on the service worker CDP connection.
 
 ## Flow Diagrams
 
@@ -51,7 +51,7 @@ flowchart LR
 
   subgraph Browser["Browser"]
     direction LR
-    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context"]
     Page["Page target"]
     CDP -. "can dispatch to target" .-> SW
@@ -75,14 +75,14 @@ flowchart LR
   subgraph Node["Node client"]
     direction LR
     SDK["SDK"]
-    WS["WS client<br/>EventEmitter"]
+    WS["WS client"]
     SDK -->|"browser.cdp.on(...)"| WS
     SDK -->|"browser.cdp.send(...)"| WS
   end
 
   subgraph Browser["Browser"]
     direction LR
-    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context"]
     Page["Page target<br/>about:blank"]
     CDP -. "can dispatch to target" .-> SW
@@ -117,7 +117,7 @@ flowchart LR
 
   subgraph Browser["Browser"]
     direction LR
-    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom"]
     Page["Page target"]
     CDP -->|"dispatch Runtime.evaluate"| SW
@@ -126,7 +126,7 @@ flowchart LR
 
   Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
 
-  WS <-->|"smuggled call / response"| Socket
+  WS <-->|"Runtime.evaluate('Custom.ping(...)')<br/>=> {value, from, browserProduct}"| Socket
   Socket <-->|"dispatch via CDP router"| CDP
   SW -->|"WebSocket CDP loopback<br/>out of Browser"| Socket
   Socket -->|"loopback result<br/>back into Browser"| SW
@@ -139,7 +139,7 @@ flowchart LR
 flowchart LR
   subgraph Node["Node client"]
     direction LR
-    SDK["SDK<br/>EventEmitter"]
+    SDK["SDK"]
     WS["WS client"]
     SDK -->|"browser.on(...)"| WS
     SDK -->|"browser.firecustomevent(...)"| WS
@@ -147,7 +147,7 @@ flowchart LR
 
   subgraph Browser["Browser"]
     direction LR
-    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget"]
     Page["Page target"]
     CDP -->|"dispatch Runtime.evaluate"| SW
