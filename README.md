@@ -1,6 +1,6 @@
 # Chrome CDP Extension Bridge
 
-Small PoC for using a Chrome extension service worker as a private command/event bridge reachable from an external CDP client.
+Small PoC for using a Chrome extension service worker to implement custom CDP commands (smuggled inside of standard CDP commands).
 
 ## Files
 
