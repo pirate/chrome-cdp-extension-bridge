@@ -128,8 +128,7 @@ flowchart LR
 
   WS <-->|"Runtime.evaluate('Custom.ping(...)')<br/>=> {value, from, browserProduct}"| Socket
   Socket <-->|"dispatch via CDP router"| CDP
-  SW -->|"WebSocket CDP loopback<br/>out of Browser"| Socket
-  Socket -->|"loopback result<br/>back into Browser"| SW
+  SW <-->|"WebSocket CDP loopback<br/>request out / result back"| Socket
   SW -->|"return result to CDP router"| CDP
 ```
 
@@ -159,8 +158,7 @@ flowchart LR
   WS -->|"CDP Runtime.addBinding"| Socket
   WS -->|"smuggled subscribe / trigger"| Socket
   Socket <-->|"dispatch via CDP router"| CDP
-  SW -->|"WebSocket CDP loopback<br/>out of Browser"| Socket
-  Socket -->|"loopback result<br/>service worker emits EventTarget event"| SW
+  SW <-->|"WebSocket CDP loopback<br/>request out / result back<br/>then emit EventTarget event"| Socket
   SW -->|"Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
   CDP -->|"CDP event"| Socket
   Socket -->|"CDP event"| WS
