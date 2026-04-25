@@ -125,6 +125,7 @@ flowchart LR
   ClientSocket["client CDP socket.<br/>carries smuggled ..."]
   LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
 
+  ClientSocket ~~~ LoopbackSocket
   WS -->|"2. Runtime.evaluate(Custom.act)"| ClientSocket
   ClientSocket -->|"3. Runtime.evaluate(Custom.act)"| CDP
   SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
@@ -162,6 +163,7 @@ flowchart LR
   ClientSocket["client CDP socket.<br/>carries smuggled ..."]
   LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
 
+  ClientSocket ~~~ LoopbackSocket
   WS -->|"2. CDP Runtime.addBinding"| ClientSocket
   WS -->|"3. smuggled subscribe<br/>7. smuggled trigger"| ClientSocket
   ClientSocket <-->|"4. Runtime.evaluate(Custom.on)<br/>8. Runtime.evaluate(Custom.firecustomevent)"| CDP
