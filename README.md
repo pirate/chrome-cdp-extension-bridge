@@ -132,10 +132,10 @@ flowchart LR
   SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
   LoopbackSocket -->|"6. Input.dispatchMouseEvent"| LoopbackCDP
   LoopbackCDP -->|"9. Input.dispatchMouseEvent result"| LoopbackSocket
-  LoopbackSocket -->|"9. Input.dispatchMouseEvent result<br/>back into Browser"| SW
-  SW -->|"10. Runtime.evaluate(Custom.act) result"| ClientCDP
-  ClientCDP -->|"11. Runtime.evaluate(Custom.act) result"| ClientSocket
-  ClientSocket -->|"12. => {ok, action, target}"| WS
+  LoopbackSocket -->|"10. Input.dispatchMouseEvent result<br/>back into Browser"| SW
+  SW -->|"11. Runtime.evaluate(Custom.act) result"| ClientCDP
+  ClientCDP -->|"12. Runtime.evaluate(Custom.act) result"| ClientSocket
+  ClientSocket -->|"13. => {ok, action, target}"| WS
 ```
 
 ### 4. Smuggled Custom Event Listener / Event
@@ -156,9 +156,9 @@ flowchart LR
     LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget"]
     Page["Page target"]
-    ClientCDP -->|"5. dispatch Runtime.evaluate(Custom.on)<br/>8. dispatch Runtime.evaluate(Custom.firecustomevent)"| SW
-    LoopbackCDP -->|"11. Input.dispatchMouseEvent"| Page
-    Page -->|"12. Input.dispatchMouseEvent result"| LoopbackCDP
+    ClientCDP -->|"5. dispatch Runtime.evaluate(Custom.on)<br/>9. dispatch Runtime.evaluate(Custom.firecustomevent)"| SW
+    LoopbackCDP -->|"12. Input.dispatchMouseEvent"| Page
+    Page -->|"13. Input.dispatchMouseEvent result"| LoopbackCDP
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
@@ -169,14 +169,14 @@ flowchart LR
   WS -->|"2. CDP Runtime.addBinding"| ClientSocket
   WS -->|"3. smuggled subscribe<br/>7. smuggled trigger"| ClientSocket
   ClientSocket <-->|"4. Runtime.evaluate(Custom.on)<br/>8. Runtime.evaluate(Custom.firecustomevent)"| ClientCDP
-  SW -->|"9. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
-  LoopbackSocket -->|"10. Input.dispatchMouseEvent"| LoopbackCDP
-  LoopbackCDP -->|"13. Input.dispatchMouseEvent result"| LoopbackSocket
-  LoopbackSocket -->|"14. Input.dispatchMouseEvent result<br/>service worker emits EventTarget event"| SW
-  SW -->|"15. Runtime.bindingCalled<br/>{name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| ClientCDP
-  ClientCDP -->|"16. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| ClientSocket
-  ClientSocket -->|"17. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| WS
-  WS -->|"18. emit('customevent', 'test')"| SDK
+  SW -->|"10. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
+  LoopbackSocket -->|"11. Input.dispatchMouseEvent"| LoopbackCDP
+  LoopbackCDP -->|"14. Input.dispatchMouseEvent result"| LoopbackSocket
+  LoopbackSocket -->|"15. Input.dispatchMouseEvent result<br/>service worker emits EventTarget event"| SW
+  SW -->|"16. Runtime.bindingCalled<br/>{name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| ClientCDP
+  ClientCDP -->|"17. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| ClientSocket
+  ClientSocket -->|"18. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| WS
+  WS -->|"19. emit('customevent', 'test')"| SDK
 ```
 
 ## Lifecycle
