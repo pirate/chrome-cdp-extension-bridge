@@ -44,18 +44,19 @@ Normal protocol methods stay on the browser CDP socket. Custom methods are "smug
 sequenceDiagram
   box Node process
     participant App as SDK
-    participant Cdp as Cdp WebSocket client
+    participant Cdp as browser.cdp
   end
   box Chrome browser process
-    participant BrowserWS as Browser CDP WS<br/>/devtools/browser/...
-    participant BrowserDomain as Browser domain
+    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
+    participant SW as Extension service worker
+    participant Page as Page target
   end
 
   App->>Cdp: browser.cdp.send("Browser.getVersion")
-  Cdp->>BrowserWS: CDP request
-  BrowserWS->>BrowserDomain: dispatch Browser.getVersion
-  BrowserDomain-->>BrowserWS: result
-  BrowserWS-->>Cdp: CDP response
+  Cdp->>CDP: CDP request over browser WS
+  Note over CDP: handled by Chrome browser target
+  Note over SW,Page: not involved
+  CDP-->>Cdp: CDP response
   Cdp-->>App: Promise resolves
 ```
 
@@ -65,22 +66,22 @@ sequenceDiagram
 sequenceDiagram
   box Node process
     participant App as SDK
-    participant Cdp as Cdp EventEmitter
+    participant Cdp as browser.cdp EventEmitter
   end
   box Chrome browser process
-    participant BrowserWS as Browser CDP WS
-    participant TargetDomain as Target domain
+    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
+    participant SW as Extension service worker
     participant Page as about:blank page target
   end
 
   App->>Cdp: browser.cdp.on("Target.attachedToTarget", cb)
   Note over Cdp: local listener only<br/>no CDP subscription frame
   App->>Cdp: browser.cdp.send("Target.attachToTarget")
-  Cdp->>BrowserWS: CDP request
-  BrowserWS->>TargetDomain: attach to page target
-  TargetDomain->>Page: create attached session
-  TargetDomain-->>BrowserWS: Target.attachedToTarget event
-  BrowserWS-->>Cdp: CDP event
+  Cdp->>CDP: CDP request over browser WS
+  Note over SW: not involved
+  CDP->>Page: attach to page target
+  Page-->>CDP: Target.attachedToTarget event
+  CDP-->>Cdp: CDP event
   Cdp-->>App: emit("Target.attachedToTarget")
 ```
 
@@ -90,24 +91,22 @@ sequenceDiagram
 sequenceDiagram
   box Node process
     participant App as SDK
-    participant WorkerCdp as Cdp client for extension SW
+    participant WorkerCdp as workerCdp
   end
   box Chrome browser process
-    participant WorkerWS as Service worker CDP WS
-  end
-  box Extension service worker
-    participant Runtime as Runtime domain
-    participant Custom as globalThis.Custom
+    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
+    participant SW as Extension service worker<br/>globalThis.Custom
+    participant Page as Page target
   end
 
   App->>App: browser.ping("test")
   App->>WorkerCdp: browser.custom("ping", {value})
-  WorkerCdp->>WorkerWS: CDP request: Runtime.evaluate(...)
-  WorkerWS->>Runtime: evaluate in extension SW context
-  Runtime->>Custom: Custom.ping({value:"test"})
-  Custom-->>Runtime: {value, from}
-  Runtime-->>WorkerWS: Runtime.evaluate result
-  WorkerWS-->>WorkerCdp: CDP response
+  WorkerCdp->>CDP: CDP++ smuggled inside CDP<br/>Runtime.evaluate on service_worker target
+  CDP->>SW: execute globalThis.Custom.ping({value:"test"})
+  Note over SW: benchmark command is SW-local<br/>no localhost loopback or chrome.debugger hop
+  Note over Page: not involved
+  SW-->>CDP: {value, from}
+  CDP-->>WorkerCdp: CDP Runtime.evaluate response
   WorkerCdp-->>App: Promise resolves
 ```
 
@@ -117,31 +116,29 @@ sequenceDiagram
 sequenceDiagram
   box Node process
     participant App as SDK / EventEmitter
-    participant WorkerCdp as Cdp client for extension SW
+    participant WorkerCdp as workerCdp
   end
   box Chrome browser process
-    participant WorkerWS as Service worker CDP WS
-  end
-  box Extension service worker
-    participant Runtime as Runtime domain
-    participant Custom as globalThis.Custom
-    participant Bus as EventTarget bus
+    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
+    participant SW as Extension service worker<br/>globalThis.Custom + EventTarget
+    participant Page as Page target
   end
 
-  App->>WorkerCdp: CDP request: Runtime.addBinding("__bbCustomEvent")
-  App->>WorkerCdp: CDP++ smuggled subscribe: Custom.on("customevent")
-  WorkerCdp->>WorkerWS: CDP request: Runtime.evaluate(...)
-  WorkerWS->>Runtime: evaluate in extension SW context
-  Runtime->>Custom: Custom.on({eventName})
-  Custom->>Bus: addEventListener("customevent")
+  App->>WorkerCdp: Runtime.addBinding("__bbCustomEvent")
+  WorkerCdp->>CDP: CDP request on service_worker target
+  CDP->>SW: install binding in service worker context
 
-  App->>WorkerCdp: CDP++ smuggled trigger: Custom.firecustomevent("test")
-  WorkerCdp->>WorkerWS: CDP request: Runtime.evaluate(...)
-  Runtime->>Custom: Custom.firecustomevent(...)
-  Custom->>Bus: dispatchEvent("customevent")
-  Bus->>Runtime: __bbCustomEvent(JSON.stringify(...))
-  Runtime-->>WorkerWS: Runtime.bindingCalled
-  WorkerWS-->>WorkerCdp: CDP event
+  App->>WorkerCdp: CDP++ subscribe inside CDP<br/>Runtime.evaluate Custom.on("customevent")
+  WorkerCdp->>CDP: CDP request on service_worker target
+  CDP->>SW: Custom.on adds EventTarget listener
+  Note over SW: event bus is SW-local<br/>no localhost loopback or chrome.debugger hop
+  Note over Page: not involved
+
+  App->>WorkerCdp: CDP++ trigger inside CDP<br/>Runtime.evaluate Custom.firecustomevent("test")
+  WorkerCdp->>CDP: CDP request on service_worker target
+  CDP->>SW: dispatch EventTarget "customevent"
+  SW-->>CDP: Runtime.bindingCalled via __bbCustomEvent(...)
+  CDP-->>WorkerCdp: CDP event
   WorkerCdp-->>App: emit("customevent", "test")
 ```
 
