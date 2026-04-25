@@ -36,6 +36,61 @@ external Node client
 
 Normal protocol methods stay on the browser CDP socket. Custom methods are "smuggled" by evaluating a known `globalThis.Custom.*` method inside the extension service worker target. Custom events come back through `Runtime.addBinding`, which emits `Runtime.bindingCalled` on the service worker CDP connection.
 
+## Flow Diagrams
+
+### 1. Normal CDP Call / Response
+
+```text
+browser.cdp.send("Browser.getVersion")
+  -> Node Cdp client
+  -> browser CDP WebSocket (/devtools/browser/...)
+  -> Chrome Browser domain
+  <- Browser.getVersion result
+```
+
+### 2. Normal CDP Event Listener / Event
+
+```text
+browser.cdp.on("Target.attachedToTarget", cb)
+  -> Node EventEmitter listener on browser CDP socket
+
+browser.cdp.send("Target.attachToTarget")
+  -> browser CDP WebSocket
+  -> Chrome Target domain
+  <- Target.attachedToTarget event
+  -> Node Cdp emits "Target.attachedToTarget"
+  -> cb(event)
+```
+
+### 3. Smuggled Custom Call / Response
+
+```text
+browser.ping("test")
+  -> browser.custom("ping")
+  -> Runtime.evaluate on extension service_worker CDP target
+  -> extension service worker execution context
+  -> globalThis.Custom.ping({ value: "test" })
+  <- Runtime.evaluate result
+  <- { value: "test", from: "extension-service-worker" }
+```
+
+### 4. Smuggled Custom Event Listener / Event
+
+```text
+browser.on("customevent", cb)
+  -> browser.custom("on", { eventName: "customevent" })
+  -> Runtime.evaluate on extension service_worker CDP target
+  -> Custom.on(...) registers listener on service worker EventTarget
+
+browser.firecustomevent("test")
+  -> Runtime.evaluate Custom.firecustomevent(...)
+  -> service worker EventTarget.dispatchEvent("customevent")
+  -> globalThis.__bbCustomEvent(JSON.stringify(...))
+  <- Runtime.bindingCalled on service_worker CDP target
+  -> Node Browser emits "customevent"
+  -> cb("test")
+```
+
 ## Lifecycle
 
 1. `client.mjs` launches Chromium with:
