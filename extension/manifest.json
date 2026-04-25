@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "CDP Port Socket Probe",
+  "version": "0.1.0",
+  "description": "Quick test: can an extension service worker connect to Chrome's exposed CDP port?",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "permissions": [
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "ws://localhost/*",
+    "ws://127.0.0.1/*"
+  ]
+}
