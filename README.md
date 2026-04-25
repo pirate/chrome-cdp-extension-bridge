@@ -122,7 +122,7 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  ClientSocket["client CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(Custom.*)"]
+  ClientSocket["client CDP socket.<br/>carries smuggled ..."]
   LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
 
   WS -->|"2. Runtime.evaluate(Custom.act)"| ClientSocket
@@ -159,7 +159,7 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  ClientSocket["client CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(Custom.*)"]
+  ClientSocket["client CDP socket.<br/>carries smuggled ..."]
   LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
 
   WS -->|"2. CDP Runtime.addBinding"| ClientSocket
