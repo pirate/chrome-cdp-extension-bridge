@@ -113,21 +113,18 @@ flowchart LR
     CDP["CDP router<br/>localhost:&lt;port&gt;"]
     SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom"]
     Page["Page target"]
-    CDP -->|"dispatch Runtime.evaluate<br/>to service worker target"| SW
-    CDP -. "can dispatch to page target" .-> Page
+    CDP -->|"dispatch Runtime.evaluate"| SW
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
   Loop(("outside Browser<br/>localhost loopback"))
 
   WS <-->|"CDP++ inside CDP<br/>Runtime.evaluate Custom.ping"| CDP
-  CDP -->|"dispatch Runtime.evaluate<br/>into service worker JS context"| SW
-  SW -->|"WebSocket CDP<br/>Browser.getVersion"| Loop
+  SW -->|"WebSocket CDP"| Loop
   Loop -->|"re-enter public CDP port"| CDP
-  CDP -->|"Browser.getVersion response"| Loop
-  Loop -->|"result back to service worker"| SW
+  CDP -->|"CDP response"| Loop
+  Loop -->|"loopback result"| SW
   SW -->|"return result to CDP router"| CDP
-  CDP -. "not used in this benchmark" .-> Page
 ```
 
 ### 4. Smuggled Custom Event Listener / Event
@@ -147,8 +144,7 @@ flowchart LR
     CDP["CDP router<br/>localhost:&lt;port&gt;"]
     SW["Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget"]
     Page["Page target"]
-    CDP -->|"dispatch Runtime.evaluate<br/>to service worker target"| SW
-    CDP -. "can dispatch to page target" .-> Page
+    CDP -->|"dispatch Runtime.evaluate"| SW
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
@@ -156,15 +152,13 @@ flowchart LR
 
   WS -->|"CDP Runtime.addBinding"| CDP
   WS -->|"CDP++ subscribe/trigger<br/>Runtime.evaluate Custom.*"| CDP
-  CDP -->|"dispatch into service worker JS context"| SW
-  SW -->|"WebSocket CDP<br/>Browser.getVersion"| Loop
+  SW -->|"WebSocket CDP"| Loop
   Loop -->|"re-enter public CDP port"| CDP
   CDP -->|"CDP result via loopback"| Loop
   Loop -->|"service worker emits EventTarget event"| SW
   SW -->|"Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
   CDP -->|"CDP event"| WS
   WS -->|"emit('customevent')"| SDK
-  CDP -. "not used in this benchmark" .-> Page
 ```
 
 ## Lifecycle
