@@ -62,7 +62,7 @@ flowchart LR
   Socket["CDP socket"]
 
   WS <-->|"2. CDP Browser.getVersion<br/>5. response"| Socket
-  Socket <-->|"3. browser CDP request<br/>4. browser CDP response"| CDP
+  Socket <-->|"3. Standard CDP request<br/>4. Standard CDP response"| CDP
 
   classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
   class SW,Page idle;
@@ -93,7 +93,7 @@ flowchart LR
   Socket["CDP socket"]
 
   WS -->|"3. CDP Target.attachToTarget"| Socket
-  Socket -->|"4. browser CDP connection"| CDP
+  Socket -->|"4. Standard CDP"| CDP
   CDP -->|"6. attach session"| Page
   Page -->|"7. Target.attachedToTarget event"| CDP
   CDP -->|"8. CDP event"| Socket
@@ -127,7 +127,7 @@ flowchart LR
   Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
 
   WS <-->|"2. Runtime.evaluate('Custom.ping(...)')<br/>9. => {value, from, browserProduct}"| Socket
-  Socket <-->|"3. dispatch via CDP router<br/>8. Runtime.evaluate result"| CDP
+  Socket <-->|"3. Standard CDP<br/>8. Runtime.evaluate result"| CDP
   SW -->|"5. WebSocket CDP loopback<br/>out of Browser"| Socket
   Socket -->|"6. loopback result<br/>back into Browser"| SW
   SW -->|"7. return result to CDP router"| CDP
@@ -158,7 +158,7 @@ flowchart LR
 
   WS -->|"2. CDP Runtime.addBinding"| Socket
   WS -->|"3. smuggled subscribe<br/>7. smuggled trigger"| Socket
-  Socket <-->|"4. dispatch subscribe via CDP router<br/>8. dispatch trigger via CDP router"| CDP
+  Socket <-->|"4. Standard CDP subscribe<br/>8. Standard CDP trigger"| CDP
   SW -->|"9. WebSocket CDP loopback<br/>out of Browser"| Socket
   Socket -->|"10. loopback result<br/>service worker emits EventTarget event"| SW
   SW -->|"11. Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
