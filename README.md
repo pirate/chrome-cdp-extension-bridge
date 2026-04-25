@@ -108,7 +108,7 @@ flowchart LR
     direction LR
     SDK["SDK"]
     WS["WS client"]
-    SDK -->|"1. browser.ping(...)"| WS
+    SDK -->|"1. browser.act(...)"| WS
   end
 
   subgraph Browser["Browser"]
@@ -116,16 +116,16 @@ flowchart LR
     CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom"]
     Page["Page target"]
-    CDP -->|"4. dispatch Runtime.evaluate(Custom.ping)"| SW
+    CDP -->|"4. dispatch Runtime.evaluate(Custom.act)"| SW
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
   Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(Custom.*)"]
 
-  WS <-->|"2. Runtime.evaluate(Custom.ping)<br/>9. => {value, from, browserProduct}"| Socket
-  Socket <-->|"3. Standard CDP<br/>8. Runtime.evaluate(Custom.ping) result"| CDP
-  SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Browser.getVersion"| Socket
-  Socket -->|"6. loopback result<br/>back into Browser"| SW
+  WS <-->|"2. Runtime.evaluate(Custom.act)<br/>9. => {ok, action, target}"| Socket
+  Socket <-->|"3. Standard CDP<br/>8. Runtime.evaluate(Custom.act) result"| CDP
+  SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| Socket
+  Socket -->|"6. Input.dispatchMouseEvent result<br/>back into Browser"| SW
   SW -->|"7. return result to CDP router"| CDP
 ```
 
@@ -155,8 +155,8 @@ flowchart LR
   WS -->|"2. CDP Runtime.addBinding"| Socket
   WS -->|"3. smuggled subscribe<br/>7. smuggled trigger"| Socket
   Socket <-->|"4. Standard CDP subscribe<br/>8. Standard CDP trigger"| CDP
-  SW -->|"9. WebSocket CDP loopback<br/>out of Browser<br/>Browser.getVersion"| Socket
-  Socket -->|"10. loopback result<br/>service worker emits EventTarget event"| SW
+  SW -->|"9. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| Socket
+  Socket -->|"10. Input.dispatchMouseEvent result<br/>service worker emits EventTarget event"| SW
   SW -->|"11. Runtime.bindingCalled<br/>{name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| CDP
   CDP -->|"12. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| Socket
   Socket -->|"13. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| WS
