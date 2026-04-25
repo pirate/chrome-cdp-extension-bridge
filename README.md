@@ -59,7 +59,7 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
+  Socket["CDP socket"]
 
   WS <-->|"CDP Browser.getVersion<br/>request / response"| Socket
   Socket <-->|"browser CDP connection"| CDP
@@ -90,7 +90,7 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
+  Socket["CDP socket"]
 
   WS -->|"CDP Target.attachToTarget"| Socket
   Socket -->|"browser CDP connection"| CDP
