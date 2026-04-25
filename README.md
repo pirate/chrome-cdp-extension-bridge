@@ -48,8 +48,8 @@ sequenceDiagram
   end
   participant Socket as CDP socket
   box Browser
-    participant CDP as CDP router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker<br/>CDP target / JS context
+    participant CDP as CDP router localhost:9222
+    participant SW as Extension service worker target
     participant Page as Page target
   end
 
@@ -68,13 +68,13 @@ sequenceDiagram
 sequenceDiagram
   box Node client
     participant SDK as SDK
-    participant WS as WS client<br/>EventEmitter
+    participant WS as WS client EventEmitter
   end
   participant Socket as CDP socket
   box Browser
-    participant CDP as CDP router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker<br/>CDP target / JS context
-    participant Page as Page target<br/>about:blank
+    participant CDP as CDP router localhost:9222
+    participant SW as Extension service worker target
+    participant Page as Page target about:blank
   end
 
   SW--xPage: <s>chrome.debugger</s><br/>not used
@@ -97,13 +97,14 @@ sequenceDiagram
     participant SDK as SDK
     participant WS as WS client
   end
-  participant Socket as CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)
+  participant Socket as CDP socket
   box Browser
-    participant CDP as CDP router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom
+    participant CDP as CDP router localhost:9222
+    participant SW as Extension service worker target globalThis.Custom
     participant Page as Page target
   end
 
+  Note over Socket: CDP socket. carries smuggled CDP++ events inside Runtime.evaluate(...)
   SW--xPage: <s>chrome.debugger</s><br/>not used
   SDK->>WS: browser.ping(...)
   WS->>Socket: smuggled call
@@ -124,16 +125,17 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   box Node client
-    participant SDK as SDK<br/>EventEmitter
+    participant SDK as SDK EventEmitter
     participant WS as WS client
   end
-  participant Socket as CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)
+  participant Socket as CDP socket
   box Browser
-    participant CDP as CDP router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget
+    participant CDP as CDP router localhost:9222
+    participant SW as Extension service worker target Custom + EventTarget
     participant Page as Page target
   end
 
+  Note over Socket: CDP socket. carries smuggled CDP++ events inside Runtime.evaluate(...)
   SW--xPage: <s>chrome.debugger</s><br/>not used
   SDK->>WS: browser.on(...)
   WS->>Socket: CDP Runtime.addBinding
