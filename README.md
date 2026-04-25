@@ -91,10 +91,10 @@ flowchart LR
   WS -->|"3. CDP Target.attachToTarget"| Socket
   Socket -->|"4. Standard CDP"| CDP
   CDP -->|"6. attach session"| Page
-  Page -->|"7. Target.attachedToTarget event"| CDP
-  CDP -->|"8. CDP event"| Socket
-  Socket -->|"9. CDP event"| WS
-  WS -->|"10. emit(...)"| SDK
+  Page -->|"7. Target.attachedToTarget<br/>{sessionId, targetInfo}"| CDP
+  CDP -->|"8. Target.attachedToTarget<br/>{sessionId, targetInfo}"| Socket
+  Socket -->|"9. Target.attachedToTarget<br/>{sessionId, targetInfo}"| WS
+  WS -->|"10. emit('Target.attachedToTarget', {sessionId, targetInfo})"| SDK
 
   classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
   class SW idle;
@@ -157,10 +157,10 @@ flowchart LR
   Socket <-->|"4. Standard CDP subscribe<br/>8. Standard CDP trigger"| CDP
   SW -->|"9. WebSocket CDP loopback<br/>out of Browser"| Socket
   Socket -->|"10. loopback result<br/>service worker emits EventTarget event"| SW
-  SW -->|"11. Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
-  CDP -->|"12. CDP event"| Socket
-  Socket -->|"13. CDP event"| WS
-  WS -->|"14. emit('customevent')"| SDK
+  SW -->|"11. Runtime.bindingCalled<br/>{name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| CDP
+  CDP -->|"12. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| Socket
+  Socket -->|"13. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| WS
+  WS -->|"14. emit('customevent', 'test')"| SDK
 ```
 
 ## Lifecycle
