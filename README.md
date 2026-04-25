@@ -40,55 +40,109 @@ Normal protocol methods stay on the browser CDP socket. Custom methods are "smug
 
 ### 1. Normal CDP Call / Response
 
-```text
-browser.cdp.send("Browser.getVersion")
-  -> Node Cdp client
-  -> browser CDP WebSocket (/devtools/browser/...)
-  -> Chrome Browser domain
-  <- Browser.getVersion result
+```mermaid
+sequenceDiagram
+  box Node process
+    participant App as Browser SDK
+    participant Cdp as Cdp WebSocket client
+  end
+  box Chrome browser process
+    participant BrowserWS as Browser CDP WS<br/>/devtools/browser/...
+    participant BrowserDomain as Browser domain
+  end
+
+  App->>Cdp: browser.cdp.send("Browser.getVersion")
+  Cdp->>BrowserWS: CDP request
+  BrowserWS->>BrowserDomain: dispatch Browser.getVersion
+  BrowserDomain-->>BrowserWS: result
+  BrowserWS-->>Cdp: CDP response
+  Cdp-->>App: Promise resolves
 ```
 
 ### 2. Normal CDP Event Listener / Event
 
-```text
-browser.cdp.on("Target.attachedToTarget", cb)
-  -> Node EventEmitter listener on browser CDP socket
+```mermaid
+sequenceDiagram
+  box Node process
+    participant App as Browser SDK
+    participant Cdp as Cdp EventEmitter
+  end
+  box Chrome browser process
+    participant BrowserWS as Browser CDP WS
+    participant TargetDomain as Target domain
+    participant Page as about:blank page target
+  end
 
-browser.cdp.send("Target.attachToTarget")
-  -> browser CDP WebSocket
-  -> Chrome Target domain
-  <- Target.attachedToTarget event
-  -> Node Cdp emits "Target.attachedToTarget"
-  -> cb(event)
+  App->>Cdp: browser.cdp.on("Target.attachedToTarget", cb)
+  Note over Cdp: local listener only<br/>no CDP subscription frame
+  App->>Cdp: browser.cdp.send("Target.attachToTarget")
+  Cdp->>BrowserWS: CDP request
+  BrowserWS->>TargetDomain: attach to page target
+  TargetDomain->>Page: create attached session
+  TargetDomain-->>BrowserWS: Target.attachedToTarget event
+  BrowserWS-->>Cdp: CDP event
+  Cdp-->>App: emit("Target.attachedToTarget")
 ```
 
 ### 3. Smuggled Custom Call / Response
 
-```text
-browser.ping("test")
-  -> browser.custom("ping")
-  -> Runtime.evaluate on extension service_worker CDP target
-  -> extension service worker execution context
-  -> globalThis.Custom.ping({ value: "test" })
-  <- Runtime.evaluate result
-  <- { value: "test", from: "extension-service-worker" }
+```mermaid
+sequenceDiagram
+  box Node process
+    participant App as Browser SDK
+    participant WorkerCdp as Cdp client for extension SW
+  end
+  box Chrome browser process
+    participant WorkerWS as Service worker CDP WS
+  end
+  box Extension service worker
+    participant Runtime as Runtime domain
+    participant Custom as globalThis.Custom
+  end
+
+  App->>App: browser.ping("test")
+  App->>WorkerCdp: browser.custom("ping", {value})
+  WorkerCdp->>WorkerWS: CDP request: Runtime.evaluate(...)
+  WorkerWS->>Runtime: evaluate in extension SW context
+  Runtime->>Custom: Custom.ping({value:"test"})
+  Custom-->>Runtime: {value, from}
+  Runtime-->>WorkerWS: Runtime.evaluate result
+  WorkerWS-->>WorkerCdp: CDP response
+  WorkerCdp-->>App: Promise resolves
 ```
 
 ### 4. Smuggled Custom Event Listener / Event
 
-```text
-browser.on("customevent", cb)
-  -> browser.custom("on", { eventName: "customevent" })
-  -> Runtime.evaluate on extension service_worker CDP target
-  -> Custom.on(...) registers listener on service worker EventTarget
+```mermaid
+sequenceDiagram
+  box Node process
+    participant App as Browser SDK / EventEmitter
+    participant WorkerCdp as Cdp client for extension SW
+  end
+  box Chrome browser process
+    participant WorkerWS as Service worker CDP WS
+  end
+  box Extension service worker
+    participant Runtime as Runtime domain
+    participant Custom as globalThis.Custom
+    participant Bus as EventTarget bus
+  end
 
-browser.firecustomevent("test")
-  -> Runtime.evaluate Custom.firecustomevent(...)
-  -> service worker EventTarget.dispatchEvent("customevent")
-  -> globalThis.__bbCustomEvent(JSON.stringify(...))
-  <- Runtime.bindingCalled on service_worker CDP target
-  -> Node Browser emits "customevent"
-  -> cb("test")
+  App->>WorkerCdp: CDP request: Runtime.addBinding("__bbCustomEvent")
+  App->>WorkerCdp: CDP++ smuggled subscribe: Custom.on("customevent")
+  WorkerCdp->>WorkerWS: CDP request: Runtime.evaluate(...)
+  WorkerWS->>Runtime: evaluate in extension SW context
+  Runtime->>Custom: Custom.on({eventName})
+  Custom->>Bus: addEventListener("customevent")
+
+  App->>WorkerCdp: CDP++ smuggled trigger: Custom.firecustomevent("test")
+  WorkerCdp->>WorkerWS: CDP request: Runtime.evaluate(...)
+  Runtime->>Custom: Custom.firecustomevent(...)
+  Custom->>Bus: dispatchEvent("customevent")
+  Bus->>Runtime: __bbCustomEvent(JSON.stringify(...))
+  Runtime-->>WorkerWS: Runtime.bindingCalled
+  WorkerWS-->>WorkerCdp: CDP event
+  WorkerCdp-->>App: emit("customevent", "test")
 ```
 
 ## Lifecycle
