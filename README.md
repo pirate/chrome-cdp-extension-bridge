@@ -41,105 +41,114 @@ Normal protocol methods stay on the browser CDP socket. Custom methods are "smug
 ### 1. Normal CDP Call / Response
 
 ```mermaid
-sequenceDiagram
-  box Node process
-    participant App as SDK
-    participant Cdp as browser.cdp
-  end
-  box Chrome browser process
-    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker
-    participant Page as Page target
+flowchart LR
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client"]
+    SDK -->|"browser.cdp.send(...)"| WS
   end
 
-  App->>Cdp: browser.cdp.send("Browser.getVersion")
-  Cdp->>CDP: CDP request over browser WS
-  Note over CDP: handled by Chrome browser target
-  Note over SW,Page: not involved
-  CDP-->>Cdp: CDP response
-  Cdp-->>App: Promise resolves
+  subgraph Browser["Browser"]
+    direction LR
+    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    SW["Extension service worker<br/>CDP target / JS context"]
+    Page["Page target"]
+    CDP -. "can dispatch to target" .-> SW
+    CDP -. "can dispatch to target" .-> Page
+  end
+
+  WS <-->|"CDP Browser.getVersion<br/>request / response"| CDP
+
+  classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
+  class SW,Page idle;
 ```
 
 ### 2. Normal CDP Event Listener / Event
 
 ```mermaid
-sequenceDiagram
-  box Node process
-    participant App as SDK
-    participant Cdp as browser.cdp EventEmitter
-  end
-  box Chrome browser process
-    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker
-    participant Page as about:blank page target
+flowchart LR
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client<br/>EventEmitter"]
+    SDK -->|"browser.cdp.on(...)"| WS
+    SDK -->|"browser.cdp.send(...)"| WS
   end
 
-  App->>Cdp: browser.cdp.on("Target.attachedToTarget", cb)
-  Note over Cdp: local listener only<br/>no CDP subscription frame
-  App->>Cdp: browser.cdp.send("Target.attachToTarget")
-  Cdp->>CDP: CDP request over browser WS
-  Note over SW: not involved
-  CDP->>Page: attach to page target
-  Page-->>CDP: Target.attachedToTarget event
-  CDP-->>Cdp: CDP event
-  Cdp-->>App: emit("Target.attachedToTarget")
+  subgraph Browser["Browser"]
+    direction LR
+    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    SW["Extension service worker<br/>CDP target / JS context"]
+    Page["Page target<br/>about:blank"]
+    CDP -. "can dispatch to target" .-> SW
+    CDP -->|"dispatch to page target"| Page
+  end
+
+  WS -->|"CDP Target.attachToTarget"| CDP
+  CDP -->|"attach session"| Page
+  Page -->|"Target.attachedToTarget event"| CDP
+  CDP -->|"CDP event"| WS
+  WS -->|"emit(...)"| SDK
+
+  classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
+  class SW idle;
 ```
 
 ### 3. Smuggled Custom Call / Response
 
 ```mermaid
-sequenceDiagram
-  box Node process
-    participant App as SDK
-    participant WorkerCdp as workerCdp
-  end
-  box Chrome browser process
-    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker<br/>globalThis.Custom
-    participant Page as Page target
+flowchart LR
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client"]
+    SDK -->|"browser.ping(...)"| WS
   end
 
-  App->>App: browser.ping("test")
-  App->>WorkerCdp: browser.custom("ping", {value})
-  WorkerCdp->>CDP: CDP++ smuggled inside CDP<br/>Runtime.evaluate on service_worker target
-  CDP->>SW: execute globalThis.Custom.ping({value:"test"})
-  Note over SW: benchmark command is SW-local<br/>no localhost loopback or chrome.debugger hop
-  Note over Page: not involved
-  SW-->>CDP: {value, from}
-  CDP-->>WorkerCdp: CDP Runtime.evaluate response
-  WorkerCdp-->>App: Promise resolves
+  subgraph Browser["Browser"]
+    direction LR
+    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom"]
+    Page["Page target"]
+    CDP -->|"dispatch Runtime.evaluate<br/>to service worker target"| SW
+    CDP -. "can dispatch to page target" .-> Page
+  end
+
+  WS <-->|"CDP++ inside CDP<br/>Runtime.evaluate Custom.ping"| CDP
+  CDP -->|"dispatch Runtime.evaluate<br/>into service worker JS context"| SW
+  SW -->|"return result to CDP router"| CDP
+  CDP -. "not used in this benchmark" .-> Page
 ```
 
 ### 4. Smuggled Custom Event Listener / Event
 
 ```mermaid
-sequenceDiagram
-  box Node process
-    participant App as SDK / EventEmitter
-    participant WorkerCdp as workerCdp
-  end
-  box Chrome browser process
-    participant CDP as Browser CDP WS / router<br/>localhost:&lt;port&gt;
-    participant SW as Extension service worker<br/>globalThis.Custom + EventTarget
-    participant Page as Page target
+flowchart LR
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK<br/>EventEmitter"]
+    WS["WS client"]
+    SDK -->|"browser.on(...)"| WS
+    SDK -->|"browser.firecustomevent(...)"| WS
   end
 
-  App->>WorkerCdp: Runtime.addBinding("__bbCustomEvent")
-  WorkerCdp->>CDP: CDP request on service_worker target
-  CDP->>SW: install binding in service worker context
+  subgraph Browser["Browser"]
+    direction LR
+    CDP["CDP router<br/>localhost:&lt;port&gt;"]
+    SW["Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget"]
+    Page["Page target"]
+    CDP -->|"dispatch Runtime.evaluate<br/>to service worker target"| SW
+    CDP -. "can dispatch to page target" .-> Page
+  end
 
-  App->>WorkerCdp: CDP++ subscribe inside CDP<br/>Runtime.evaluate Custom.on("customevent")
-  WorkerCdp->>CDP: CDP request on service_worker target
-  CDP->>SW: Custom.on adds EventTarget listener
-  Note over SW: event bus is SW-local<br/>no localhost loopback or chrome.debugger hop
-  Note over Page: not involved
-
-  App->>WorkerCdp: CDP++ trigger inside CDP<br/>Runtime.evaluate Custom.firecustomevent("test")
-  WorkerCdp->>CDP: CDP request on service_worker target
-  CDP->>SW: dispatch EventTarget "customevent"
-  SW-->>CDP: Runtime.bindingCalled via __bbCustomEvent(...)
-  CDP-->>WorkerCdp: CDP event
-  WorkerCdp-->>App: emit("customevent", "test")
+  WS -->|"CDP Runtime.addBinding"| CDP
+  WS -->|"CDP++ subscribe/trigger<br/>Runtime.evaluate Custom.*"| CDP
+  CDP -->|"dispatch into service worker JS context"| SW
+  SW -->|"Runtime.bindingCalled<br/>__bbCustomEvent(...)"| CDP
+  CDP -->|"CDP event"| WS
+  WS -->|"emit('customevent')"| SDK
+  CDP -. "not used in this benchmark" .-> Page
 ```
 
 ## Lifecycle
