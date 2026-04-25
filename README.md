@@ -41,18 +41,16 @@ Normal protocol methods stay on the browser CDP socket. Custom methods are "smug
 ### 1. Normal CDP Call / Response
 
 ```mermaid
-flowchart TB
+flowchart LR
   subgraph Node["Node client"]
-    direction TB
+    direction LR
     SDK["SDK"]
     WS["WS client"]
     SDK -->|"browser.cdp.send(...)"| WS
   end
 
-  Socket["CDP socket"]
-
   subgraph Browser["Browser"]
-    direction TB
+    direction LR
     CDP["CDP router<br/>localhost:&lt;port&gt;"]
     SW["Extension service worker<br/>CDP target / JS context"]
     Page["Page target"]
@@ -60,6 +58,8 @@ flowchart TB
     CDP -. "can dispatch to target" .-> Page
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
+
+  Socket["CDP socket"]
 
   WS <-->|"CDP Browser.getVersion<br/>request / response"| Socket
   Socket <-->|"browser CDP connection"| CDP
@@ -71,19 +71,17 @@ flowchart TB
 ### 2. Normal CDP Event Listener / Event
 
 ```mermaid
-flowchart TB
+flowchart LR
   subgraph Node["Node client"]
-    direction TB
+    direction LR
     SDK["SDK"]
     WS["WS client<br/>EventEmitter"]
     SDK -->|"browser.cdp.on(...)"| WS
     SDK -->|"browser.cdp.send(...)"| WS
   end
 
-  Socket["CDP socket"]
-
   subgraph Browser["Browser"]
-    direction TB
+    direction LR
     CDP["CDP router<br/>localhost:&lt;port&gt;"]
     SW["Extension service worker<br/>CDP target / JS context"]
     Page["Page target<br/>about:blank"]
@@ -91,6 +89,8 @@ flowchart TB
     CDP -->|"dispatch to page target"| Page
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
+
+  Socket["CDP socket"]
 
   WS -->|"CDP Target.attachToTarget"| Socket
   Socket -->|"browser CDP connection"| CDP
@@ -107,24 +107,24 @@ flowchart TB
 ### 3. Smuggled Custom Call / Response
 
 ```mermaid
-flowchart TB
+flowchart LR
   subgraph Node["Node client"]
-    direction TB
+    direction LR
     SDK["SDK"]
     WS["WS client"]
     SDK -->|"browser.ping(...)"| WS
   end
 
-  Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
-
   subgraph Browser["Browser"]
-    direction TB
+    direction LR
     CDP["CDP router<br/>localhost:&lt;port&gt;"]
     SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom"]
     Page["Page target"]
     CDP -->|"dispatch Runtime.evaluate"| SW
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
+
+  Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
 
   WS <-->|"smuggled call / response"| Socket
   Socket <-->|"dispatch via CDP router"| CDP
@@ -136,25 +136,25 @@ flowchart TB
 ### 4. Smuggled Custom Event Listener / Event
 
 ```mermaid
-flowchart TB
+flowchart LR
   subgraph Node["Node client"]
-    direction TB
+    direction LR
     SDK["SDK<br/>EventEmitter"]
     WS["WS client"]
     SDK -->|"browser.on(...)"| WS
     SDK -->|"browser.firecustomevent(...)"| WS
   end
 
-  Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
-
   subgraph Browser["Browser"]
-    direction TB
+    direction LR
     CDP["CDP router<br/>localhost:&lt;port&gt;"]
     SW["Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget"]
     Page["Page target"]
     CDP -->|"dispatch Runtime.evaluate"| SW
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
+
+  Socket["CDP socket.<br/>carries smuggled CDP++ events inside Runtime.evaluate(...)"]
 
   WS -->|"CDP Runtime.addBinding"| Socket
   WS -->|"smuggled subscribe / trigger"| Socket
