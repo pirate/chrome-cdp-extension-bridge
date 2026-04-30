@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "CDP Port Socket Probe",
+  "name": "MagicCDP",
   "version": "0.1.0",
-  "description": "Quick test: can an extension service worker connect to Chrome's exposed CDP port?",
+  "description": "MagicCDP server bridge. Custom CDP commands + events are bootstrapped into this service worker by the client at connect() time.",
   "minimum_chrome_version": "116",
   "background": {
     "service_worker": "service_worker.js",
     "type": "module"
   },
   "permissions": [
-    "debugger"
+    "debugger",
+    "tabs"
   ],
   "host_permissions": [
     "<all_urls>",
