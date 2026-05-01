@@ -132,6 +132,14 @@ def main():
         if len(events) < 2:
             raise RuntimeError(f"expected >=2 Custom.demo events, got {len(events)}")
         print(f"\nSUCCESS ({mode}): {len(events)} events")
+
+        # TTY-only: drop into a REPL where you can send live commands and
+        # watch events as they print. Skip when run non-interactively so the
+        # demo stays CI-friendly.
+        if sys.stdin.isatty():
+            cdp.on("Target.attachedToTarget", lambda e: print(f"\n[event] Target.attachedToTarget {e}"))
+            run_repl(cdp, mode)
+
         return 0
     finally:
         if cdp is not None:
@@ -143,6 +151,36 @@ def main():
             except Exception: chrome_proc.kill()
         if profile_dir is not None:
             shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def run_repl(cdp, mode):
+    import re
+    print(f"\nBrowser remains running. Mode: {mode}.")
+    print("Enter commands as Domain.method({...JSON params...}). Examples:")
+    print('  Browser.getVersion({})')
+    print('  Magic.evaluate({"expression": "chrome.tabs.query({active: true})"})')
+    print('  Custom.echo({"value": "hi"})')
+    print("Type exit or quit to disconnect (browser keeps running).")
+    cmd_re = re.compile(r"^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$")
+    while True:
+        try:
+            line = input("MagicCDP> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line: continue
+        if line in ("exit", "quit"): break
+        try:
+            m = cmd_re.match(line)
+            if not m:
+                raise ValueError("format: Domain.method({...JSON...})")
+            method = m.group(1)
+            raw = (m.group(2) or "").strip()
+            params = json.loads(raw) if raw else {}
+            result = cdp.send(method, params)
+            print(json.dumps(result, indent=2))
+        except Exception as e:
+            print(f"error: {e}")
 
 
 if __name__ == "__main__":
