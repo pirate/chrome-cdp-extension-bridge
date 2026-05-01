@@ -96,6 +96,7 @@ cdp.on(PageForegroundPageChanged, console.log);
 await cdp.Magic.addMiddleware({
   name: cdp.Target.getTargets,
   phase: cdp.RESPONSE,
+  // attach .tabId next to every .targetId in events browser emits
   expression: `async (payload, next) => {
     for (const targetInfo of payload.targetInfos) {
       const { tabId } = await cdp.send("Custom.tabIdFromTargetId", {

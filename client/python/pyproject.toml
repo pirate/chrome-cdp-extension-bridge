@@ -1,0 +1,5 @@
+[project]
+name = "magic-cdp-python-client"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = ["websocket-client>=1.8.0"]

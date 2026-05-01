@@ -1,6 +1,7 @@
 // JS demo for MagicCDPClient with --direct / --loopback / --debugger modes.
 //
 // Modes select where non-Magic CDP commands ultimately get serviced:
+//   --live        use the running Google Chrome enabled via chrome://inspect.
 //   --direct      client sends standard CDP straight to the upstream WS.
 //   --loopback    client routes *.* through the extension service worker,
 //                 which opens a verified WebSocket back to localhost:9222 and
@@ -17,9 +18,11 @@
 
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 
 import { MagicCDPClient } from "./MagicCDPClient.js";
@@ -34,14 +37,17 @@ const EXTENSION_PATH =
 
 function parseArgs(argv) {
   const flags = new Set(argv.filter((a) => a.startsWith("--")).map((a) => a.slice(2)));
+  const live = flags.has("live");
   const mode = flags.has("debugger")
     ? "debugger"
     : flags.has("direct")
       ? "direct"
       : flags.has("loopback")
         ? "loopback"
-        : "loopback";
-  return { mode };
+        : live
+          ? "direct"
+          : "loopback";
+  return { mode, live };
 }
 
 function clientOptionsFor(mode, cdp_url) {
@@ -67,25 +73,72 @@ function clientOptionsFor(mode, cdp_url) {
   };
 }
 
+function openLiveInspectPage() {
+  if (process.platform === "darwin") {
+    spawn("open", ["chrome://inspect/#remote-debugging"], { detached: true, stdio: "ignore" }).unref();
+  } else {
+    spawn("xdg-open", ["chrome://inspect/#remote-debugging"], { detached: true, stdio: "ignore" }).unref();
+  }
+}
+
+async function waitForLiveCdpUrl() {
+  const startedAt = Date.now();
+  openLiveInspectPage();
+  console.log("opened chrome://inspect/#remote-debugging");
+  console.log("waiting for Chrome to expose DevToolsActivePort; click Allow when Chrome asks.");
+
+  const candidates =
+    process.platform === "darwin"
+      ? [
+          path.join(process.env.HOME || "", "Library/Application Support/Google/Chrome/DevToolsActivePort"),
+          path.join(process.env.HOME || "", "Library/Application Support/Google/Chrome Beta/DevToolsActivePort"),
+        ]
+      : [
+          path.join(process.env.HOME || "", ".config/google-chrome/DevToolsActivePort"),
+          path.join(process.env.HOME || "", ".config/chromium/DevToolsActivePort"),
+        ];
+  while (true) {
+    for (const file of candidates) {
+      try {
+        const info = await stat(file);
+        if (info.mtimeMs < startedAt - 1_000) continue;
+        const [port, browserPath] = (await readFile(file, "utf8"))
+          .trim()
+          .split(/\n/)
+          .map((line) => line.trim());
+        if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
+      } catch {}
+    }
+    await sleep(250);
+  }
+}
+
 async function main() {
-  const { mode } = parseArgs(process.argv.slice(2));
-  console.log(`== mode: ${mode} ==`);
+  const { mode, live } = parseArgs(process.argv.slice(2));
+  console.log(`== mode: ${live ? "live/" : ""}${mode} ==`);
   if (!existsSync(path.join(EXTENSION_PATH, "service_worker.js"))) {
     throw new Error(`Built extension not found at ${EXTENSION_PATH}. Run pnpm run build first.`);
   }
 
-  // --load-extension is a workaround for builds where Extensions.loadUnpacked
-  // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
-  // can drop extraFlags entirely and the injector will install the extension
-  // over CDP itself.
-  const chrome = await launchChrome({
-    headless: process.platform === "linux",
-    noSandbox: process.platform === "linux",
-    extraFlags: [`--load-extension=${EXTENSION_PATH}`],
-  });
-  console.log("upstream cdp:", chrome.wsUrl);
+  let chrome = null;
+  let cdpUrl;
+  if (live) {
+    cdpUrl = await waitForLiveCdpUrl();
+  } else {
+    // --load-extension is a workaround for builds where Extensions.loadUnpacked
+    // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
+    // can drop extraFlags entirely and the injector will install the extension
+    // over CDP itself.
+    chrome = await launchChrome({
+      headless: process.platform === "linux",
+      noSandbox: process.platform === "linux",
+      extraFlags: [`--load-extension=${EXTENSION_PATH}`],
+    });
+    cdpUrl = chrome.wsUrl;
+  }
+  console.log("upstream cdp:", cdpUrl);
 
-  const cdp = new MagicCDPClient(clientOptionsFor(mode, chrome.wsUrl));
+  const cdp = new MagicCDPClient(clientOptionsFor(mode, cdpUrl));
   const events = [];
   cdp.on("Custom.demo", (payload) => {
     console.log("event ->", payload);
@@ -124,6 +177,7 @@ async function main() {
         tabId: z.number().nullable(),
       },
       expression: `async ({ targetId }) => {
+        if (!chrome.debugger?.getTargets) return { tabId: null };
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.id === targetId);
         if (target?.tabId != null) return { tabId: target.tabId };
@@ -180,9 +234,10 @@ async function main() {
     cdp.on("Page.foregroundPageChanged", (event) => console.log("Page.foregroundPageChanged ->", event));
     await cdp.Magic.evaluate({
       expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-          const targets = await chrome.debugger.getTargets();
+          const targets = chrome.debugger?.getTargets ? await chrome.debugger.getTargets() : [];
           const target = targets.find(target => target.type === "page" && target.tabId === tabId);
-          await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? null });
+          const tab = await chrome.tabs.get(tabId).catch(() => null);
+          await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
         })`,
     });
 
@@ -224,7 +279,7 @@ async function main() {
     }
   } finally {
     await cdp.close();
-    await chrome.close();
+    await chrome?.close();
   }
 }
 

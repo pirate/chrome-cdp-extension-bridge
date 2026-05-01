@@ -30,7 +30,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +43,10 @@ import (
 )
 
 var (
-	swURLRE      = regexp.MustCompile(`^chrome-extension://[a-z]+/service_worker\.js$`)
 	extIDFromURL = regexp.MustCompile(`^chrome-extension://([a-z]+)/`)
 )
+
+const magicReadyExpression = `Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)`
 
 func websocketURLFor(endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
@@ -278,6 +282,10 @@ func numberAsInt64(value any) (int64, bool) {
 }
 
 func (c *MagicCDPClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
+	return c.sendFrameTimeout(method, params, sessionID, 10*time.Second)
+}
+
+func (c *MagicCDPClient) sendFrameTimeout(method string, params map[string]any, sessionID string, timeout time.Duration) (map[string]any, error) {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -300,7 +308,7 @@ func (c *MagicCDPClient) sendFrame(method string, params map[string]any, session
 		return nil, err
 	}
 	select {
-	case <-time.After(10 * time.Second):
+	case <-time.After(timeout):
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -314,6 +322,30 @@ func (c *MagicCDPClient) sendFrame(method string, params map[string]any, session
 		}
 		return map[string]any{}, nil
 	}
+}
+
+func (c *MagicCDPClient) magicServerBootstrapExpression() (string, error) {
+	body, err := os.ReadFile(filepath.Join(c.opts.ExtensionPath, "MagicCDPServer.js"))
+	if err != nil {
+		return "", err
+	}
+	source := string(body)
+	start := strings.Index(source, "export function installMagicCDPServer")
+	end := strings.Index(source, "export const MagicCDPServer")
+	if start < 0 || end < start {
+		return "", fmt.Errorf("could not find installMagicCDPServer in MagicCDPServer.js")
+	}
+	installer := strings.Replace(source[start:end], "export function", "function", 1)
+	return fmt.Sprintf(`(() => {
+%s
+const MagicCDP = installMagicCDPServer(globalThis);
+return {
+  ok: Boolean(MagicCDP?.__MagicCDPServerVersion === 1 && MagicCDP?.handleCommand && MagicCDP?.addCustomEvent),
+  extensionId: globalThis.chrome?.runtime?.id ?? null,
+  hasTabs: Boolean(globalThis.chrome?.tabs?.query),
+  hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
+};
+})()`, installer), nil
 }
 
 func (c *MagicCDPClient) reader() {
@@ -389,7 +421,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			ttype, _ := ti["type"].(string)
 			turl, _ := ti["url"].(string)
 			tid, _ := ti["targetId"].(string)
-			if ttype != "service_worker" || !swURLRE.MatchString(turl) {
+			if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
 				continue
 			}
 			already := false
@@ -402,7 +434,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			if already {
 				continue
 			}
-			a, err := c.sendFrame("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
+			a, err := c.sendFrameTimeout("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "", 2*time.Second)
 			if err != nil {
 				continue
 			}
@@ -410,10 +442,10 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			seen = append(seen, attached{TargetID: tid, URL: turl, SessionID: sid})
 		}
 		for _, a := range seen {
-			probe, err := c.sendFrame("Runtime.evaluate", map[string]any{
-				"expression":    "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+			probe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
+				"expression":    magicReadyExpression,
 				"returnByValue": true,
-			}, a.SessionID)
+			}, a.SessionID, 2*time.Second)
 			if err != nil {
 				continue
 			}
@@ -443,15 +475,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 	loadResp, err := c.sendFrame("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
 	if err != nil {
 		if strings.Contains(err.Error(), "Method not available") || strings.Contains(err.Error(), "wasn't found") {
-			return nil, fmt.Errorf(
-				"cannot install MagicCDP extension into the running browser:\n"+
-					"  - no service worker with globalThis.MagicCDP found\n"+
-					"  - Extensions.loadUnpacked unavailable in this Chrome build\n"+
-					"fixes:\n"+
-					"  1. relaunch with --load-extension=%s\n"+
-					"  2. use Chrome Canary, which exposes Extensions.loadUnpacked over CDP",
-				c.opts.ExtensionPath,
-			)
+			return c.borrowExtensionWorker(err.Error())
 		}
 		return nil, err
 	}
@@ -481,7 +505,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 				}
 				sid, _ := a["sessionId"].(string)
 				probe, err := c.sendFrame("Runtime.evaluate", map[string]any{
-					"expression":    "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+					"expression":    magicReadyExpression,
 					"returnByValue": true,
 				}, sid)
 				if err != nil {
@@ -501,4 +525,91 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("Extensions.loadUnpacked installed %s but its SW did not appear", extID)
+}
+
+func (c *MagicCDPClient) borrowExtensionWorker(loadError string) (map[string]any, error) {
+	bootstrap, err := c.magicServerBootstrapExpression()
+	if err != nil {
+		return nil, err
+	}
+	targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
+	if err != nil {
+		return nil, err
+	}
+	targetsRaw, _ := targetsResp["targetInfos"].([]any)
+	var borrowed []map[string]any
+	for _, t := range targetsRaw {
+		ti, _ := t.(map[string]any)
+		ttype, _ := ti["type"].(string)
+		turl, _ := ti["url"].(string)
+		tid, _ := ti["targetId"].(string)
+		if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
+			continue
+		}
+		sessionID := ""
+		a, err := c.sendFrameTimeout("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "", 2*time.Second)
+		if err != nil {
+			continue
+		}
+		sessionID, _ = a["sessionId"].(string)
+		_, _ = c.sendFrameTimeout("Runtime.enable", map[string]any{}, sessionID, 2*time.Second)
+		probe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
+			"expression":                  bootstrap,
+			"awaitPromise":                true,
+			"returnByValue":               true,
+			"allowUnsafeEvalBlockedByCSP": true,
+		}, sessionID, 3*time.Second)
+		if err != nil {
+			_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sessionID}, "")
+			continue
+		}
+		result, _ := probe["result"].(map[string]any)
+		value, _ := result["value"].(map[string]any)
+		if ok, _ := value["ok"].(bool); !ok {
+			_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sessionID}, "")
+			continue
+		}
+		extensionID, _ := value["extensionId"].(string)
+		if extensionID == "" {
+			if m := extIDFromURL.FindStringSubmatch(turl); len(m) > 1 {
+				extensionID = m[1]
+			}
+		}
+		borrowed = append(borrowed, map[string]any{
+			"source":      "borrowed",
+			"extensionId": extensionID,
+			"targetId":    tid,
+			"url":         turl,
+			"sessionId":   sessionID,
+			"hasTabs":     value["hasTabs"],
+			"hasDebugger": value["hasDebugger"],
+		})
+	}
+	sort.SliceStable(borrowed, func(i, j int) bool {
+		iDebugger, _ := borrowed[i]["hasDebugger"].(bool)
+		jDebugger, _ := borrowed[j]["hasDebugger"].(bool)
+		if iDebugger != jDebugger {
+			return iDebugger
+		}
+		iTabs, _ := borrowed[i]["hasTabs"].(bool)
+		jTabs, _ := borrowed[j]["hasTabs"].(bool)
+		return iTabs && !jTabs
+	})
+	if len(borrowed) > 0 {
+		for _, other := range borrowed[1:] {
+			if sid, _ := other["sessionId"].(string); sid != "" {
+				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
+			}
+		}
+		delete(borrowed[0], "hasTabs")
+		delete(borrowed[0], "hasDebugger")
+		return borrowed[0], nil
+	}
+	return nil, fmt.Errorf(
+		"cannot install or borrow MagicCDP in the running browser:\n"+
+			"  - no service worker with globalThis.MagicCDP found\n"+
+			"  - Extensions.loadUnpacked unavailable (%s)\n"+
+			"  - no running chrome-extension:// service worker accepted the MagicCDP bootstrap",
+		loadError,
+	)
 }

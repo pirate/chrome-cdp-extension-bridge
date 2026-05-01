@@ -1,6 +1,7 @@
 // Go demo for MagicCDPClient. Mirrors client/js/demo.js and client/python/demo.py.
 //
 // Modes:
+//   --live       Use the running Google Chrome enabled via chrome://inspect.
 //   --direct     *.* -> direct_cdp on the client.
 //   --loopback   *.* -> service_worker on client; *.* -> loopback_cdp on server. Default.
 //   --debugger   *.* -> service_worker on client; *.* -> chrome_debugger on server.
@@ -92,18 +93,24 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 }
 
 func main() {
-	mode := "loopback"
+	flags := map[string]bool{}
 	for _, a := range os.Args[1:] {
-		switch a {
-		case "--debugger":
-			mode = "debugger"
-		case "--loopback":
-			mode = "loopback"
-		case "--direct":
-			mode = "direct"
+		if strings.HasPrefix(a, "--") {
+			flags[strings.TrimPrefix(a, "--")] = true
 		}
 	}
-	fmt.Printf("== mode: %s ==\n", mode)
+	live := flags["live"]
+	mode := "loopback"
+	if flags["debugger"] {
+		mode = "debugger"
+	} else if flags["direct"] {
+		mode = "direct"
+	} else if flags["loopback"] {
+		mode = "loopback"
+	} else if live {
+		mode = "direct"
+	}
+	fmt.Printf("== mode: %s%s ==\n", map[bool]string{true: "live/", false: ""}[live], mode)
 
 	chromePath := os.Getenv("CHROME_PATH")
 	if chromePath == "" {
@@ -118,34 +125,43 @@ func main() {
 	_, thisFile, _, _ := runtime.Caller(0)
 	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	extensionPath := filepath.Join(root, "dist", "extension")
-	profile, _ := os.MkdirTemp("", "magic-cdp-go.")
-	defer os.RemoveAll(profile)
+	var cdpURL string
+	if live {
+		var err error
+		cdpURL, err = waitForLiveCDPURL()
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		profile, _ := os.MkdirTemp("", "magic-cdp-go.")
+		defer os.RemoveAll(profile)
 
-	chromePort := freePort()
-	chromeFlags := []string{
-		"--disable-gpu",
-		"--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
-		"--no-first-run", "--no-default-browser-check",
-		"--remote-debugging-port=" + strconv.Itoa(chromePort),
-		"--user-data-dir=" + profile,
-		"--load-extension=" + extensionPath,
-		"about:blank",
-	}
-	if runtime.GOOS == "linux" {
-		chromeFlags = append([]string{"--headless=new", "--no-sandbox"}, chromeFlags...)
-	}
-	chrome := exec.Command(chromePath, chromeFlags...)
-	if err := chrome.Start(); err != nil {
-		log.Fatal(err)
-	}
-	defer func() { _ = chrome.Process.Kill(); _, _ = chrome.Process.Wait() }()
+		chromePort := freePort()
+		chromeFlags := []string{
+			"--disable-gpu",
+			"--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
+			"--no-first-run", "--no-default-browser-check",
+			"--remote-debugging-port=" + strconv.Itoa(chromePort),
+			"--user-data-dir=" + profile,
+			"--load-extension=" + extensionPath,
+			"about:blank",
+		}
+		if runtime.GOOS == "linux" {
+			chromeFlags = append([]string{"--headless=new", "--no-sandbox"}, chromeFlags...)
+		}
+		chrome := exec.Command(chromePath, chromeFlags...)
+		if err := chrome.Start(); err != nil {
+			log.Fatal(err)
+		}
+		defer func() { _ = chrome.Process.Kill(); _, _ = chrome.Process.Wait() }()
 
-	httpURL := fmt.Sprintf("http://127.0.0.1:%d", chromePort)
-	version, err := waitForJSON(httpURL+"/json/version", time.Now().Add(10*time.Second))
-	if err != nil {
-		log.Fatal(err)
+		httpURL := fmt.Sprintf("http://127.0.0.1:%d", chromePort)
+		version, err := waitForJSON(httpURL+"/json/version", time.Now().Add(10*time.Second))
+		if err != nil {
+			log.Fatal(err)
+		}
+		cdpURL, _ = version["webSocketDebuggerUrl"].(string)
 	}
-	cdpURL, _ := version["webSocketDebuggerUrl"].(string)
 	fmt.Println("upstream cdp:", cdpURL)
 
 	cdp := New(optionsFor(mode, cdpURL, extensionPath))
@@ -188,6 +204,7 @@ func main() {
 	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
 		"name": "Custom.tabIdFromTargetId",
 		"expression": `async ({ targetId }) => {
+          if (!chrome.debugger?.getTargets) return { tabId: null };
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.id === targetId);
           if (target?.tabId != null) return { tabId: target.tabId };
@@ -229,9 +246,10 @@ func main() {
 	})
 	if _, err := cdp.Send("Magic.evaluate", map[string]any{
 		"expression": `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-            const targets = await chrome.debugger.getTargets();
+            const targets = chrome.debugger?.getTargets ? await chrome.debugger.getTargets() : [];
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
-            await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? null });
+            const tab = await chrome.tabs.get(tabId).catch(() => null);
+            await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
           })`,
 	}); err != nil {
 		log.Fatal(err)
@@ -284,6 +302,49 @@ func main() {
 			fmt.Printf("\n[event] Magic.pong %s\n", string(b))
 		})
 		runRepl(cdp, mode)
+	}
+}
+
+func waitForLiveCDPURL() (string, error) {
+	startedAt := time.Now()
+	if runtime.GOOS == "darwin" {
+		_ = exec.Command("open", "chrome://inspect/#remote-debugging").Start()
+	} else {
+		_ = exec.Command("xdg-open", "chrome://inspect/#remote-debugging").Start()
+	}
+	fmt.Println("opened chrome://inspect/#remote-debugging")
+	fmt.Println("waiting for Chrome to expose DevToolsActivePort; click Allow when Chrome asks.")
+
+	var candidates []string
+	home, _ := os.UserHomeDir()
+	if runtime.GOOS == "darwin" {
+		candidates = []string{
+			filepath.Join(home, "Library", "Application Support", "Google", "Chrome", "DevToolsActivePort"),
+			filepath.Join(home, "Library", "Application Support", "Google", "Chrome Beta", "DevToolsActivePort"),
+		}
+	} else {
+		candidates = []string{
+			filepath.Join(home, ".config", "google-chrome", "DevToolsActivePort"),
+			filepath.Join(home, ".config", "chromium", "DevToolsActivePort"),
+		}
+	}
+
+	for {
+		for _, candidate := range candidates {
+			info, err := os.Stat(candidate)
+			if err != nil || info.ModTime().Before(startedAt.Add(-time.Second)) {
+				continue
+			}
+			body, err := os.ReadFile(candidate)
+			if err != nil {
+				continue
+			}
+			lines := strings.Fields(string(body))
+			if len(lines) >= 2 {
+				return "ws://127.0.0.1:" + lines[0] + lines[1], nil
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 

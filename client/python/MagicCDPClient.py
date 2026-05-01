@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from queue import Queue, Empty
 
 from websocket import create_connection
@@ -27,8 +28,11 @@ from translate import (
     unwrap_response_if_needed,
 )
 
-SW_URL_RE = re.compile(r"^chrome-extension://[a-z]+/service_worker\.js$")
 EXT_ID_FROM_URL_RE = re.compile(r"^chrome-extension://([a-z]+)/")
+MAGIC_READY_EXPRESSION = (
+    "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && "
+    "globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)"
+)
 
 
 def websocket_url_for(endpoint: str) -> str:
@@ -39,6 +43,26 @@ def websocket_url_for(endpoint: str) -> str:
     if not ws_url:
         raise RuntimeError(f"HTTP discovery for {endpoint} returned no webSocketDebuggerUrl")
     return ws_url
+
+
+def magic_server_bootstrap_expression(extension_path: str) -> str:
+    server_path = Path(extension_path) / "MagicCDPServer.js"
+    source = server_path.read_text()
+    start = source.index("export function installMagicCDPServer")
+    end = source.index("export const MagicCDPServer")
+    installer = source[start:end].replace("export function", "function", 1)
+    return (
+        "(() => {\n"
+        f"{installer}\n"
+        "const MagicCDP = installMagicCDPServer(globalThis);\n"
+        "return {\n"
+        "  ok: Boolean(MagicCDP?.__MagicCDPServerVersion === 1 && MagicCDP?.handleCommand && MagicCDP?.addCustomEvent),\n"
+        "  extensionId: globalThis.chrome?.runtime?.id ?? null,\n"
+        "  hasTabs: Boolean(globalThis.chrome?.tabs?.query),\n"
+        "  hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),\n"
+        "};\n"
+        "})()"
+    )
 
 
 class MagicCDPClient:
@@ -229,15 +253,21 @@ class MagicCDPClient:
         while time.time() <= deadline:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] != "service_worker": continue
-                if not SW_URL_RE.match(t["url"]): continue
+                if not t["url"].startswith("chrome-extension://"): continue
                 if any(a["targetId"] == t["targetId"] for a in attached): continue
-                a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
+                try:
+                    a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True}, timeout=2)
+                except Exception:
+                    continue
                 attached.append({"targetId": t["targetId"], "url": t["url"], "sessionId": a["sessionId"]})
             for a in attached:
-                probe = self._send_frame("Runtime.evaluate", {
-                    "expression": "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
-                    "returnByValue": True,
-                }, a["sessionId"])
+                try:
+                    probe = self._send_frame("Runtime.evaluate", {
+                        "expression": MAGIC_READY_EXPRESSION,
+                        "returnByValue": True,
+                    }, a["sessionId"], timeout=2)
+                except Exception:
+                    continue
                 if (probe.get("result") or {}).get("value") is True:
                     for o in attached:
                         if o["sessionId"] != a["sessionId"]:
@@ -260,14 +290,7 @@ class MagicCDPClient:
             extension_id = r.get("id") or r.get("extensionId")
         except RuntimeError as e:
             if "Method not available" in str(e) or "wasn't found" in str(e):
-                raise RuntimeError(
-                    f"Cannot install MagicCDP extension into the running browser.\n"
-                    f"  - No existing service worker with globalThis.MagicCDP was found.\n"
-                    f"  - Extensions.loadUnpacked is unavailable in this Chrome build.\n"
-                    f"Fixes:\n"
-                    f"  1. Relaunch the browser with --load-extension={self.extension_path}\n"
-                    f"  2. Use Chrome Canary, which exposes Extensions.loadUnpacked over CDP.\n"
-                ) from None
+                return self._borrow_extension_worker(str(e))
             raise
         if not extension_id:
             raise RuntimeError(f"Extensions.loadUnpacked returned no id: {r}")
@@ -280,7 +303,7 @@ class MagicCDPClient:
                 if t["type"] == "service_worker" and t["url"] == sw_url:
                     a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
                     probe = self._send_frame("Runtime.evaluate", {
-                        "expression": "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+                        "expression": MAGIC_READY_EXPRESSION,
                         "returnByValue": True,
                     }, a["sessionId"])
                     if (probe.get("result") or {}).get("value") is True:
@@ -291,3 +314,55 @@ class MagicCDPClient:
                     self._send_frame("Target.detachFromTarget", {"sessionId": a["sessionId"]})
             time.sleep(0.1)
         raise RuntimeError(f"Extensions.loadUnpacked installed {extension_id} but its SW did not appear")
+
+    def _borrow_extension_worker(self, load_error):
+        borrowed = []
+        bootstrap = magic_server_bootstrap_expression(self.extension_path)
+        for t in (self._send_frame("Target.getTargets")["targetInfos"]):
+            if t["type"] != "service_worker": continue
+            if not t["url"].startswith("chrome-extension://"): continue
+            session_id = None
+            try:
+                a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True}, timeout=2)
+                session_id = a["sessionId"]
+                try: self._send_frame("Runtime.enable", {}, session_id, timeout=2)
+                except Exception: pass
+                result = self._send_frame("Runtime.evaluate", {
+                    "expression": bootstrap,
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                    "allowUnsafeEvalBlockedByCSP": True,
+                }, session_id, timeout=3)
+                value = (result.get("result") or {}).get("value") or {}
+                if value.get("ok"):
+                    m = EXT_ID_FROM_URL_RE.match(t["url"])
+                    borrowed.append({
+                        "source": "borrowed",
+                        "extensionId": value.get("extensionId") or (m.group(1) if m else None),
+                        "targetId": t["targetId"],
+                        "url": t["url"],
+                        "sessionId": session_id,
+                        "hasTabs": bool(value.get("hasTabs")),
+                        "hasDebugger": bool(value.get("hasDebugger")),
+                    })
+                else:
+                    self._send_frame("Target.detachFromTarget", {"sessionId": session_id})
+            except Exception:
+                if session_id:
+                    try: self._send_frame("Target.detachFromTarget", {"sessionId": session_id})
+                    except Exception: pass
+        borrowed.sort(key=lambda item: (item.get("hasDebugger", False), item.get("hasTabs", False)), reverse=True)
+        if borrowed:
+            for other in borrowed[1:]:
+                try: self._send_frame("Target.detachFromTarget", {"sessionId": other["sessionId"]})
+                except Exception: pass
+            selected = borrowed[0]
+            selected.pop("hasTabs", None)
+            selected.pop("hasDebugger", None)
+            return selected
+        raise RuntimeError(
+            "Cannot install or borrow MagicCDP in the running browser.\n"
+            "  - No existing service worker with globalThis.MagicCDP was found.\n"
+            f"  - Extensions.loadUnpacked is unavailable ({load_error}).\n"
+            "  - No running chrome-extension:// service worker accepted the MagicCDP bootstrap."
+        )
