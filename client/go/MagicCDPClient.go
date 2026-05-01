@@ -112,6 +112,9 @@ func New(opts Options) *MagicCDPClient {
 		}
 		opts.Routes = merged
 	}
+	if opts.Server == nil {
+		opts.Server = &ServerConfig{}
+	}
 	return &MagicCDPClient{
 		opts:     opts,
 		pending:  map[int64]chan map[string]any{},
@@ -126,7 +129,9 @@ func (c *MagicCDPClient) Connect() error {
 		return err
 	}
 	c.opts.CDPURL = wsURL
-	if c.opts.Server != nil && (c.opts.Server.LoopbackCDPURL == inputCDPURL || c.opts.Server.LoopbackCDPURL == wsURL) {
+	if c.opts.Server != nil && c.opts.Server.LoopbackCDPURL == "" {
+		c.opts.Server.LoopbackCDPURL = wsURL
+	} else if c.opts.Server != nil && (c.opts.Server.LoopbackCDPURL == inputCDPURL || c.opts.Server.LoopbackCDPURL == wsURL) {
 		c.opts.Server.LoopbackCDPURL = wsURL
 	}
 
@@ -409,7 +414,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 	type attached struct{ TargetID, URL, SessionID string }
 	var seen []attached
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline.Add(time.Millisecond)) {
 		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 		if err != nil {

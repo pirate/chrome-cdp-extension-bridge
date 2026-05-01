@@ -33,6 +33,7 @@ MAGIC_READY_EXPRESSION = (
     "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && "
     "globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)"
 )
+DEFAULT_SERVER = object()
 
 
 def websocket_url_for(endpoint: str) -> str:
@@ -66,11 +67,11 @@ def magic_server_bootstrap_expression(extension_path: str) -> str:
 
 
 class MagicCDPClient:
-    def __init__(self, cdp_url, extension_path, routes=None, server=None):
+    def __init__(self, cdp_url, extension_path, routes=None, server=DEFAULT_SERVER):
         self.cdp_url = cdp_url
         self.extension_path = extension_path
         self.routes = {**DEFAULT_CLIENT_ROUTES, **(routes or {})}
-        self.server = server
+        self.server = {} if server is DEFAULT_SERVER else server
 
         self.extension_id = None
         self.ext_target_id = None
@@ -88,7 +89,9 @@ class MagicCDPClient:
     def connect(self):
         input_cdp_url = self.cdp_url
         self.cdp_url = websocket_url_for(self.cdp_url)
-        if self.server and self.server.get("loopback_cdp_url"):
+        if self.server is not None and "loopback_cdp_url" not in self.server:
+            self.server = {**self.server, "loopback_cdp_url": self.cdp_url}
+        elif self.server and self.server.get("loopback_cdp_url"):
             loopback_url = self.server["loopback_cdp_url"]
             if loopback_url == input_cdp_url or loopback_url == self.cdp_url:
                 self.server = {**self.server, "loopback_cdp_url": self.cdp_url}
@@ -103,7 +106,7 @@ class MagicCDPClient:
         self._send_frame("Runtime.enable", {}, self.ext_session_id)
         self._send_frame("Runtime.addBinding", {"name": binding_name_for("Magic.pong")}, self.ext_session_id)
 
-        if self.server:
+        if self.server is not None:
             self._send_raw(wrap_command_if_needed(
                 "Magic.configure",
                 self.server,
@@ -246,10 +249,10 @@ class MagicCDPClient:
                 done.put({"error": {"message": "connection closed"}})
 
     def _ensure_extension(self):
-        # 1. Discover an existing MagicCDP service worker. Poll for ~2s because
+        # 1. Discover an existing MagicCDP service worker. Poll briefly because
         # extensions loaded with --load-extension take a moment to spin up.
         attached = []
-        deadline = time.time() + 2.0
+        deadline = time.time() + 10.0
         while time.time() <= deadline:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] != "service_worker": continue

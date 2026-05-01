@@ -8,7 +8,7 @@ BINDING_PREFIX = "__MagicCDP_"
 DEFAULT_CLIENT_ROUTES = {
     "Magic.*": "service_worker",
     "Custom.*": "service_worker",
-    "*.*": "direct_cdp",
+    "*.*": "service_worker",
 }
 
 

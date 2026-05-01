@@ -12,9 +12,9 @@
 //                 tab. (*.* -> service_worker on client, *.* -> chrome_debugger
 //                 on server.)
 //
-// All three modes exercise the same surface: Browser.getVersion (standard),
-// Magic.evaluate, Magic.addCustomEvent, Magic.addCustomCommand, Custom.echo
-// + Custom.demo event roundtrip.
+// All three modes exercise the same surface: raw Browser.getVersion, raw
+// Target.targetCreated event handling, Magic.evaluate, Custom.* commands,
+// Custom.* events, and response middleware.
 
 import path from "node:path";
 import { existsSync } from "node:fs";
@@ -27,7 +27,6 @@ import { z } from "zod";
 
 import { MagicCDPClient } from "./MagicCDPClient.js";
 import { launchChrome } from "../../bridge/launcher.js";
-import { cdp as protocol } from "../../types/cdp.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH =
@@ -51,17 +50,32 @@ function parseArgs(argv) {
 }
 
 function clientOptionsFor(mode, cdp_url) {
+  const directNormalEventRoutes = {
+    "Target.setDiscoverTargets": "direct_cdp",
+    "Target.createTarget": "direct_cdp",
+    "Target.activateTarget": "direct_cdp",
+  };
   if (mode === "direct") {
     return {
       cdp_url,
       extension_path: EXTENSION_PATH,
-      routes: { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp" },
+      routes: {
+        "Magic.*": "service_worker",
+        "Custom.*": "service_worker",
+        "*.*": "direct_cdp",
+        ...directNormalEventRoutes,
+      },
     };
   }
   return {
     cdp_url,
     extension_path: EXTENSION_PATH,
-    routes: { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker" },
+    routes: {
+      "Magic.*": "service_worker",
+      "Custom.*": "service_worker",
+      "*.*": "service_worker",
+      ...directNormalEventRoutes,
+    },
     server: {
       routes: {
         "Magic.*": "service_worker",
@@ -139,10 +153,11 @@ async function main() {
   console.log("upstream cdp:", cdpUrl);
 
   const cdp = new MagicCDPClient(clientOptionsFor(mode, cdpUrl));
-  const events = [];
-  cdp.on("Custom.demo", (payload) => {
-    console.log("event ->", payload);
-    events.push(payload);
+  const foregroundEvents = [];
+  const targetCreatedEvents = [];
+  cdp.on(cdp.Target.targetCreated, (payload) => {
+    console.log("Target.targetCreated ->", payload?.targetInfo?.targetId);
+    targetCreatedEvents.push(payload);
   });
 
   try {
@@ -161,29 +176,40 @@ async function main() {
       console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")");
     }
 
-    console.log(
-      "Magic.evaluate     ->",
-      await cdp.Magic.evaluate({
-        expression: "({ extensionId: chrome.runtime.id })",
-      }),
-    );
+    const magicEval = (await cdp.Magic.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
+      extensionId?: string;
+    };
+    if (magicEval.extensionId !== cdp.extension_id)
+      throw new Error(`unexpected Magic.evaluate result ${JSON.stringify(magicEval)}`);
+    console.log("Magic.evaluate     ->", magicEval);
 
     await cdp.Magic.addCustomCommand({
-      name: "Custom.tabIdFromTargetId",
+      name: "Custom.TabIdFromTargetId",
       paramsSchema: {
-        targetId: protocol.types.zod.Target.TargetID,
+        targetId: cdp.types.zod.Target.TargetID,
       },
       resultSchema: {
         tabId: z.number().nullable(),
       },
       expression: `async ({ targetId }) => {
-        if (!chrome.debugger?.getTargets) return { tabId: null };
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.id === targetId);
-        if (target?.tabId != null) return { tabId: target.tabId };
-        const tabs = await chrome.tabs.query({});
-        const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
-        return { tabId: tab?.id ?? null };
+        return { tabId: target?.tabId ?? null };
+      }`,
+    });
+    await cdp.Magic.addCustomCommand({
+      name: "Custom.targetIdFromTabId",
+      paramsSchema: {
+        tabId: z.number(),
+      },
+      resultSchema: {
+        targetId: cdp.types.zod.Target.TargetID.nullable(),
+        tabId: z.number().optional(),
+      },
+      expression: `async ({ tabId }) => {
+        const targets = await chrome.debugger.getTargets();
+        const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+        return { targetId: target?.id ?? null };
       }`,
     });
     await cdp.Magic.addMiddleware({
@@ -195,7 +221,7 @@ async function main() {
           if (!value || typeof value !== "object" || seen.has(value)) return;
           seen.add(value);
           if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
-            const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+            const { tabId } = await cdp.send("Custom.TabIdFromTargetId", { targetId: value.targetId });
             if (tabId != null) value.tabId = tabId;
           }
           for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
@@ -213,7 +239,7 @@ async function main() {
           if (!value || typeof value !== "object" || seen.has(value)) return;
           seen.add(value);
           if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
-            const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+            const { tabId } = await cdp.send("Custom.TabIdFromTargetId", { targetId: value.targetId });
             if (tabId != null) value.tabId = tabId;
           }
           for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
@@ -223,50 +249,67 @@ async function main() {
       }`,
     });
 
-    await cdp.Magic.addCustomEvent({
-      name: "Page.foregroundPageChanged",
-      eventSchema: {
-        targetId: protocol.types.zod.Target.TargetID.nullable(),
-        url: z.string().nullable(),
-        tabId: z.number().nullable().optional(),
-      },
+    const ForegroundTargetChanged = z
+      .object({
+        targetId: cdp.types.zod.Target.TargetID.nullable(),
+        tabId: z.number(),
+        url: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .meta({ id: "Custom.foregroundTargetChanged" });
+    await cdp.Magic.addCustomEvent({ name: ForegroundTargetChanged, eventSchema: ForegroundTargetChanged });
+    cdp.on(ForegroundTargetChanged, (event) => {
+      console.log("Custom.foregroundTargetChanged ->", event);
+      foregroundEvents.push(event);
     });
-    cdp.on("Page.foregroundPageChanged", (event) => console.log("Page.foregroundPageChanged ->", event));
     await cdp.Magic.evaluate({
       expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-          const targets = chrome.debugger?.getTargets ? await chrome.debugger.getTargets() : [];
+          const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.type === "page" && target.tabId === tabId);
           const tab = await chrome.tabs.get(tabId).catch(() => null);
-          await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
+          await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
         })`,
     });
 
-    await cdp.Magic.addCustomEvent({
-      name: "Custom.demo",
-      eventSchema: {
-        echo: z.string(),
-      },
-    });
-    await cdp.Magic.addCustomCommand({
-      name: "Custom.echo",
-      paramsSchema: {
-        value: z.string(),
-      },
-      resultSchema: {
-        echoed: z.string(),
-      },
-      expression:
-        "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
-    });
+    await cdp.Target.setDiscoverTargets({ discover: true });
+    const createdTarget = await cdp.Target.createTarget({ url: "https://example.com" });
+    const targetDeadline = Date.now() + 3000;
+    while (
+      !targetCreatedEvents.some((event) => event?.targetInfo?.targetId === createdTarget.targetId) &&
+      Date.now() < targetDeadline
+    ) {
+      await sleep(20);
+    }
+    if (!targetCreatedEvents.some((event) => event?.targetInfo?.targetId === createdTarget.targetId)) {
+      throw new Error(`expected Target.targetCreated for ${createdTarget.targetId}`);
+    }
+    console.log("normal event matched ->", createdTarget.targetId);
 
-    console.log("Custom.echo        ->", await cdp.send("Custom.echo", { value: `hello-from-js-${mode}` }));
-    console.log("Custom.echo        ->", await cdp.send("Custom.echo", { value: `second-${mode}` }));
+    await cdp.Target.activateTarget({ targetId: createdTarget.targetId });
+    const foregroundDeadline = Date.now() + 3000;
+    while (
+      !foregroundEvents.some((event) => event.targetId === createdTarget.targetId) &&
+      Date.now() < foregroundDeadline
+    ) {
+      await sleep(20);
+    }
+    const foreground = foregroundEvents.find((event) => event.targetId === createdTarget.targetId);
+    if (!foreground) throw new Error(`expected Custom.foregroundTargetChanged for ${createdTarget.targetId}`);
 
-    const deadline = Date.now() + 3000;
-    while (events.length < 2 && Date.now() < deadline) await sleep(20);
-    if (events.length < 2) throw new Error(`expected >=2 Custom.demo events, got ${events.length}`);
+    const tabFromTarget = await cdp.send("Custom.TabIdFromTargetId", { targetId: createdTarget.targetId });
+    if (tabFromTarget.tabId !== foreground.tabId)
+      throw new Error(`unexpected Custom.TabIdFromTargetId result ${JSON.stringify(tabFromTarget)}`);
+    console.log("Custom.TabIdFromTargetId ->", tabFromTarget);
 
-    console.log(`\nSUCCESS (${mode}): ${events.length} events`);
+    const targetFromTab = await cdp.send("Custom.targetIdFromTabId", { tabId: foreground.tabId });
+    if (targetFromTab.targetId !== createdTarget.targetId || targetFromTab.tabId !== foreground.tabId) {
+      throw new Error(`unexpected Custom.targetIdFromTabId/middleware result ${JSON.stringify(targetFromTab)}`);
+    }
+    console.log("Custom.targetIdFromTabId ->", targetFromTab);
+
+    console.log(
+      `\nSUCCESS (${mode}): normal command, normal event, custom commands, custom event, and middleware all passed`,
+    );
 
     // Drop into an interactive prompt when stdin is a TTY. Lets you poke at
     // the live browser: type Domain.method({...JS object literal...}) and
@@ -288,7 +331,7 @@ async function runRepl(cdp, mode) {
   console.log("Enter commands as Domain.method({...}). Examples:");
   console.log("  Browser.getVersion({})");
   console.log('  Magic.evaluate({expression: "chrome.tabs.query({active: true})"})');
-  console.log("  Custom.echo({value: 'hi'})");
+  console.log("  Custom.TabIdFromTargetId({targetId: '...'})");
   console.log("Type exit or quit to disconnect (browser keeps running).");
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });

@@ -112,7 +112,7 @@ export class MagicCDPClient extends EventEmitter {
     cdp_url = null,
     extension_path = DEFAULT_EXTENSION_PATH,
     routes = DEFAULT_CLIENT_ROUTES,
-    server = null,
+    server = {},
     launch_options = {},
   }: ClientOptions = {}) {
     super();
@@ -158,7 +158,9 @@ export class MagicCDPClient extends EventEmitter {
     }
     const inputCdpUrl = this.cdp_url;
     this.cdp_url = await webSocketUrlFor(this.cdp_url);
-    if (this.server?.loopback_cdp_url) {
+    if (this.server !== null && !Object.hasOwn(this.server, "loopback_cdp_url")) {
+      this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
+    } else if (this.server?.loopback_cdp_url) {
       const loopbackUrl = this.server.loopback_cdp_url;
       if (loopbackUrl === inputCdpUrl || loopbackUrl === this.cdp_url) {
         this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
@@ -211,7 +213,7 @@ export class MagicCDPClient extends EventEmitter {
     await this._sendFrame("Runtime.addBinding", { name: bindingNameFor("Magic.pong") }, this.ext_session_id);
     this.event_schemas.set("Magic.pong", Magic.PongEvent);
 
-    if (this.server) {
+    if (this.server !== null) {
       await this._sendRaw(
         wrapCommandIfNeeded("Magic.configure", this.server, {
           routes: this.routes,

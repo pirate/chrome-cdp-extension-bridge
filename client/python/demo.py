@@ -60,16 +60,21 @@ def wait_for_url(url, timeout_s=8.0):
 
 
 def client_options_for(mode, cdp_url):
+    direct_normal_event_routes = {
+        "Target.setDiscoverTargets": "direct_cdp",
+        "Target.createTarget": "direct_cdp",
+        "Target.activateTarget": "direct_cdp",
+    }
     if mode == "direct":
         return {
             "cdp_url": cdp_url,
             "extension_path": str(EXTENSION_PATH),
-            "routes": {"Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp"},
+            "routes": {"Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp", **direct_normal_event_routes},
         }
     return {
         "cdp_url": cdp_url,
         "extension_path": str(EXTENSION_PATH),
-        "routes": {"Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker"},
+        "routes": {"Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker", **direct_normal_event_routes},
         "server": {
             "routes": {
                 "Magic.*": "service_worker",
@@ -137,14 +142,21 @@ def main():
         print(f"upstream cdp: {cdp_url}")
 
         cdp = MagicCDPClient(**client_options_for(mode, cdp_url))
-        events = []
+        foreground_events = []
+        target_created_events = []
         events_lock = threading.Lock()
 
-        def on_demo(payload):
-            print(f"event -> {payload}")
+        def on_target_created(payload, *_):
+            print(f"Target.targetCreated -> {payload.get('targetInfo', {}).get('targetId')}")
             with events_lock:
-                events.append(payload)
-        cdp.on("Custom.demo", on_demo)
+                target_created_events.append(payload)
+
+        def on_foreground_changed(payload, *_):
+            print(f"Custom.foregroundTargetChanged -> {payload}")
+            with events_lock:
+                foreground_events.append(payload)
+
+        cdp.on("Target.targetCreated", on_target_created)
 
         cdp.connect()
         print(f"connected; ext {cdp.extension_id} session {cdp.ext_session_id}")
@@ -153,18 +165,25 @@ def main():
         try: print(f"Browser.getVersion -> {cdp.send('Browser.getVersion')}")
         except Exception as e: print(f"Browser.getVersion -> (rejected by route: {str(e).splitlines()[0]} )")
 
-        print(f"Magic.evaluate     -> {cdp.send('Magic.evaluate', {'expression': '({ extensionId: chrome.runtime.id })'})}")
+        magic_eval = cdp.send("Magic.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"})
+        if magic_eval.get("extensionId") != cdp.extension_id:
+            raise RuntimeError(f"unexpected Magic.evaluate result {magic_eval}")
+        print(f"Magic.evaluate     -> {magic_eval}")
 
         cdp.send("Magic.addCustomCommand", {
-            "name": "Custom.tabIdFromTargetId",
+            "name": "Custom.TabIdFromTargetId",
             "expression": '''async ({ targetId }) => {
-              if (!chrome.debugger?.getTargets) return { tabId: null };
               const targets = await chrome.debugger.getTargets();
               const target = targets.find(target => target.id === targetId);
-              if (target?.tabId != null) return { tabId: target.tabId };
-              const tabs = await chrome.tabs.query({});
-              const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
-              return { tabId: tab?.id ?? null };
+              return { tabId: target?.tabId ?? null };
+            }''',
+        })
+        cdp.send("Magic.addCustomCommand", {
+            "name": "Custom.targetIdFromTabId",
+            "expression": '''async ({ tabId }) => {
+              const targets = await chrome.debugger.getTargets();
+              const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+              return { targetId: target?.id ?? null };
             }''',
         })
         for phase in ("response", "event"):
@@ -177,7 +196,7 @@ def main():
                     if (!value || typeof value !== "object" || seen.has(value)) return;
                     seen.add(value);
                     if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
-                      const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+                      const { tabId } = await cdp.send("Custom.TabIdFromTargetId", { targetId: value.targetId });
                       if (tabId != null) value.tabId = tabId;
                     }
                     for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
@@ -187,32 +206,53 @@ def main():
                 }''',
             })
 
-        cdp.send("Magic.addCustomEvent", {"name": "Page.foregroundPageChanged"})
-        cdp.on("Page.foregroundPageChanged", lambda e: print(f"Page.foregroundPageChanged -> {e}"))
+        cdp.send("Magic.addCustomEvent", {"name": "Custom.foregroundTargetChanged"})
+        cdp.on("Custom.foregroundTargetChanged", on_foreground_changed)
         cdp.send("Magic.evaluate", {"expression": '''chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-            const targets = chrome.debugger?.getTargets ? await chrome.debugger.getTargets() : [];
+            const targets = await chrome.debugger.getTargets();
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
             const tab = await chrome.tabs.get(tabId).catch(() => null);
-            await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
+            await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
           })'''})
 
-        cdp.send("Magic.addCustomEvent", {"name": "Custom.demo"})
-        cdp.send("Magic.addCustomCommand", {
-            "name": "Custom.echo",
-            "expression": "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
-        })
-        print(f"Custom.echo        -> {cdp.send('Custom.echo', {'value': f'hello-from-py-{mode}'})}")
-        print(f"Custom.echo        -> {cdp.send('Custom.echo', {'value': f'second-{mode}'})}")
-
+        cdp.send("Target.setDiscoverTargets", {"discover": True})
+        created_target = cdp.send("Target.createTarget", {"url": "https://example.com"})
+        created_target_id = created_target.get("targetId")
+        if not created_target_id:
+            raise RuntimeError(f"Target.createTarget returned no targetId: {created_target}")
         deadline = time.monotonic() + 3.0
         while True:
             with events_lock:
-                if len(events) >= 2: break
-            if time.monotonic() >= deadline: break
+                matched_target_event = next((event for event in target_created_events if event.get("targetInfo", {}).get("targetId") == created_target_id), None)
+            if matched_target_event or time.monotonic() >= deadline:
+                break
             time.sleep(0.02)
-        if len(events) < 2:
-            raise RuntimeError(f"expected >=2 Custom.demo events, got {len(events)}")
-        print(f"\nSUCCESS ({mode}): {len(events)} events")
+        if not matched_target_event:
+            raise RuntimeError(f"expected Target.targetCreated for {created_target_id}")
+        print(f"normal event matched -> {created_target_id}")
+
+        cdp.send("Target.activateTarget", {"targetId": created_target_id})
+        deadline = time.monotonic() + 3.0
+        while True:
+            with events_lock:
+                foreground = next((event for event in foreground_events if event.get("targetId") == created_target_id), None)
+            if foreground or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        if not foreground:
+            raise RuntimeError(f"expected Custom.foregroundTargetChanged for {created_target_id}")
+
+        tab_from_target = cdp.send("Custom.TabIdFromTargetId", {"targetId": created_target_id})
+        if tab_from_target.get("tabId") != foreground.get("tabId"):
+            raise RuntimeError(f"unexpected Custom.TabIdFromTargetId result {tab_from_target}")
+        print(f"Custom.TabIdFromTargetId -> {tab_from_target}")
+
+        target_from_tab = cdp.send("Custom.targetIdFromTabId", {"tabId": foreground["tabId"]})
+        if target_from_tab.get("targetId") != created_target_id or target_from_tab.get("tabId") != foreground.get("tabId"):
+            raise RuntimeError(f"unexpected Custom.targetIdFromTabId/middleware result {target_from_tab}")
+        print(f"Custom.targetIdFromTabId -> {target_from_tab}")
+
+        print(f"\nSUCCESS ({mode}): normal command, normal event, custom commands, custom event, and middleware all passed")
 
         # TTY-only: drop into a REPL where you can send live commands and
         # watch events as they print. Skip when run non-interactively so the
@@ -240,7 +280,7 @@ def run_repl(cdp, mode):
     print("Enter commands as Domain.method({...JSON params...}). Examples:")
     print('  Browser.getVersion({})')
     print('  Magic.evaluate({"expression": "chrome.tabs.query({active: true})"})')
-    print('  Custom.echo({"value": "hi"})')
+    print('  Custom.TabIdFromTargetId({"targetId": "..."})')
     print("Type exit or quit to disconnect (browser keeps running).")
     cmd_re = re.compile(r"^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$")
     while True:

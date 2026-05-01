@@ -55,15 +55,26 @@ func waitForJSON(url string, deadline time.Time) (map[string]any, error) {
 }
 
 func optionsFor(mode, cdpURL, extensionPath string) Options {
+	directNormalEventRoutes := map[string]string{
+		"Target.setDiscoverTargets": "direct_cdp",
+		"Target.createTarget":       "direct_cdp",
+		"Target.activateTarget":     "direct_cdp",
+	}
+	routes := func(base map[string]string) map[string]string {
+		for k, v := range directNormalEventRoutes {
+			base[k] = v
+		}
+		return base
+	}
 	if mode == "direct" {
 		return Options{
 			CDPURL:        cdpURL,
 			ExtensionPath: extensionPath,
-			Routes: map[string]string{
+			Routes: routes(map[string]string{
 				"Magic.*":  "service_worker",
 				"Custom.*": "service_worker",
 				"*.*":      "direct_cdp",
-			},
+			}),
 		}
 	}
 	serverRoute := "chrome_debugger"
@@ -83,11 +94,11 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 	return Options{
 		CDPURL:        cdpURL,
 		ExtensionPath: extensionPath,
-		Routes: map[string]string{
+		Routes: routes(map[string]string{
 			"Magic.*":  "service_worker",
 			"Custom.*": "service_worker",
 			"*.*":      "service_worker",
-		},
+		}),
 		Server: server,
 	}
 }
@@ -166,13 +177,16 @@ func main() {
 
 	cdp := New(optionsFor(mode, cdpURL, extensionPath))
 	var (
-		eventsMu sync.Mutex
-		events   []any
+		eventsMu            sync.Mutex
+		targetCreatedEvents []map[string]any
+		foregroundEvents    []map[string]any
 	)
-	cdp.On("Custom.demo", func(data any) {
-		fmt.Printf("event -> %v\n", data)
+	cdp.On("Target.targetCreated", func(data any) {
+		event, _ := data.(map[string]any)
+		targetInfo, _ := event["targetInfo"].(map[string]any)
+		fmt.Printf("Target.targetCreated -> %v\n", targetInfo["targetId"])
 		eventsMu.Lock()
-		events = append(events, data)
+		targetCreatedEvents = append(targetCreatedEvents, event)
 		eventsMu.Unlock()
 	})
 
@@ -197,20 +211,30 @@ func main() {
 	}); err != nil {
 		log.Fatalf("Magic.evaluate: %v", err)
 	} else {
+		magicEval, _ := r.(map[string]any)
+		if magicEval["extensionId"] != cdp.ExtensionID {
+			log.Fatalf("unexpected Magic.evaluate result: %v", magicEval)
+		}
 		b, _ := json.Marshal(r)
 		fmt.Println("Magic.evaluate     ->", string(b))
 	}
 
 	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
-		"name": "Custom.tabIdFromTargetId",
+		"name": "Custom.TabIdFromTargetId",
 		"expression": `async ({ targetId }) => {
-          if (!chrome.debugger?.getTargets) return { tabId: null };
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.id === targetId);
-          if (target?.tabId != null) return { tabId: target.tabId };
-          const tabs = await chrome.tabs.query({});
-          const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
-          return { tabId: tab?.id ?? null };
+          return { tabId: target?.tabId ?? null };
+        }`,
+	}); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
+		"name": "Custom.targetIdFromTabId",
+		"expression": `async ({ tabId }) => {
+          const targets = await chrome.debugger.getTargets();
+          const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+          return { targetId: target?.id ?? null };
         }`,
 	}); err != nil {
 		log.Fatal(err)
@@ -225,7 +249,7 @@ func main() {
                 if (!value || typeof value !== "object" || seen.has(value)) return;
                 seen.add(value);
                 if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
-                  const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+                  const { tabId } = await cdp.send("Custom.TabIdFromTargetId", { targetId: value.targetId });
                   if (tabId != null) value.tabId = tabId;
                 }
                 for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
@@ -238,59 +262,110 @@ func main() {
 		}
 	}
 
-	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Page.foregroundPageChanged"}); err != nil {
+	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}); err != nil {
 		log.Fatal(err)
 	}
-	cdp.On("Page.foregroundPageChanged", func(p any) {
-		fmt.Printf("Page.foregroundPageChanged -> %v\n", p)
+	cdp.On("Custom.foregroundTargetChanged", func(p any) {
+		event, _ := p.(map[string]any)
+		fmt.Printf("Custom.foregroundTargetChanged -> %v\n", event)
+		eventsMu.Lock()
+		foregroundEvents = append(foregroundEvents, event)
+		eventsMu.Unlock()
 	})
 	if _, err := cdp.Send("Magic.evaluate", map[string]any{
 		"expression": `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-            const targets = chrome.debugger?.getTargets ? await chrome.debugger.getTargets() : [];
+            const targets = await chrome.debugger.getTargets();
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
             const tab = await chrome.tabs.get(tabId).catch(() => null);
-            await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
+            await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
           })`,
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Custom.demo"}); err != nil {
+	if _, err := cdp.Send("Target.setDiscoverTargets", map[string]any{"discover": true}); err != nil {
 		log.Fatal(err)
 	}
-	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
-		"name":       "Custom.echo",
-		"expression": "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
-	}); err != nil {
-		log.Fatal(err)
+	createdRaw, err := cdp.Send("Target.createTarget", map[string]any{"url": "https://example.com"})
+	if err != nil {
+		log.Fatalf("Target.createTarget: %v", err)
 	}
-
-	for _, v := range []string{"hello-from-go-" + mode, "second-" + mode} {
-		r, err := cdp.Send("Custom.echo", map[string]any{"value": v})
-		if err != nil {
-			log.Fatalf("Custom.echo %s: %v", v, err)
-		}
-		b, _ := json.Marshal(r)
-		fmt.Println("Custom.echo        ->", string(b))
+	createdTarget, _ := createdRaw.(map[string]any)
+	createdTargetID, _ := createdTarget["targetId"].(string)
+	if createdTargetID == "" {
+		log.Fatalf("Target.createTarget returned no targetId: %v", createdTarget)
 	}
-
 	deadline := time.Now().Add(3 * time.Second)
+	var matchedTargetEvent map[string]any
 	for time.Now().Before(deadline) {
 		eventsMu.Lock()
-		n := len(events)
+		for _, event := range targetCreatedEvents {
+			targetInfo, _ := event["targetInfo"].(map[string]any)
+			if targetInfo["targetId"] == createdTargetID {
+				matchedTargetEvent = event
+				break
+			}
+		}
 		eventsMu.Unlock()
-		if n >= 2 {
+		if matchedTargetEvent != nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	eventsMu.Lock()
-	got := len(events)
-	eventsMu.Unlock()
-	if got < 2 {
-		log.Fatalf("expected >=2 Custom.demo events, got %d", got)
+	if matchedTargetEvent == nil {
+		log.Fatalf("expected Target.targetCreated for %s", createdTargetID)
 	}
-	fmt.Printf("\nSUCCESS (%s): %d events\n", mode, got)
+	fmt.Println("normal event matched ->", createdTargetID)
+
+	if _, err := cdp.Send("Target.activateTarget", map[string]any{"targetId": createdTargetID}); err != nil {
+		log.Fatalf("Target.activateTarget: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	var foreground map[string]any
+	for time.Now().Before(deadline) {
+		eventsMu.Lock()
+		for _, event := range foregroundEvents {
+			if event["targetId"] == createdTargetID {
+				foreground = event
+				break
+			}
+		}
+		eventsMu.Unlock()
+		if foreground != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if foreground == nil {
+		log.Fatalf("expected Custom.foregroundTargetChanged for %s", createdTargetID)
+	}
+
+	tabFromTargetRaw, err := cdp.Send("Custom.TabIdFromTargetId", map[string]any{"targetId": createdTargetID})
+	if err != nil {
+		log.Fatalf("Custom.TabIdFromTargetId: %v", err)
+	}
+	tabFromTarget, _ := tabFromTargetRaw.(map[string]any)
+	foregroundTabID, _ := numberAsInt64(foreground["tabId"])
+	tabID, _ := numberAsInt64(tabFromTarget["tabId"])
+	if tabID != foregroundTabID {
+		log.Fatalf("unexpected Custom.TabIdFromTargetId result: %v", tabFromTarget)
+	}
+	b, _ := json.Marshal(tabFromTarget)
+	fmt.Println("Custom.TabIdFromTargetId ->", string(b))
+
+	targetFromTabRaw, err := cdp.Send("Custom.targetIdFromTabId", map[string]any{"tabId": foreground["tabId"]})
+	if err != nil {
+		log.Fatalf("Custom.targetIdFromTabId: %v", err)
+	}
+	targetFromTab, _ := targetFromTabRaw.(map[string]any)
+	middlewareTabID, _ := numberAsInt64(targetFromTab["tabId"])
+	if targetFromTab["targetId"] != createdTargetID || middlewareTabID != foregroundTabID {
+		log.Fatalf("unexpected Custom.targetIdFromTabId/middleware result: %v", targetFromTab)
+	}
+	b, _ = json.Marshal(targetFromTab)
+	fmt.Println("Custom.targetIdFromTabId ->", string(b))
+
+	fmt.Printf("\nSUCCESS (%s): normal command, normal event, custom commands, custom event, and middleware all passed\n", mode)
 
 	// TTY-only REPL. Lets you poke at the live browser interactively;
 	// subscribed events print as they arrive. Skip when stdin is not a tty
@@ -353,7 +428,7 @@ func runRepl(cdp *MagicCDPClient, mode string) {
 	fmt.Println("Enter commands as Domain.method({...JSON params...}). Examples:")
 	fmt.Println(`  Browser.getVersion({})`)
 	fmt.Println(`  Magic.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
-	fmt.Println(`  Custom.echo({"value": "hi"})`)
+	fmt.Println(`  Custom.TabIdFromTargetId({"targetId": "..."})`)
 	fmt.Println("Type exit or quit to disconnect (browser keeps running).")
 	cmdRE := regexp.MustCompile(`^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$`)
 	sc := bufio.NewScanner(os.Stdin)

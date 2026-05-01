@@ -406,14 +406,30 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         let resolvedTargetId = resolvedDebuggee.targetId || null;
         if (!resolvedTargetId) {
           let resolvedTabId = resolvedDebuggee.tabId || null;
+          let resolvedTabUrl: string | null = null;
           if (!resolvedTabId) {
-            const [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
-            if (!tab?.id) throw new Error(`loopback_cdp route for ${method} could not find an active tab.`);
-            resolvedTabId = tab.id;
+            const [tab] = chromeApi.tabs?.query
+              ? await chromeApi.tabs.query({ active: true, lastFocusedWindow: true })
+              : [];
+            resolvedTabId = tab?.id || null;
+            resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
+          } else if (chromeApi.tabs?.get) {
+            const tab = await chromeApi.tabs.get(resolvedTabId).catch(() => null);
+            resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
           }
-          const targets = await chromeApi.debugger.getTargets();
-          resolvedTargetId =
-            targets.find((target) => target.tabId === resolvedTabId && target.type === "page")?.id || null;
+          if (resolvedTabId && chromeApi.debugger?.getTargets) {
+            const targets = await chromeApi.debugger.getTargets();
+            resolvedTargetId =
+              targets.find((target) => target.tabId === resolvedTabId && target.type === "page")?.id || null;
+          }
+          if (!resolvedTargetId) {
+            const { targetInfos } = (await callOnWs("Target.getTargets")) as cdp.types.ts.Target.GetTargetsResult;
+            const pageTargets = targetInfos.filter((target) => target.type === "page");
+            resolvedTargetId =
+              pageTargets.find((target) => resolvedTabUrl && target.url === resolvedTabUrl)?.targetId ||
+              (pageTargets.length === 1 ? pageTargets[0]?.targetId : null) ||
+              null;
+          }
         }
         if (!resolvedTargetId) throw new Error(`loopback_cdp route for ${method} could not resolve a page target.`);
 

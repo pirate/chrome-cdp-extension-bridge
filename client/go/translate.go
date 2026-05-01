@@ -13,7 +13,7 @@ func DefaultClientRoutes() map[string]string {
 	return map[string]string{
 		"Magic.*":  "service_worker",
 		"Custom.*": "service_worker",
-		"*.*":      "direct_cdp",
+		"*.*":      "service_worker",
 	}
 }
 

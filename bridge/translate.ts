@@ -25,7 +25,7 @@ export const BINDING_PREFIX = "__MagicCDP_";
 export const DEFAULT_CLIENT_ROUTES = {
   "Magic.*": "service_worker",
   "Custom.*": "service_worker",
-  "*.*": "direct_cdp",
+  "*.*": "service_worker",
 } satisfies MagicRoutes;
 
 type TranslateOptions = { routes?: MagicRoutes; cdpSessionId?: string | null };

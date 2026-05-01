@@ -41,7 +41,7 @@ export async function injectExtensionIfNeeded({
   send,
   extensionPath,
   timeoutMs = 10_000,
-  discoveryWaitMs = 2_000,
+  discoveryWaitMs = 10_000,
 }: {
   send: SendCDP;
   extensionPath?: string | null;
