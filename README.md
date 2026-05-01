@@ -152,46 +152,147 @@ When `auto` discovery is enabled, the SW only trusts `127.0.0.1:9222` after veri
 <details>
 <summary><b>Wire diagrams</b></summary>
 
-#### Magic call / response
+#### 1. Normal CDP Call / Response
 
 ```mermaid
 flowchart LR
-  subgraph Node["Client"]
-    SDK["MagicCDPClient"]
-    WS["WS"]
-    SDK -->|"1. cdp.send('Magic.evaluate', ...)"| WS
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client"]
+    SDK -->|"1. cdp.send('Browser.getVersion')"| WS
   end
-  subgraph Browser
-    CDP["CDP router"]
-    SW["SW (globalThis.MagicCDP)"]
-    CDP -->|"3. dispatch"| SW
+
+  subgraph Browser["Browser"]
+    direction LR
+    CDP["CDP router<br/>localhost:9222"]
+    SW["Extension service worker<br/>CDP target / JS context"]
+    Page["Page target"]
+    CDP -. "can dispatch to target" .-> Page
   end
-  WS -->|"2. Runtime.evaluate(wrapped expression)"| CDP
-  SW -->|"4. result"| CDP
-  CDP -->|"5. result"| WS
-  WS -->|"6. resolve send promise"| SDK
+
+  Socket["CDP socket"]
+
+  WS <-->|"2. CDP Browser.getVersion<br/>5. response"| Socket
+  Socket <-->|"3. Standard CDP request<br/>4. Standard CDP response"| CDP
+
+  classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
+  class SW,Page idle;
 ```
 
-#### Custom event
+#### 2. Normal CDP Event Listener / Event
 
 ```mermaid
 flowchart LR
-  subgraph Node["Client"]
-    SDK["MagicCDPClient"]
-    WS["WS"]
-    SDK -->|"1. cdp.on('Custom.demo', fn)"| WS
-    SDK -->|"2. cdp.send('Magic.addCustomEvent', ...)"| WS
-    SDK -->|"3. cdp.send('Custom.echo', ...)"| WS
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client"]
+    SDK -->|"1. cdp.on('Target.attachedToTarget', ...)"| WS
+    SDK -->|"2. cdp.send('Target.attachToTarget', ...)"| WS
   end
-  subgraph Browser
-    CDP["CDP router"]
-    SW["SW + binding"]
-    CDP -->|"register, eval"| SW
+
+  subgraph Browser["Browser"]
+    direction LR
+    CDP["CDP router<br/>localhost:9222"]
+    SW["Extension service worker<br/>CDP target / JS context"]
+    Page["Page target<br/>about:blank"]
+    CDP -->|"5. dispatch to page target"| Page
   end
-  WS --> CDP
-  SW -->|"4. binding('{event:Custom.demo,data:...}')"| CDP
-  CDP -->|"5. Runtime.bindingCalled"| WS
-  WS -->|"6. cdp.emit('Custom.demo', data)"| SDK
+
+  Socket["CDP socket"]
+
+  WS -->|"3. CDP Target.attachToTarget"| Socket
+  Socket -->|"4. Standard CDP"| CDP
+  CDP -->|"6. attach session"| Page
+  Page -->|"7. Target.attachedToTarget<br/>{sessionId, targetInfo}"| CDP
+  CDP -->|"8. Target.attachedToTarget<br/>{sessionId, targetInfo}"| Socket
+  Socket -->|"9. Target.attachedToTarget<br/>{sessionId, targetInfo}"| WS
+  WS -->|"10. emit('Target.attachedToTarget', {sessionId, targetInfo})"| SDK
+
+  classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
+  class SW idle;
+```
+
+#### 3. MagicCDP Custom Call / Response
+
+```mermaid
+flowchart LR
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client"]
+    SDK -->|"1. cdp.send('Magic.evaluate', ...)"| WS
+  end
+
+  subgraph Browser["Browser"]
+    direction LR
+    ClientCDP["CDP Session for client<br/>localhost:9222"]
+    LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
+    SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.MagicCDP"]
+    Page["Page target"]
+    ClientCDP -->|"4. dispatch Runtime.evaluate(Magic.evaluate)"| SW
+    LoopbackCDP -->|"7. Input.dispatchMouseEvent"| Page
+    Page -->|"8. Input.dispatchMouseEvent result"| LoopbackCDP
+    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
+  end
+
+  ClientSocket["client CDP socket.<br/>carries Magic.evaluate ..."]
+  LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
+
+  ClientSocket ~~~ LoopbackSocket
+  WS -->|"2. Runtime.evaluate(Magic.evaluate)"| ClientSocket
+  ClientSocket -->|"3. Runtime.evaluate(Magic.evaluate)"| ClientCDP
+  SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
+  LoopbackSocket -->|"6. Input.dispatchMouseEvent"| LoopbackCDP
+  LoopbackCDP -->|"9. Input.dispatchMouseEvent result"| LoopbackSocket
+  LoopbackSocket -->|"10. Input.dispatchMouseEvent result<br/>back into Browser"| SW
+  SW -->|"11. Runtime.evaluate(Magic.evaluate) result"| ClientCDP
+  ClientCDP -->|"12. Runtime.evaluate(Magic.evaluate) result"| ClientSocket
+  ClientSocket -->|"13. => {ok, action, target}"| WS
+```
+
+The same transport shape applies to `Magic.addCustomCommand`: the client installs a named command handler in the service worker, and later `cdp.send('Custom.someCommand', params)` is routed back through `globalThis.MagicCDP.handleCommand(...)`.
+
+#### 4. MagicCDP Custom Event Listener / Event
+
+```mermaid
+flowchart LR
+  subgraph Node["Node client"]
+    direction LR
+    SDK["SDK"]
+    WS["WS client"]
+    SDK -->|"1. cdp.on('Custom.demo', ...)"| WS
+    SDK -->|"6. cdp.send('Magic.evaluate', ...)"| WS
+  end
+
+  subgraph Browser["Browser"]
+    direction LR
+    ClientCDP["CDP Session for client<br/>localhost:9222"]
+    LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
+    SW["Extension service worker<br/>CDP target / JS context<br/>MagicCDP + bindings"]
+    Page["Page target"]
+    ClientCDP -->|"5. dispatch Runtime.evaluate(Magic.addCustomEvent)<br/>9. dispatch Runtime.evaluate(Magic.evaluate)"| SW
+    LoopbackCDP -->|"12. Input.dispatchMouseEvent"| Page
+    Page -->|"13. Input.dispatchMouseEvent result"| LoopbackCDP
+    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
+  end
+
+  ClientSocket["client CDP socket.<br/>carries MagicCDP ..."]
+  LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
+
+  ClientSocket ~~~ LoopbackSocket
+  WS -->|"2. CDP Runtime.addBinding"| ClientSocket
+  WS -->|"3. Magic.addCustomEvent<br/>7. Magic.evaluate(cdp.emit(...))"| ClientSocket
+  ClientSocket <-->|"4. Runtime.evaluate(Magic.addCustomEvent)<br/>8. Runtime.evaluate(Magic.evaluate)"| ClientCDP
+  SW -->|"10. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
+  LoopbackSocket -->|"11. Input.dispatchMouseEvent"| LoopbackCDP
+  LoopbackCDP -->|"14. Input.dispatchMouseEvent result"| LoopbackSocket
+  LoopbackSocket -->|"15. Input.dispatchMouseEvent result<br/>service worker emits custom event"| SW
+  SW -->|"16. Runtime.bindingCalled<br/>{name:'__MagicCDP_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| ClientCDP
+  ClientCDP -->|"17. Standard CDP event<br/>Runtime.bindingCalled {name:'__MagicCDP_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| ClientSocket
+  ClientSocket -->|"18. Standard CDP event<br/>Runtime.bindingCalled {name:'__MagicCDP_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| WS
+  WS -->|"19. emit('Custom.demo', 'test')"| SDK
 ```
 
 </details>
