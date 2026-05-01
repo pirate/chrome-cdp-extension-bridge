@@ -1,6 +1,6 @@
 # MagicCDP
 
-CDP sucks today. It is difficult for agents and humans to use without a library because it was never designed for stateless remote browser automatiion.
+CDP is powerful but it's been stretched to many use-cases beyond its initial audience. It is difficult for agents and humans to use without a harness library, because:
 
 - lacks the ability to use it statelessly without maintaining mappings of sessionIds, targetIds, frameIds, execution context IDs, backendNodeId ownership, and event listeners
 
@@ -8,7 +8,7 @@ CDP sucks today. It is difficult for agents and humans to use without a library 
 
 - lacks the ability to easily call chrome.* extension APIs for things like `chrome.tabs.query({ active: true })`
 
-- lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of backendNodeId, targetId, and frameId
+- *lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of backendNodeId, targetId, and frameId* (unrealistic dream? maybe not)
 
 While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
 
