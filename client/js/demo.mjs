@@ -67,13 +67,13 @@ async function main() {
   const chrome = await launchChrome({ extraFlags: [`--load-extension=${EXTENSION_PATH}`] });
   console.log("upstream cdp:", chrome.wsUrl);
 
-  const cdp = MagicCDPClient(clientOptionsFor(mode, chrome.wsUrl));
+  const cdp = new MagicCDPClient(clientOptionsFor(mode, chrome.wsUrl));
   const events = [];
   cdp.on("Custom.demo", payload => { console.log("event ->", payload); events.push(payload); });
 
   try {
     await cdp.connect();
-    console.log("connected; ext", cdp.extension_id, "session", cdp.session_id);
+    console.log("connected; ext", cdp.extension_id, "session", cdp.ext_session_id);
 
     // standard CDP route differs per mode. --direct goes straight to the
     // upstream WS. --loopback comes back into the browser via a verified

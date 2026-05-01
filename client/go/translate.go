@@ -52,16 +52,16 @@ func routeFor(method string, routes map[string]string) string {
 	return "direct_cdp"
 }
 
-type translatedStep struct {
+type rawStep struct {
 	Method string
 	Params map[string]any
 	Unwrap string
 }
 
-type translatedCommand struct {
+type rawCommand struct {
 	Route  string
 	Target string
-	Steps  []translatedStep
+	Steps  []rawStep
 }
 
 func evalParams(expression string) map[string]any {
@@ -121,18 +121,10 @@ func wrapCustomCommand(method string, params map[string]any, sessionID string) m
 	return evalParams(fmt.Sprintf(`globalThis.MagicCDP.handleCommand(%s, %s, %s)`, string(m), string(p), string(meta)))
 }
 
-func wrapMagicConfigure(config any) map[string]any {
-	c, _ := json.Marshal(config)
-	return evalParams(fmt.Sprintf(
-		`(async () => { const deadline = Date.now() + 5000; while (!globalThis.MagicCDP?.configure && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 25)); } if (!globalThis.MagicCDP?.configure) throw new Error('MagicCDP service worker global is unavailable.'); return globalThis.MagicCDP.configure(%s); })()`,
-		string(c),
-	))
-}
-
-func translateServiceWorkerCommand(method string, params map[string]any, sessionID string) []translatedStep {
+func wrapServiceWorkerCommand(method string, params map[string]any, sessionID string) []rawStep {
 	if method == "Magic.addCustomEvent" {
 		name, _ := params["name"].(string)
-		return []translatedStep{
+		return []rawStep{
 			{Method: "Runtime.addBinding", Params: map[string]any{"name": bindingNameFor(name)}},
 			{Method: "Runtime.evaluate", Params: wrapMagicAddCustomEvent(params), Unwrap: "evaluate"},
 		}
@@ -150,28 +142,24 @@ func translateServiceWorkerCommand(method string, params map[string]any, session
 		}
 		runtimeParams = wrapCustomCommand(method, params, cdpSessionID)
 	}
-	return []translatedStep{{Method: "Runtime.evaluate", Params: runtimeParams, Unwrap: "evaluate"}}
+	return []rawStep{{Method: "Runtime.evaluate", Params: runtimeParams, Unwrap: "evaluate"}}
 }
 
-func translateClientCommand(method string, params map[string]any, routes map[string]string, sessionID string) (translatedCommand, error) {
+func wrapCommandIfNeeded(method string, params map[string]any, routes map[string]string, sessionID string) (rawCommand, error) {
 	route := routeFor(method, routes)
 	if route == "direct_cdp" {
-		return translatedCommand{Route: route, Target: "direct_cdp", Steps: []translatedStep{{Method: method, Params: params}}}, nil
+		return rawCommand{Route: route, Target: "direct_cdp", Steps: []rawStep{{Method: method, Params: params}}}, nil
 	}
 	if route == "service_worker" {
-		return translatedCommand{Route: route, Target: "service_worker", Steps: translateServiceWorkerCommand(method, params, sessionID)}, nil
+		return rawCommand{Route: route, Target: "service_worker", Steps: wrapServiceWorkerCommand(method, params, sessionID)}, nil
 	}
-	return translatedCommand{}, fmt.Errorf("unsupported client route %q for %s", route, method)
+	return rawCommand{}, fmt.Errorf("unsupported client route %q for %s", route, method)
 }
 
-func translateServerConfigure(config any) translatedCommand {
-	return translatedCommand{
-		Target: "service_worker",
-		Steps:  []translatedStep{{Method: "Runtime.evaluate", Params: wrapMagicConfigure(config), Unwrap: "evaluate"}},
+func unwrapResponseIfNeeded(result map[string]any, unwrap string) (any, error) {
+	if unwrap != "evaluate" {
+		return result, nil
 	}
-}
-
-func unwrapEvaluateResult(result map[string]any) (any, error) {
 	if ex, ok := result["exceptionDetails"].(map[string]any); ok {
 		msg := ""
 		if e, ok := ex["exception"].(map[string]any); ok {
@@ -193,7 +181,10 @@ func unwrapEvaluateResult(result map[string]any) (any, error) {
 	return inner["value"], nil
 }
 
-func unwrapBindingCalled(params map[string]any, ourSessionID string) (string, any, bool) {
+func unwrapEventIfNeeded(method string, params map[string]any, sessionID string, ourSessionID string) (string, any, bool) {
+	if method != "Runtime.bindingCalled" {
+		return "", nil, false
+	}
 	name, _ := params["name"].(string)
 	event := eventNameFor(name)
 	if event == "" {

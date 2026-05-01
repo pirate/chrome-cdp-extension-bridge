@@ -3,8 +3,8 @@
 // API installed by the client (Runtime.addBinding -> globalThis[bindingName]).
 //
 // Re-uses translate.mjs for the shared { event, data, cdpSessionId } payload
-// encoding so binding payloads stay byte-compatible with the Node-side
-// unwrapBindingCalled.
+// encoding so binding payloads stay byte-compatible with the client-side
+// unwrapEventIfNeeded.
 
 import { encodeBindingPayload } from "./translate.mjs";
 
@@ -23,6 +23,8 @@ const defaultRoutes = {
   "Custom.*": "service_worker",
   "*.*": "auto",
 };
+
+const browserLevelDomains = new Set(["Browser", "Target", "SystemInfo"]);
 
 let nextLoopbackId = 1;
 
@@ -181,7 +183,35 @@ export const MagicCDPServer = {
         });
       };
       await callOnWs("Target.setAutoAttach", targetAutoAttachParams);
-      return await callOnWs(method, params);
+
+      const domain = method.split(".")[0];
+      if (browserLevelDomains.has(domain)) return await callOnWs(method, params);
+
+      const { debuggee = null, tabId = null, targetId = null, extensionId = null, ...commandParams } = params;
+      const resolvedDebuggee = debuggee || { tabId, targetId, extensionId };
+      for (const key of Object.keys(resolvedDebuggee)) {
+        if (resolvedDebuggee[key] === null || resolvedDebuggee[key] === undefined) delete resolvedDebuggee[key];
+      }
+
+      let resolvedTargetId = resolvedDebuggee.targetId || null;
+      if (!resolvedTargetId) {
+        let resolvedTabId = resolvedDebuggee.tabId || null;
+        if (!resolvedTabId) {
+          const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+          if (!tab?.id) throw new Error(`loopback_cdp route for ${method} could not find an active tab.`);
+          resolvedTabId = tab.id;
+        }
+        const targets = await chrome.debugger.getTargets();
+        resolvedTargetId = targets.find(target => target.tabId === resolvedTabId && target.type === "page")?.id || null;
+      }
+      if (!resolvedTargetId) throw new Error(`loopback_cdp route for ${method} could not resolve a page target.`);
+
+      const { sessionId } = await callOnWs("Target.attachToTarget", { targetId: resolvedTargetId, flatten: true });
+      try {
+        return await callOnWs(method, commandParams, sessionId);
+      } finally {
+        await callOnWs("Target.detachFromTarget", { sessionId }).catch(() => {});
+      }
     } finally { ws.close(); }
   },
 
@@ -229,4 +259,9 @@ MagicCDPServer.addCustomCommand({
     }, meta);
     return { ok: true };
   },
+});
+
+MagicCDPServer.addCustomCommand({
+  name: "Magic.configure",
+  handler: async (params = {}) => MagicCDPServer.configure(params),
 });

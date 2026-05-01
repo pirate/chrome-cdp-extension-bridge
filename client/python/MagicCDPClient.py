@@ -5,7 +5,6 @@ Constructor parameter names mirror the JS / Go ports:
     extension_path    extension directory (str)
     routes            client-side routing dict
     server            { 'loopback_cdp_url'?, 'routes'? } passed to MagicCDPServer.configure
-    session_id        client cdpSessionId tag for event scoping (str)
 
 Public methods: connect(), send(method, params), on(event, handler), close().
 Synchronous (blocking) API; one background thread reads frames off the WS.
@@ -16,17 +15,15 @@ import re
 import threading
 import time
 import urllib.request
-import uuid
 from queue import Queue, Empty
 
 from websocket import create_connection
 
 from translate import (
     DEFAULT_CLIENT_ROUTES,
-    translate_client_command,
-    translate_server_configure,
-    unwrap_binding_called,
-    unwrap_evaluate_result,
+    wrap_command_if_needed,
+    unwrap_event_if_needed,
+    unwrap_response_if_needed,
 )
 
 SW_URL_RE = re.compile(r"^chrome-extension://[a-z]+/service_worker\.js$")
@@ -44,12 +41,11 @@ def websocket_url_for(endpoint: str) -> str:
 
 
 class MagicCDPClient:
-    def __init__(self, cdp_url, extension_path, routes=None, server=None, session_id=None):
+    def __init__(self, cdp_url, extension_path, routes=None, server=None):
         self.cdp_url = cdp_url
         self.extension_path = extension_path
         self.routes = {**DEFAULT_CLIENT_ROUTES, **(routes or {})}
         self.server = server
-        self.session_id = session_id or str(uuid.uuid4())
 
         self.extension_id = None
         self.ext_target_id = None
@@ -64,9 +60,12 @@ class MagicCDPClient:
         self._closed = False
 
     def connect(self):
+        input_cdp_url = self.cdp_url
         self.cdp_url = websocket_url_for(self.cdp_url)
         if self.server and self.server.get("loopback_cdp_url"):
-            self.server = {**self.server, "loopback_cdp_url": websocket_url_for(self.server["loopback_cdp_url"])}
+            loopback_url = self.server["loopback_cdp_url"]
+            if loopback_url == input_cdp_url or loopback_url == self.cdp_url:
+                self.server = {**self.server, "loopback_cdp_url": self.cdp_url}
         self._ws = create_connection(self.cdp_url)
         self._reader_thread = threading.Thread(target=self._reader, daemon=True)
         self._reader_thread.start()
@@ -75,18 +74,23 @@ class MagicCDPClient:
         self.extension_id = ext["extensionId"]
         self.ext_target_id = ext["targetId"]
         self.ext_session_id = ext["sessionId"]
-        self._send_raw("Runtime.enable", {}, self.ext_session_id)
+        self._send_frame("Runtime.enable", {}, self.ext_session_id)
 
         if self.server:
-            self._send_translated(translate_server_configure(self.server))
+            self._send_raw(wrap_command_if_needed(
+                "Magic.configure",
+                self.server,
+                routes=self.routes,
+                cdp_session_id=self.ext_session_id,
+            ))
         return self
 
     def send(self, method, params=None):
-        return self._send_translated(translate_client_command(
+        return self._send_raw(wrap_command_if_needed(
             method,
             params or {},
             routes=self.routes,
-            cdp_session_id=self.session_id,
+            cdp_session_id=self.ext_session_id,
         ))
 
     def on(self, event, handler):
@@ -97,7 +101,7 @@ class MagicCDPClient:
         self._closed = True
         try:
             if self.ext_session_id:
-                self._send_raw("Target.detachFromTarget", {"sessionId": self.ext_session_id})
+                self._send_frame("Target.detachFromTarget", {"sessionId": self.ext_session_id})
         except Exception:
             pass
         try:
@@ -108,21 +112,21 @@ class MagicCDPClient:
 
     # --- internals ---------------------------------------------------------
 
-    def _send_translated(self, translated):
-        if translated["target"] == "direct_cdp":
-            step = translated["steps"][0]
-            return self._send_raw(step["method"], step.get("params") or {})
-        if translated["target"] != "service_worker":
-            raise RuntimeError(f"Unsupported translated target {translated['target']!r}")
+    def _send_raw(self, wrapped):
+        if wrapped["target"] == "direct_cdp":
+            step = wrapped["steps"][0]
+            return self._send_frame(step["method"], step.get("params") or {})
+        if wrapped["target"] != "service_worker":
+            raise RuntimeError(f"Unsupported command target {wrapped['target']!r}")
 
         result = {}
         unwrap = None
-        for step in translated["steps"]:
-            result = self._send_raw(step["method"], step.get("params") or {}, self.ext_session_id)
+        for step in wrapped["steps"]:
+            result = self._send_frame(step["method"], step.get("params") or {}, self.ext_session_id)
             unwrap = step.get("unwrap")
-        return unwrap_evaluate_result(result) if unwrap == "evaluate" else result
+        return unwrap_response_if_needed(result, unwrap)
 
-    def _send_raw(self, method, params=None, session_id=None, timeout=10):
+    def _send_frame(self, method, params=None, session_id=None, timeout=10):
         with self._lock:
             self._next_id += 1
             msg_id = self._next_id
@@ -161,8 +165,8 @@ class MagicCDPClient:
                     if entry:
                         entry[1].put(msg)
                     continue
-                if msg.get("method") == "Runtime.bindingCalled" and msg.get("sessionId") == self.ext_session_id:
-                    u = unwrap_binding_called(msg.get("params") or {}, self.session_id)
+                if msg.get("sessionId") == self.ext_session_id:
+                    u = unwrap_event_if_needed(msg.get("method"), msg.get("params") or {}, msg.get("sessionId"), self.ext_session_id)
                     if u:
                         for h in self._handlers.get(u["event"], []):
                             try: h(u["data"])
@@ -189,21 +193,21 @@ class MagicCDPClient:
         attached = []
         deadline = time.time() + 2.0
         while time.time() <= deadline:
-            for t in (self._send_raw("Target.getTargets")["targetInfos"]):
+            for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] != "service_worker": continue
                 if not SW_URL_RE.match(t["url"]): continue
                 if any(a["targetId"] == t["targetId"] for a in attached): continue
-                a = self._send_raw("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
+                a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
                 attached.append({"targetId": t["targetId"], "url": t["url"], "sessionId": a["sessionId"]})
             for a in attached:
-                probe = self._send_raw("Runtime.evaluate", {
+                probe = self._send_frame("Runtime.evaluate", {
                     "expression": "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
                     "returnByValue": True,
                 }, a["sessionId"])
                 if (probe.get("result") or {}).get("value") is True:
                     for o in attached:
                         if o["sessionId"] != a["sessionId"]:
-                            try: self._send_raw("Target.detachFromTarget", {"sessionId": o["sessionId"]})
+                            try: self._send_frame("Target.detachFromTarget", {"sessionId": o["sessionId"]})
                             except Exception: pass
                     return {
                         "source": "discovered",
@@ -213,12 +217,12 @@ class MagicCDPClient:
             if time.time() >= deadline: break
             time.sleep(0.1)
         for a in attached:
-            try: self._send_raw("Target.detachFromTarget", {"sessionId": a["sessionId"]})
+            try: self._send_frame("Target.detachFromTarget", {"sessionId": a["sessionId"]})
             except Exception: pass
 
         # 2. Try Extensions.loadUnpacked.
         try:
-            r = self._send_raw("Extensions.loadUnpacked", {"path": self.extension_path})
+            r = self._send_frame("Extensions.loadUnpacked", {"path": self.extension_path})
             extension_id = r.get("id") or r.get("extensionId")
         except RuntimeError as e:
             if "Method not available" in str(e) or "wasn't found" in str(e):
@@ -238,9 +242,9 @@ class MagicCDPClient:
         sw_url = f"chrome-extension://{extension_id}/service_worker.js"
         deadline = time.time() + 10.0
         while time.time() < deadline:
-            for t in (self._send_raw("Target.getTargets")["targetInfos"]):
+            for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] == "service_worker" and t["url"] == sw_url:
-                    a = self._send_raw("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
+                    a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
                     return {
                         "source": "injected", "extensionId": extension_id,
                         "targetId": t["targetId"], "url": sw_url, "sessionId": a["sessionId"],

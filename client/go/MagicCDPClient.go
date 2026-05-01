@@ -5,7 +5,6 @@
 //   ExtensionPath   extension directory.
 //   Routes          client-side routing map.
 //   Server          { LoopbackCDPURL?, Routes? } passed to MagicCDPServer.configure.
-//   SessionID       client cdpSessionId tag for event scoping.
 //
 // Public methods: Connect, Send(method, params), On(event, handler), Close.
 // Synchronous; one background goroutine reads frames off the WS.
@@ -38,7 +37,6 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	"github.com/google/uuid"
 )
 
 var (
@@ -79,7 +77,6 @@ type Options struct {
 	ExtensionPath string
 	Routes        map[string]string
 	Server        *ServerConfig
-	SessionID     string
 }
 
 type Handler func(data any)
@@ -110,9 +107,6 @@ func New(opts Options) *MagicCDPClient {
 		}
 		opts.Routes = merged
 	}
-	if opts.SessionID == "" {
-		opts.SessionID = uuid.NewString()
-	}
 	return &MagicCDPClient{
 		opts:     opts,
 		pending:  map[int64]chan map[string]any{},
@@ -120,20 +114,15 @@ func New(opts Options) *MagicCDPClient {
 	}
 }
 
-func (c *MagicCDPClient) SessionID() string { return c.opts.SessionID }
-
 func (c *MagicCDPClient) Connect() error {
+	inputCDPURL := c.opts.CDPURL
 	wsURL, err := websocketURLFor(c.opts.CDPURL)
 	if err != nil {
 		return err
 	}
 	c.opts.CDPURL = wsURL
-	if c.opts.Server != nil && c.opts.Server.LoopbackCDPURL != "" {
-		loopbackURL, err := websocketURLFor(c.opts.Server.LoopbackCDPURL)
-		if err != nil {
-			return err
-		}
-		c.opts.Server.LoopbackCDPURL = loopbackURL
+	if c.opts.Server != nil && (c.opts.Server.LoopbackCDPURL == inputCDPURL || c.opts.Server.LoopbackCDPURL == wsURL) {
+		c.opts.Server.LoopbackCDPURL = wsURL
 	}
 
 	c.ctx, c.cancel = context.WithCancel(context.Background())
@@ -154,13 +143,21 @@ func (c *MagicCDPClient) Connect() error {
 	c.ExtensionID = ext["extensionId"].(string)
 	c.ExtTargetID = ext["targetId"].(string)
 	c.ExtSessionID = ext["sessionId"].(string)
-	if _, err := c.sendRaw("Runtime.enable", map[string]any{}, c.ExtSessionID); err != nil {
+	if _, err := c.sendFrame("Runtime.enable", map[string]any{}, c.ExtSessionID); err != nil {
 		c.Close()
 		return err
 	}
 
 	if c.opts.Server != nil {
-		if _, err := c.sendTranslated(translateServerConfigure(c.opts.Server)); err != nil {
+		command, err := wrapCommandIfNeeded("Magic.configure", map[string]any{
+			"loopback_cdp_url": c.opts.Server.LoopbackCDPURL,
+			"routes":           c.opts.Server.Routes,
+		}, c.opts.Routes, c.ExtSessionID)
+		if err != nil {
+			c.Close()
+			return fmt.Errorf("Magic.configure: %w", err)
+		}
+		if _, err := c.sendRaw(command); err != nil {
 			c.Close()
 			return fmt.Errorf("Magic.configure: %w", err)
 		}
@@ -172,11 +169,11 @@ func (c *MagicCDPClient) Send(method string, params map[string]any) (any, error)
 	if params == nil {
 		params = map[string]any{}
 	}
-	translated, err := translateClientCommand(method, params, c.opts.Routes, c.opts.SessionID)
+	command, err := wrapCommandIfNeeded(method, params, c.opts.Routes, c.ExtSessionID)
 	if err != nil {
 		return nil, err
 	}
-	return c.sendTranslated(translated)
+	return c.sendRaw(command)
 }
 
 func (c *MagicCDPClient) On(event string, handler Handler) {
@@ -187,7 +184,7 @@ func (c *MagicCDPClient) On(event string, handler Handler) {
 
 func (c *MagicCDPClient) Close() {
 	if c.ExtSessionID != "" {
-		_, _ = c.sendRaw("Target.detachFromTarget", map[string]any{"sessionId": c.ExtSessionID}, "")
+		_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": c.ExtSessionID}, "")
 	}
 	if c.cancel != nil {
 		c.cancel()
@@ -199,32 +196,29 @@ func (c *MagicCDPClient) Close() {
 
 // --- internals -----------------------------------------------------------
 
-func (c *MagicCDPClient) sendTranslated(translated translatedCommand) (any, error) {
-	if translated.Target == "direct_cdp" {
-		step := translated.Steps[0]
-		return c.sendRaw(step.Method, step.Params, "")
+func (c *MagicCDPClient) sendRaw(command rawCommand) (any, error) {
+	if command.Target == "direct_cdp" {
+		step := command.Steps[0]
+		return c.sendFrame(step.Method, step.Params, "")
 	}
-	if translated.Target != "service_worker" {
-		return nil, fmt.Errorf("unsupported translated target %q", translated.Target)
+	if command.Target != "service_worker" {
+		return nil, fmt.Errorf("unsupported command target %q", command.Target)
 	}
 
 	var result map[string]any
 	unwrap := ""
-	for _, step := range translated.Steps {
-		r, err := c.sendRaw(step.Method, step.Params, c.ExtSessionID)
+	for _, step := range command.Steps {
+		r, err := c.sendFrame(step.Method, step.Params, c.ExtSessionID)
 		if err != nil {
 			return nil, err
 		}
 		result = r
 		unwrap = step.Unwrap
 	}
-	if unwrap == "evaluate" {
-		return unwrapEvaluateResult(result)
-	}
-	return result, nil
+	return unwrapResponseIfNeeded(result, unwrap)
 }
 
-func (c *MagicCDPClient) sendRaw(method string, params map[string]any, sessionID string) (map[string]any, error) {
+func (c *MagicCDPClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -296,9 +290,9 @@ func (c *MagicCDPClient) reader() {
 		// IMPORTANT: handlers run on their own goroutine, not on the reader.
 		// A handler that calls c.Send() would otherwise deadlock waiting on
 		// a response that this same goroutine is supposed to deliver.
-		if method == "Runtime.bindingCalled" && sessionID == c.ExtSessionID {
+		if sessionID == c.ExtSessionID {
 			params, _ := msg["params"].(map[string]any)
-			if event, data, ok := unwrapBindingCalled(params, c.opts.SessionID); ok {
+			if event, data, ok := unwrapEventIfNeeded(method, params, sessionID, c.ExtSessionID); ok {
 				c.handlersMu.Lock()
 				hs := append([]Handler(nil), c.handlers[event]...)
 				c.handlersMu.Unlock()
@@ -326,7 +320,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline.Add(time.Millisecond)) {
-		targetsResp, err := c.sendRaw("Target.getTargets", map[string]any{}, "")
+		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 		if err != nil {
 			return nil, err
 		}
@@ -349,7 +343,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			if already {
 				continue
 			}
-			a, err := c.sendRaw("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
+			a, err := c.sendFrame("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
 			if err != nil {
 				continue
 			}
@@ -357,7 +351,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			seen = append(seen, attached{TargetID: tid, URL: turl, SessionID: sid})
 		}
 		for _, a := range seen {
-			probe, err := c.sendRaw("Runtime.evaluate", map[string]any{
+			probe, err := c.sendFrame("Runtime.evaluate", map[string]any{
 				"expression":    "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
 				"returnByValue": true,
 			}, a.SessionID)
@@ -368,7 +362,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			if v, _ := result["value"].(bool); v {
 				for _, o := range seen {
 					if o.SessionID != a.SessionID {
-						_, _ = c.sendRaw("Target.detachFromTarget", map[string]any{"sessionId": o.SessionID}, "")
+						_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": o.SessionID}, "")
 					}
 				}
 				m := extIDFromURL.FindStringSubmatch(a.URL)
@@ -384,10 +378,10 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	for _, a := range seen {
-		_, _ = c.sendRaw("Target.detachFromTarget", map[string]any{"sessionId": a.SessionID}, "")
+		_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": a.SessionID}, "")
 	}
 
-	loadResp, err := c.sendRaw("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
+	loadResp, err := c.sendFrame("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
 	if err != nil {
 		if strings.Contains(err.Error(), "Method not available") || strings.Contains(err.Error(), "wasn't found") {
 			return nil, fmt.Errorf(
@@ -413,7 +407,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 	swURL := fmt.Sprintf("chrome-extension://%s/service_worker.js", extID)
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		targetsResp, err := c.sendRaw("Target.getTargets", map[string]any{}, "")
+		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 		if err != nil {
 			return nil, err
 		}
@@ -422,7 +416,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 			ti, _ := t.(map[string]any)
 			if ti["type"] == "service_worker" && ti["url"] == swURL {
 				tid, _ := ti["targetId"].(string)
-				a, err := c.sendRaw("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
+				a, err := c.sendFrame("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
 				if err != nil {
 					return nil, err
 				}

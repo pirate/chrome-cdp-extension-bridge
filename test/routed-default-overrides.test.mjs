@@ -94,7 +94,7 @@ async (params) => {
 
 test("service-worker routed standard CDP commands and events can be transformed", { timeout: 45_000 }, async () => {
   const chrome = await launchChrome({ extraFlags: [`--load-extension=${EXTENSION_PATH}`] });
-  const cdp = MagicCDPClient({
+  const cdp = new MagicCDPClient({
     cdp_url: chrome.cdpUrl,
     routes: {
       "Target.getTargets": "service_worker",
@@ -111,7 +111,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
     assert.equal(cdp.cdp_url, chrome.wsUrl);
     assert.equal(cdp.server.loopback_cdp_url, chrome.wsUrl);
 
-    const rawTargets = await cdp._sendRaw("Target.getTargets");
+    const rawTargets = await cdp._sendFrame("Target.getTargets");
     assert.ok(rawTargets.targetInfos?.length > 0, "expected raw Target.getTargets targetInfos");
     assert.equal(
       rawTargets.targetInfos.some(targetInfo => Object.hasOwn(targetInfo, "tabId")),
@@ -152,7 +152,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
     });
 
     await cdp.send("Target.setDiscoverTargets", { discover: true });
-    await cdp._sendRaw("Target.createTarget", { url: "about:blank#magic-cdp-event-test" });
+    await cdp._sendFrame("Target.createTarget", { url: "about:blank#magic-cdp-event-test" });
 
     const event = await forwardedEvent;
     assert.ok(Object.hasOwn(event.targetInfo, "tabId"), "transformed event targetInfo should include tabId");

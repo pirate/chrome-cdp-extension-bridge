@@ -102,25 +102,7 @@ export function wrapCustomCommand(method, params = {}, cdpSessionId = null) {
   };
 }
 
-export function wrapMagicConfigure(config = {}) {
-  return {
-    expression: `
-      (async () => {
-        const deadline = Date.now() + 5000;
-        while (!globalThis.MagicCDP?.configure && Date.now() < deadline) {
-          await new Promise(resolve => setTimeout(resolve, 25));
-        }
-        if (!globalThis.MagicCDP?.configure) throw new Error("MagicCDP service worker global is unavailable.");
-        return globalThis.MagicCDP.configure(${JSON.stringify(config)});
-      })()
-    `,
-    awaitPromise: true,
-    returnByValue: true,
-    allowUnsafeEvalBlockedByCSP: true,
-  };
-}
-
-export function translateServiceWorkerCommand(method, params = {}, cdpSessionId = null) {
+function wrapServiceWorkerCommand(method, params = {}, cdpSessionId = null) {
   if (method === "Magic.addCustomEvent") {
     return [
       {
@@ -153,7 +135,7 @@ export function translateServiceWorkerCommand(method, params = {}, cdpSessionId 
   ];
 }
 
-export function translateClientCommand(method, params = {}, { routes = DEFAULT_CLIENT_ROUTES, cdpSessionId = null } = {}) {
+export function wrapCommandIfNeeded(method, params = {}, { routes = DEFAULT_CLIENT_ROUTES, cdpSessionId = null } = {}) {
   const route = routeFor(method, routes);
   if (route === "direct_cdp") {
     return {
@@ -166,28 +148,15 @@ export function translateClientCommand(method, params = {}, { routes = DEFAULT_C
     return {
       route,
       target: "service_worker",
-      steps: translateServiceWorkerCommand(method, params, cdpSessionId),
+      steps: wrapServiceWorkerCommand(method, params, cdpSessionId),
     };
   }
   throw new Error(`Unsupported client route "${route}" for ${method}`);
 }
 
-export function translateServerConfigure(config = {}) {
-  return {
-    target: "service_worker",
-    steps: [
-      {
-        method: "Runtime.evaluate",
-        params: wrapMagicConfigure(config),
-        unwrap: "evaluate",
-      },
-    ],
-  };
-}
-
 // --- inbound: Runtime.* result/event -> MagicCDP value/event ----------------
 
-export function unwrapEvaluateResult(result) {
+function unwrapEvaluateResponse(result) {
   if (result?.exceptionDetails) {
     const ex = result.exceptionDetails;
     throw new Error(ex.exception?.description || ex.text || "Runtime.evaluate failed");
@@ -195,10 +164,15 @@ export function unwrapEvaluateResult(result) {
   return result?.result?.value;
 }
 
+export function unwrapResponseIfNeeded(result, unwrap = null) {
+  return unwrap === "evaluate" ? unwrapEvaluateResponse(result) : (result ?? {});
+}
+
 // Returns { event, data } or null when the binding is not a MagicCDP event,
 // when the payload is scoped to a different cdpSessionId than ourSessionId,
 // or when the payload string is not valid JSON.
-export function unwrapBindingCalled(params, ourSessionId = null) {
+export function unwrapEventIfNeeded(method, params = {}, sessionId = null, ourSessionId = null) {
+  if (method !== "Runtime.bindingCalled") return null;
   const event = eventNameFor(params?.name || "");
   if (!event) return null;
   let payload;
@@ -207,7 +181,7 @@ export function unwrapBindingCalled(params, ourSessionId = null) {
   if (payload == null || typeof payload !== "object") return null;
   if (ourSessionId != null && payload.cdpSessionId && payload.cdpSessionId !== ourSessionId) return null;
   const data = Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
-  return { event, data };
+  return { event, data, sessionId };
 }
 
 // --- shared encoder used by the extension service worker --------------------

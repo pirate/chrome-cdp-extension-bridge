@@ -156,7 +156,7 @@ func main() {
 		log.Fatalf("connect: %v", err)
 	}
 	defer cdp.Close()
-	fmt.Printf("connected; ext %s session %s\n", cdp.ExtensionID, cdp.SessionID())
+	fmt.Printf("connected; ext %s session %s\n", cdp.ExtensionID, cdp.ExtSessionID)
 
 	if r, err := cdp.Send("Browser.getVersion", nil); err != nil {
 		fmt.Println("Browser.getVersion -> (rejected by route:", err, ")")

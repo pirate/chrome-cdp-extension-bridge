@@ -104,20 +104,7 @@ def _wrap_custom_command(method: str, params: dict, session_id: str):
     )
 
 
-def _wrap_magic_configure(config: dict):
-    return _eval_params(
-        "(async () => {\n"
-        "  const deadline = Date.now() + 5000;\n"
-        "  while (!globalThis.MagicCDP?.configure && Date.now() < deadline) {\n"
-        "    await new Promise(resolve => setTimeout(resolve, 25));\n"
-        "  }\n"
-        "  if (!globalThis.MagicCDP?.configure) throw new Error('MagicCDP service worker global is unavailable.');\n"
-        f"  return globalThis.MagicCDP.configure({json.dumps(config)});\n"
-        "})()"
-    )
-
-
-def _translate_service_worker_command(method: str, params: dict, session_id: str):
+def _wrap_service_worker_command(method: str, params: dict, session_id: str):
     if method == "Magic.addCustomEvent":
         return [
             {"method": "Runtime.addBinding", "params": {"name": binding_name_for(params["name"])}},
@@ -136,7 +123,7 @@ def _translate_service_worker_command(method: str, params: dict, session_id: str
     return [{"method": "Runtime.evaluate", "params": runtime_params, "unwrap": "evaluate"}]
 
 
-def translate_client_command(method: str, params=None, *, routes=None, cdp_session_id=None):
+def wrap_command_if_needed(method: str, params=None, *, routes=None, cdp_session_id=None):
     params = params or {}
     route = route_for(method, routes or DEFAULT_CLIENT_ROUTES)
     if route == "direct_cdp":
@@ -145,19 +132,12 @@ def translate_client_command(method: str, params=None, *, routes=None, cdp_sessi
         return {
             "route": route,
             "target": "service_worker",
-            "steps": _translate_service_worker_command(method, params, cdp_session_id),
+            "steps": _wrap_service_worker_command(method, params, cdp_session_id),
         }
     raise RuntimeError(f"Unsupported client route '{route}' for {method}")
 
 
-def translate_server_configure(config: dict):
-    return {
-        "target": "service_worker",
-        "steps": [{"method": "Runtime.evaluate", "params": _wrap_magic_configure(config), "unwrap": "evaluate"}],
-    }
-
-
-def unwrap_evaluate_result(result: dict):
+def _unwrap_evaluate_response(result: dict):
     if result.get("exceptionDetails"):
         ex = result["exceptionDetails"]
         msg = (ex.get("exception") or {}).get("description") or ex.get("text") or "Runtime.evaluate failed"
@@ -166,7 +146,13 @@ def unwrap_evaluate_result(result: dict):
     return inner.get("value")
 
 
-def unwrap_binding_called(params: dict, our_session_id: str):
+def unwrap_response_if_needed(result: dict, unwrap=None):
+    return _unwrap_evaluate_response(result) if unwrap == "evaluate" else (result or {})
+
+
+def unwrap_event_if_needed(method: str, params: dict, session_id=None, our_session_id=None):
+    if method != "Runtime.bindingCalled":
+        return None
     event = event_name_for(params.get("name") or "")
     if event is None:
         return None
@@ -179,4 +165,4 @@ def unwrap_binding_called(params: dict, our_session_id: str):
     if our_session_id is not None and payload.get("cdpSessionId") and payload["cdpSessionId"] != our_session_id:
         return None
     data = payload["data"] if "data" in payload else payload
-    return {"event": event, "data": data}
+    return {"event": event, "data": data, "sessionId": session_id}

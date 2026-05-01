@@ -6,24 +6,21 @@
 //   routes            client-side routing dict (default { "Magic.*": "service_worker",
 //                       "Custom.*": "service_worker", "*.*": "direct_cdp" })
 //   server            { loopback_cdp_url?, routes? } passed to MagicCDPServer.configure
-//   session_id        client cdpSessionId tag for event scoping
 //   launch_options    forwarded to launcher.launchChrome when autolaunching
 //
 // Public methods: connect, send(method, params), on(event, handler), close.
 
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { launchChrome } from "../../bridge/launcher.mjs";
-import { ensureMagicCDPExtension } from "../../bridge/injector.mjs";
+import { injectExtensionIfNeeded } from "../../bridge/injector.mjs";
 import {
   DEFAULT_CLIENT_ROUTES,
-  translateClientCommand,
-  translateServerConfigure,
-  unwrapEvaluateResult,
-  unwrapBindingCalled,
+  wrapCommandIfNeeded,
+  unwrapResponseIfNeeded,
+  unwrapEventIfNeeded,
 } from "../../bridge/translate.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -38,25 +35,12 @@ async function webSocketUrlFor(endpoint, name = "cdp_url") {
   return webSocketDebuggerUrl;
 }
 
-async function normalizeServerConfig(server) {
-  if (!server?.loopback_cdp_url) return server;
-  return {
-    ...server,
-    loopback_cdp_url: await webSocketUrlFor(server.loopback_cdp_url, "loopback_cdp_url"),
-  };
-}
-
-export function MagicCDPClient(options = {}) {
-  return new MagicCDP(options);
-}
-
-class MagicCDP extends EventEmitter {
+export class MagicCDPClient extends EventEmitter {
   constructor({
     cdp_url = null,
     extension_path = DEFAULT_EXTENSION_PATH,
     routes = DEFAULT_CLIENT_ROUTES,
     server = null,
-    session_id = randomUUID(),
     launch_options = {},
   } = {}) {
     super();
@@ -64,7 +48,6 @@ class MagicCDP extends EventEmitter {
     this.extension_path = extension_path;
     this.routes = { ...DEFAULT_CLIENT_ROUTES, ...routes };
     this.server = server;
-    this.session_id = session_id;
     this.launch_options = launch_options;
 
     this.ws = null;
@@ -81,8 +64,14 @@ class MagicCDP extends EventEmitter {
       this._launched = await launchChrome(this.launch_options);
       this.cdp_url = this._launched.wsUrl;
     }
+    const inputCdpUrl = this.cdp_url;
     this.cdp_url = await webSocketUrlFor(this.cdp_url);
-    this.server = await normalizeServerConfig(this.server);
+    if (this.server?.loopback_cdp_url) {
+      const loopbackUrl = this.server.loopback_cdp_url;
+      if (loopbackUrl === inputCdpUrl || loopbackUrl === this.cdp_url) {
+        this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
+      }
+    }
 
     this.ws = new WebSocket(this.cdp_url);
     this.ws.addEventListener("message", event => this._onMessage(event.data));
@@ -93,54 +82,57 @@ class MagicCDP extends EventEmitter {
       this.ws.addEventListener("error", reject, { once: true });
     });
 
-    const ext = await ensureMagicCDPExtension({
-      send: (method, params, sessionId) => this._sendRaw(method, params, sessionId),
+    const ext = await injectExtensionIfNeeded({
+      send: (method, params, sessionId) => this._sendFrame(method, params, sessionId),
       extensionPath: this.extension_path,
     });
     this.extension_id = ext.extensionId;
     this.ext_target_id = ext.targetId;
     this.ext_session_id = ext.sessionId;
-    await this._sendRaw("Runtime.enable", {}, this.ext_session_id);
+    await this._sendFrame("Runtime.enable", {}, this.ext_session_id);
 
     if (this.server) {
-      await this._sendTranslated(translateServerConfigure(this.server));
+      await this._sendRaw(wrapCommandIfNeeded("Magic.configure", this.server, {
+        routes: this.routes,
+        cdpSessionId: this.ext_session_id,
+      }));
     }
 
     return this;
   }
 
   async send(method, params = {}) {
-    return this._sendTranslated(translateClientCommand(method, params, {
+    return this._sendRaw(wrapCommandIfNeeded(method, params, {
       routes: this.routes,
-      cdpSessionId: this.session_id,
+      cdpSessionId: this.ext_session_id,
     }));
   }
 
   async close() {
-    try { await this._sendRaw("Target.detachFromTarget", { sessionId: this.ext_session_id }); } catch {}
+    try { await this._sendFrame("Target.detachFromTarget", { sessionId: this.ext_session_id }); } catch {}
     try { this.ws?.close(); } catch {}
     if (this._launched) await this._launched.close();
   }
 
-  async _sendTranslated(translated) {
-    if (translated.target === "direct_cdp") {
-      const [step] = translated.steps;
-      return this._sendRaw(step.method, step.params ?? {});
+  async _sendRaw(command) {
+    if (command.target === "direct_cdp") {
+      const [step] = command.steps;
+      return this._sendFrame(step.method, step.params ?? {});
     }
-    if (translated.target !== "service_worker") {
-      throw new Error(`Unsupported translated target "${translated.target}"`);
+    if (command.target !== "service_worker") {
+      throw new Error(`Unsupported command target "${command.target}"`);
     }
 
     let result = {};
     let unwrap = null;
-    for (const step of translated.steps) {
-      result = await this._sendRaw(step.method, step.params ?? {}, this.ext_session_id);
+    for (const step of command.steps) {
+      result = await this._sendFrame(step.method, step.params ?? {}, this.ext_session_id);
       unwrap = step.unwrap ?? null;
     }
-    return unwrap === "evaluate" ? unwrapEvaluateResult(result) : result;
+    return unwrapResponseIfNeeded(result, unwrap);
   }
 
-  _sendRaw(method, params = {}, sessionId = null) {
+  _sendFrame(method, params = {}, sessionId = null) {
     const id = this.next_id++;
     const message = { id, method, params }; if (sessionId) message.sessionId = sessionId;
     return new Promise((resolve, reject) => {
@@ -169,8 +161,8 @@ class MagicCDP extends EventEmitter {
       }
       return;
     }
-    if (msg.method === "Runtime.bindingCalled" && msg.sessionId === this.ext_session_id) {
-      const u = unwrapBindingCalled(msg.params || {}, this.session_id);
+    if (msg.sessionId === this.ext_session_id) {
+      const u = unwrapEventIfNeeded(msg.method, msg.params || {}, msg.sessionId || null, this.ext_session_id);
       if (u) this.emit(u.event, u.data);
       return;
     }

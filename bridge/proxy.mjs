@@ -5,7 +5,7 @@
 // Behavior on each client connection:
 //   - If the upstream isn't reachable and { autoLaunch: true }, launch a local
 //     Chrome via launcher.mjs and use it as the upstream.
-//   - Ensure the MagicCDP extension service worker is loaded via injector.mjs
+//   - Inject the MagicCDP extension service worker via injector.mjs if needed
 //     (single source of truth for that precedence + error messages).
 //   - Stand up a hidden CDP session attached to the SW; rewrite Magic.* /
 //     Custom.* outbound and Runtime.bindingCalled inbound; forward everything
@@ -22,15 +22,15 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 
 import { launchChrome } from "./launcher.mjs";
-import { ensureMagicCDPExtension } from "./injector.mjs";
+import { injectExtensionIfNeeded } from "./injector.mjs";
 import {
   bindingNameFor,
   wrapMagicEvaluate,
   wrapMagicAddCustomCommand,
   wrapMagicAddCustomEvent,
   wrapCustomCommand,
-  unwrapEvaluateResult,
-  unwrapBindingCalled,
+  unwrapResponseIfNeeded,
+  unwrapEventIfNeeded,
 } from "./translate.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -207,7 +207,7 @@ async function handleConnection(client, earlyBuffer, earlyHandler, upstreamState
     upstream.send(JSON.stringify(message));
   });
 
-  const ext = await ensureMagicCDPExtension({ send: sendInternal, extensionPath });
+  const ext = await injectExtensionIfNeeded({ send: sendInternal, extensionPath });
   state.extSessionId = ext.sessionId;
   state.extTargetId = ext.targetId;
   state.hiddenSessionIds.add(ext.sessionId);
@@ -295,7 +295,7 @@ function handleUpstreamMessage(state, msg) {
     };
 
     if (p.kind === "magic_eval") {
-      try { replyToClient({ result: unwrapEvaluateResult(msg.result || {}) ?? {} }); }
+      try { replyToClient({ result: unwrapResponseIfNeeded(msg.result || {}, "evaluate") ?? {} }); }
       catch (e) { replyToClient({ error: { code: -32000, message: e.message } }); }
       return;
     }
@@ -319,7 +319,7 @@ function handleUpstreamMessage(state, msg) {
 
   // event
   if (msg.method === "Runtime.bindingCalled" && msg.sessionId === state.extSessionId) {
-    const u = unwrapBindingCalled(msg.params || {}, null);
+    const u = unwrapEventIfNeeded(msg.method, msg.params || {}, msg.sessionId || null, null);
     if (!u) return;
     // emit to root + every known client session, so any CDPSession listener
     // (Playwright per-target sessions) fires.

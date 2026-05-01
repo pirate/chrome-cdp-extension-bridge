@@ -108,7 +108,7 @@ def main():
         cdp.on("Custom.demo", on_demo)
 
         cdp.connect()
-        print(f"connected; ext {cdp.extension_id} session {cdp.session_id}")
+        print(f"connected; ext {cdp.extension_id} session {cdp.ext_session_id}")
 
         try: print(f"Browser.getVersion -> {cdp.send('Browser.getVersion')}")
         except Exception as e: print(f"Browser.getVersion -> (rejected by route: {str(e).splitlines()[0]} )")

@@ -1,4 +1,4 @@
-// injector.mjs: ensure the MagicCDP extension service worker is loaded in a
+// injector.mjs: inject the MagicCDP extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //
 // The caller hands in a `send(method, params, sessionId?)` function bound to
@@ -18,8 +18,8 @@
 const SW_URL_RE = /^chrome-extension:\/\/[a-z]+\/service_worker\.js$/;
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
 
-export async function ensureMagicCDPExtension({ send, extensionPath, timeoutMs = 10_000, discoveryWaitMs = 2_000 } = {}) {
-  if (typeof send !== "function") throw new Error("ensureMagicCDPExtension requires { send }");
+export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs = 10_000, discoveryWaitMs = 2_000 } = {}) {
+  if (typeof send !== "function") throw new Error("injectExtensionIfNeeded requires { send }");
   // extensionPath is only required as a fallback, when discovery does not turn
   // up an already-loaded MagicCDP service worker. Validate at the point of use
   // (step 2) so callers running against a browser that already has the
@@ -69,7 +69,7 @@ export async function ensureMagicCDPExtension({ send, extensionPath, timeoutMs =
   if (!extensionPath) {
     throw new Error(
       `No existing MagicCDP service worker was found and no extensionPath was provided to install one.\n` +
-      `Either start the browser with --load-extension=<path> so the SW exists at connect time, or pass extensionPath to ensureMagicCDPExtension/MagicCDPClient.`,
+      `Either start the browser with --load-extension=<path> so the SW exists at connect time, or pass extensionPath to injectExtensionIfNeeded/MagicCDPClient.`,
     );
   }
   let loadResult;
