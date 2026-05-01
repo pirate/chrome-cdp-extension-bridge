@@ -1,252 +1,246 @@
-# Chrome CDP Extension Bridge
+# MagicCDP
 
-Small PoC for using a Chrome extension service worker to implement custom CDP commands (smuggled inside of standard CDP commands).
+CDP sucks today. It is difficult for agents and humans to use without a library because it lacks:
 
-## Files
+- the ability to use it statelessly without maintaining mappings of sessionIds, targetIds, frameIds, execution context IDs, backendNodeId ownership, and event listeners
+- the ability to register custom CDP commands, abstractions, and events
+- the ability to easily call `chrome.*` extension APIs for things like `chrome.tabs.query({ active: true })`
+- the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of backendNodeId, targetId, and frameId
 
-- `client.mjs`: launches Chromium, connects to browser CDP, discovers the extension service worker target, sends custom commands, receives custom events, and prints latency.
-- `extension/service_worker.js`: implements the custom command/event surface exposed as `globalThis.Custom`.
-- `extension/manifest.json`: minimal MV3 extension manifest.
+- [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/tot/Extensions/)
 
-Run:
+While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
 
-```sh
-node client.mjs
+`MagicCDP` does not aim to solve all of these issues directly either. It exposes three new primitives that you can use to customize and extend CDP:
+
+- `Magic.evaluate`: run code in the `MagicCDP` extension service worker target, where `chrome.*` APIs and a `cdp` bridge back to the client are available
+- `Magic.addCustomCommand`: register a custom CDP command that is handled by the expression you provide
+- `Magic.addCustomEvent`: register a custom CDP event type with an expected payload schema
+
+Instead of inventing yet another browser driver library, MagicCDP fixes the issue at the root.
+
+MagicCDP uses an automatically injected extension bridge, giving you the ability to keep using the normal CDP websocket transport with extra features that work without IPC, native messaging, or external services for custom side-channel messages.
+
+```ts
+import { MagicCDPClient } from 'magic-cdp'
+
+const cdp = await MagicCDPClient({
+  cdp_url: 'http://localhost:9222', // ws://..., http://..., and https://... CDP endpoints work
+}).connect()
 ```
 
-Or pass a Chromium executable:
+## Run Extension Code
+
+Run code in an extension service worker context with access to `chrome.runtime`, `chrome.tabs`, and other extension APIs:
+
+```ts
+const foregroundTab = await cdp.send('Magic.evaluate', {
+  expression: '(await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]',
+})
+
+console.log(foregroundTab.url)
+```
+
+## Register Custom Commands
+
+Make extension snippets reusable by registering them as custom CDP commands:
+
+```ts
+await cdp.send('Magic.addCustomCommand', {
+  name: 'Custom.getForegroundTabInfo',
+  paramsSchema: cdp.types.chrome.tabs.queryInfo,
+  resultSchema: cdp.types.chrome.tabs.Tab,
+  expression: 'async (queryInfo) => (await chrome.tabs.query({ active: true, lastFocusedWindow: true, ...queryInfo }))[0]',
+})
+
+const foregroundTab = await cdp.send('Custom.getForegroundTabInfo')
+console.log(foregroundTab.url)
+```
+
+Schemas are currently metadata. JSON-schema-like values are mirrored into the extension; non-JSON schema objects such as Zod values are kept on the client.
+
+## Register Custom Events
+
+Register a custom event name and expected payload shape, then install logic that emits it:
+
+```ts
+await cdp.send('Magic.addCustomEvent', {
+  name: 'Custom.foregroundTargetChanged',
+  payloadSchema: z.object({ targetId: cdp.types.Target.TargetId }),
+})
+
+await cdp.send('Magic.evaluate', {
+  expression: `async ({ cdpSessionId }) => {
+    const cdp = MagicCDP.attachToSession(cdpSessionId)
+
+    chrome.tabs.onActivated.addListener(async (activeInfo) => {
+      const targets = await chrome.debugger.getTargets()
+      const target = targets.find(target => target.tabId === activeInfo.tabId)
+      if (target) await cdp.emit('Custom.foregroundTargetChanged', { targetId: target.id })
+    })
+  }`,
+  params: { cdpSessionId: cdp.sessionId },
+})
+
+cdp.on('Custom.foregroundTargetChanged', console.log)
+```
+
+If `cdpSessionId` is omitted, emitted custom events are broadcast to all connected CDP clients that installed the same event binding.
+
+## Current Repository
+
+- `client.mjs`: exports `MagicCDPClient`, `MagicCDP`, and `RawCDP`; it also contains a small runnable demo when executed directly.
+- `extension/service_worker.js`: exposes `globalThis.MagicCDP` and `globalThis.Magic` inside the extension service worker.
+- `extension/manifest.json`: MV3 extension manifest with `tabs` access and optional `debugger` access.
+
+Run the local demo:
 
 ```sh
-node client.mjs "/path/to/chromium"
+CHROME_PATH="/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" node client.mjs
 ```
+
+Or pass a Chromium or Chrome Canary executable:
+
+```sh
+node client.mjs "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
+```
+
+Stock Google Chrome is intentionally rejected for local launches. Chrome Canary is currently the verified path for `Extensions.loadUnpacked`; local Chromium builds also work if they expose that CDP method with `--enable-unsafe-extension-debugging`.
 
 ## Architecture
 
-```text
-external Node client
-  -> browser CDP WebSocket
-     - normal CDP: browser.cdp.send("Browser.getVersion")
-     - normal events: browser.cdp.on("Target.attachedToTarget")
+### Lifecycle
 
-external Node client
-  -> extension service worker CDP target
-     - custom command: Runtime.evaluate("globalThis.Custom.ping(...)")
-     - custom events: Runtime.addBinding("__bbCustomEvent")
+1. User creates a client in their local Node process:
+
+```ts
+const cdp = MagicCDPClient({ cdp_url })
 ```
 
-Normal protocol methods stay on the browser CDP socket. Custom methods are "smuggled" by evaluating a known `globalThis.Custom.*` method inside the extension service worker target. From there, the extension can initiate its own WebSocket connection out to `localhost:9222` and re-enter Chrome through the public CDP port. Custom events come back through `Runtime.addBinding`, which emits `Runtime.bindingCalled` on the service worker CDP connection.
+2. `await cdp.connect()`:
 
-## Flow Diagrams
+- connects to the running browser through normal raw CDP and stores that websocket in `cdp._cdp`
+- loads the MagicCDP extension with `Extensions.loadUnpacked(...)`
+- discovers and attaches to the `chrome-extension://<magiccdpserverid>/service_worker.js` service worker target
+- configures server-side routing defaults in the service worker
+- sends one `Magic.ping` custom command and waits for a `Magic.pong` custom event to confirm round-trip behavior
+- updates `cdp._extTargetId` and `cdp._extCdpSessionId` to point to the extension service worker target
 
-### 1. Normal CDP Call / Response
+3. `await cdp.send('Magic.addCustomEvent', { name: 'Custom.someEvent' })`:
 
-```mermaid
-flowchart LR
-  subgraph Node["Node client"]
-    direction LR
-    SDK["SDK"]
-    WS["WS client"]
-    SDK -->|"1. browser.cdp.send(...)"| WS
-  end
+- calls `Runtime.addBinding({ name: '__MagicCDP_Custom_someEvent' })` on the extension service worker session
+- registers the event name and binding name in `globalThis.MagicCDP`
+- maps later `Runtime.bindingCalled` payloads back to local `cdp.on(...)` listeners
 
-  subgraph Browser["Browser"]
-    direction LR
-    CDP["CDP router<br/>localhost:9222"]
-    SW["Extension service worker<br/>CDP target / JS context"]
-    Page["Page target"]
-    CDP -. "can dispatch to target" .-> Page
-  end
+4. `await cdp.send('Magic.evaluate', { expression })`:
 
-  Socket["CDP socket"]
+- calls `Runtime.evaluate` on the extension service worker session
+- evaluates the provided expression; function expressions are called with `(params, context)`
+- exposes `context.cdp`, `context.MagicCDP`, `context.chrome`, and the extension global `MagicCDP`
 
-  WS <-->|"2. CDP Browser.getVersion<br/>5. response"| Socket
-  Socket <-->|"3. Standard CDP request<br/>4. Standard CDP response"| CDP
+5. `cdp.on('Custom.someEvent', listener)`:
 
-  classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
-  class SW,Page idle;
+- listens locally on the Node client
+- receives events emitted by extension code through `cdp.emit(...)`
+- filters events by `cdp.sessionId` when the event was emitted to a specific session
+
+### `MagicCDPClient`
+
+`connect()` handles:
+
+- initial raw CDP connection to the browser
+- extension upload or discovery
+- service worker target attachment
+- `Runtime.enable` and `Runtime.addBinding` setup
+- base custom event setup for `Magic.pong`
+- `Magic.ping` latency measurement
+
+`send(method, params, options)` routes:
+
+- `Magic.evaluate`, `Magic.addCustomCommand`, and `Magic.addCustomEvent` through built-in client handlers
+- `Magic.*` and `Custom.*` commands through the extension service worker by default
+- standard CDP commands directly to the browser CDP websocket by default
+
+### `MagicCDPServer`
+
+`MagicCDPServer` lives inside the injected extension service worker.
+
+The service worker can be very small because the client can bootstrap behavior with `Runtime.evaluate`. In practice this repository defines `MagicCDPServer` in `service_worker.js` so startup is faster and the core primitives are available immediately.
+
+The extension exists to guarantee there is at least one target with the required `chrome.*` APIs enabled through extension permissions. `manifest.json` declares `tabs` access by default and `debugger` as optional permission for users who want `chrome_debugger` upstream routing.
+
+Available server helpers:
+
+```ts
+MagicCDPServer.discoverLoopbackCDP()
+MagicCDPServer.requestLoopbackCDP()
+MagicCDPServer.requestDebuggerCDP()
+MagicCDPServer.attachToSession(cdpSessionId)
 ```
 
-### 2. Normal CDP Event Listener / Event
+## Routing
 
-```mermaid
-flowchart LR
-  subgraph Node["Node client"]
-    direction LR
-    SDK["SDK"]
-    WS["WS client"]
-    SDK -->|"1. browser.cdp.on(...)"| WS
-    SDK -->|"2. browser.cdp.send(...)"| WS
-  end
+Users can customize how non-`Magic.*` CDP commands are handled.
 
-  subgraph Browser["Browser"]
-    direction LR
-    CDP["CDP router<br/>localhost:9222"]
-    SW["Extension service worker<br/>CDP target / JS context"]
-    Page["Page target<br/>about:blank"]
-    CDP -->|"5. dispatch to page target"| Page
-  end
-
-  Socket["CDP socket"]
-
-  WS -->|"3. CDP Target.attachToTarget"| Socket
-  Socket -->|"4. Standard CDP"| CDP
-  CDP -->|"6. attach session"| Page
-  Page -->|"7. Target.attachedToTarget<br/>{sessionId, targetInfo}"| CDP
-  CDP -->|"8. Target.attachedToTarget<br/>{sessionId, targetInfo}"| Socket
-  Socket -->|"9. Target.attachedToTarget<br/>{sessionId, targetInfo}"| WS
-  WS -->|"10. emit('Target.attachedToTarget', {sessionId, targetInfo})"| SDK
-
-  classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
-  class SW idle;
+```ts
+type CDPUpstream =
+  | 'service_worker'
+  | 'direct_cdp'
+  | 'loopback_cdp'
+  | 'chrome_debugger'
 ```
 
-### 3. Smuggled Custom Call / Response
+Client mode A sends non-`Magic.*` commands directly to the browser CDP target with no extension involvement:
 
-```mermaid
-flowchart LR
-  subgraph Node["Node client"]
-    direction LR
-    SDK["SDK"]
-    WS["WS client"]
-    SDK -->|"1. browser.act(...)"| WS
-  end
-
-  subgraph Browser["Browser"]
-    direction LR
-    ClientCDP["CDP Session for client<br/>localhost:9222"]
-    LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
-    SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.Custom"]
-    Page["Page target"]
-    ClientCDP -->|"4. dispatch Runtime.evaluate(Custom.act)"| SW
-    LoopbackCDP -->|"7. Input.dispatchMouseEvent"| Page
-    Page -->|"8. Input.dispatchMouseEvent result"| LoopbackCDP
-    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
-  end
-
-  ClientSocket["client CDP socket.<br/>carries smuggled ..."]
-  LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
-
-  ClientSocket ~~~ LoopbackSocket
-  WS -->|"2. Runtime.evaluate(Custom.act)"| ClientSocket
-  ClientSocket -->|"3. Runtime.evaluate(Custom.act)"| ClientCDP
-  SW -->|"5. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
-  LoopbackSocket -->|"6. Input.dispatchMouseEvent"| LoopbackCDP
-  LoopbackCDP -->|"9. Input.dispatchMouseEvent result"| LoopbackSocket
-  LoopbackSocket -->|"10. Input.dispatchMouseEvent result<br/>back into Browser"| SW
-  SW -->|"11. Runtime.evaluate(Custom.act) result"| ClientCDP
-  ClientCDP -->|"12. Runtime.evaluate(Custom.act) result"| ClientSocket
-  ClientSocket -->|"13. => {ok, action, target}"| WS
+```ts
+const version = await cdp.send('Browser.getVersion')
 ```
 
-### 4. Smuggled Custom Event Listener / Event
+Client mode B sends non-`Magic.*` commands to the extension service worker target and lets it intercept, manage, reject, or forward them:
 
-```mermaid
-flowchart LR
-  subgraph Node["Node client"]
-    direction LR
-    SDK["SDK"]
-    WS["WS client"]
-    SDK -->|"1. browser.on(...)"| WS
-    SDK -->|"6. browser.firecustomevent(...)"| WS
-  end
-
-  subgraph Browser["Browser"]
-    direction LR
-    ClientCDP["CDP Session for client<br/>localhost:9222"]
-    LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
-    SW["Extension service worker<br/>CDP target / JS context<br/>Custom + EventTarget"]
-    Page["Page target"]
-    ClientCDP -->|"5. dispatch Runtime.evaluate(Custom.on)<br/>9. dispatch Runtime.evaluate(Custom.firecustomevent)"| SW
-    LoopbackCDP -->|"12. Input.dispatchMouseEvent"| Page
-    Page -->|"13. Input.dispatchMouseEvent result"| LoopbackCDP
-    SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
-  end
-
-  ClientSocket["client CDP socket.<br/>carries smuggled ..."]
-  LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
-
-  ClientSocket ~~~ LoopbackSocket
-  WS -->|"2. CDP Runtime.addBinding"| ClientSocket
-  WS -->|"3. smuggled subscribe<br/>7. smuggled trigger"| ClientSocket
-  ClientSocket <-->|"4. Runtime.evaluate(Custom.on)<br/>8. Runtime.evaluate(Custom.firecustomevent)"| ClientCDP
-  SW -->|"10. WebSocket CDP loopback<br/>out of Browser<br/>Input.dispatchMouseEvent"| LoopbackSocket
-  LoopbackSocket -->|"11. Input.dispatchMouseEvent"| LoopbackCDP
-  LoopbackCDP -->|"14. Input.dispatchMouseEvent result"| LoopbackSocket
-  LoopbackSocket -->|"15. Input.dispatchMouseEvent result<br/>service worker emits EventTarget event"| SW
-  SW -->|"16. Runtime.bindingCalled<br/>{name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| ClientCDP
-  ClientCDP -->|"17. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| ClientSocket
-  ClientSocket -->|"18. Standard CDP event<br/>Runtime.bindingCalled {name:'__bbCustomEvent', payload:'{event:customevent,data:test}'}"| WS
-  WS -->|"19. emit('customevent', 'test')"| SDK
+```ts
+const cdp = MagicCDPClient({
+  direct_cdp_url: 'http://some-remote-host:9222',
+  routes: {
+    'Magic.*': 'service_worker',
+    'Custom.*': 'service_worker',
+    '*.*': 'service_worker',
+  },
+  server: {
+    loopback_cdp_url: 'http://localhost:9222',
+    routes: {
+      'Magic.*': 'service_worker',
+      'Custom.*': 'service_worker',
+      'Browser.*': 'loopback_cdp',
+      '*.*': 'chrome_debugger',
+    },
+  },
+})
 ```
 
-## Lifecycle
+Server modes:
 
-1. `client.mjs` launches Chromium with:
-   - `--remote-debugging-port=<free port>`
-   - `--remote-allow-origins=*`
-   - `--load-extension=./extension`
-2. The client reads `/json/version` and connects to the browser WebSocket.
-3. The client scans `/json/list` for a `service_worker` target whose URL ends in `/service_worker.js`.
-4. The client connects to that service worker target, enables `Runtime`, and installs `Runtime.addBinding("__bbCustomEvent")`.
-5. Normal calls go through `browser.cdp.send(...)`.
-6. Custom calls go through `browser.custom(...)`, which performs `Runtime.evaluate` in the service worker target.
-7. Custom subscriptions call `Custom.on(...)` in the service worker. The service worker stores listeners in a plain `EventTarget`.
-8. When extension logic emits an event, the service worker calls `globalThis.__bbCustomEvent(JSON.stringify(...))`; the client receives `Runtime.bindingCalled` and re-emits it through Node `EventEmitter`.
+- `service_worker`: handle commands in the extension service worker
+- `loopback_cdp`: forward commands through a CDP websocket reachable from the browser, useful for `Browser.*` commands that `chrome.debugger` does not support
+- `chrome_debugger`: forward target-scoped commands through `chrome.debugger.sendCommand`, which requires a `debuggee`, `tabId`, `targetId`, or `extensionId` in params
 
-## Demo Surface
+The default client route is conservative:
 
-```js
-const browser = new Browser();
-await browser.launch();
-
-console.log(await browser.cdp.send("Browser.getVersion"));
-
-browser.on("Target.attachedToTarget", console.log);
-browser.cdp.on("Target.attachedToTarget", console.log);
-browser.on("customevent", console.log);
-
-console.log(await browser.ping("test"));
-await browser.firecustomevent("test");
+```ts
+{
+  'Magic.*': 'service_worker',
+  'Custom.*': 'service_worker',
+  '*.*': 'direct_cdp',
+}
 ```
 
-`browser.ping(value)` calls `Custom.ping` in the extension. The extension performs a cheap loopback `Browser.getVersion` through the public CDP port and returns:
+The default server route is:
 
-```js
-{ value, from: "extension-service-worker", browserProduct: "Chrome/..." }
-```
-
-## Constraints
-
-- This does not add real CDP methods like `Custom.ping` to Chrome. The external client owns the routing convention.
-- The service worker target must be visible in `/json/list`; this PoC discovers it by URL suffix rather than extension id.
-- `Runtime.evaluate` and `Runtime.addBinding` are used only against the extension service worker target, not page JS.
-- Page JavaScript does not see the command surface or custom event binding.
-- `--remote-allow-origins=*` is needed so extension-origin WebSockets can connect to the exposed CDP port.
-
-## Alternatives Explored
-
-- `chrome.debugger`: can send CDP commands to targets, but does not expose active remote-debugging clients or their raw request/response streams.
-- Connecting the extension directly to `ws://localhost:9222`: the root is not a CDP WebSocket endpoint. The real browser endpoint is discovered from `/json/version`.
-- Listening to another CDP client's traffic: separate CDP clients do not see each other's requests or responses.
-- WebMCP: page-visible/tool-oriented, so it is not suitable when page JS must not detect the control plane.
-- `Extensions.*` storage mailbox: possible in some target contexts but awkward, slower, and more brittle than directly using the extension service worker target.
-- Local CDP proxy: clean and powerful, but adds another process and was not needed for this PoC.
-
-## Latency
-
-Latest local run uses only low-overhead local operations:
-
-- normal call: `Browser.getVersion`
-- custom call: `Custom.ping`, including extension -> localhost CDP loopback -> browser
-- normal event: `Target.attachedToTarget` on the existing `about:blank` page
-- custom event: extension -> localhost CDP loopback -> service-worker `EventTarget` -> `Runtime.addBinding`
-
-```js
-latencyMs {
-  launchToFirstBrowserGetVersion: 1262.603,
-  normalBrowserGetVersionRoundTrip: 0.654,
-  smuggledCustomPingRoundTrip: 9.345,
-  normalOnSubscribeTriggerEvent: 1.836,
-  smuggledCustomOnSubscribeTriggerEvent: 29.592
+```ts
+{
+  'Magic.*': 'service_worker',
+  'Custom.*': 'service_worker',
+  'Browser.*': 'loopback_cdp',
+  '*.*': 'chrome_debugger',
 }
 ```
