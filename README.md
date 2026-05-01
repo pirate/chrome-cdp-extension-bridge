@@ -8,7 +8,7 @@ CDP is powerful but it's been stretched to many use-cases beyond its initial aud
 
 - lacks the ability to easily call chrome.* extension APIs for things like `chrome.tabs.query({ active: true })`
 
-- *lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of backendNodeId, targetId, and frameId* (unrealistic dream? maybe not)
+- *lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of unstable identifiers like sessionId, targetId, frameId, backendNodeId* (unrealistic dream? maybe not)
 
 While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
 
