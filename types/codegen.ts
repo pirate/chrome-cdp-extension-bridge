@@ -207,9 +207,18 @@ for (const base of magicCommands) {
     );
   } else if (base === "AddCustomEvent") {
     lines.push(
-      `        const name = normalizeMagicName(parsed.name);`,
-      `        const eventSchema = normalizeMagicPayloadSchema(parsed.eventSchema);`,
-      `        const response = Magic.${base}Response.parse(await send(${JSON.stringify(commandName)}, { ...parsed, name, eventSchema: null }));`,
+      `        const directSchema = Magic.ZodType.safeParse(parsed);`,
+      `        if (directSchema.success) {`,
+      `          const name = normalizeMagicName(directSchema.data);`,
+      `          const eventSchema = normalizeMagicPayloadSchema(directSchema.data);`,
+      `          const response = Magic.${base}Response.parse(await send(${JSON.stringify(commandName)}, { name, eventSchema: null }));`,
+      `          hooks.onCustomEvent?.(name, eventSchema);`,
+      `          return response;`,
+      `        }`,
+      `        const objectParams = Magic.AddCustomEventObjectParams.parse(parsed);`,
+      `        const name = normalizeMagicName(objectParams.name);`,
+      `        const eventSchema = normalizeMagicPayloadSchema(objectParams.eventSchema);`,
+      `        const response = Magic.${base}Response.parse(await send(${JSON.stringify(commandName)}, { ...objectParams, name, eventSchema: null }));`,
       `        hooks.onCustomEvent?.(name, eventSchema);`,
       `        return response;`,
     );

@@ -11157,10 +11157,21 @@ export function createCdpAliases(send: CdpAliasSend, hooks: CdpAliasHooks = {}):
       },
       addCustomEvent: async (params?: unknown) => {
         const parsed = Magic.AddCustomEventParams.parse(params ?? {});
-        const name = normalizeMagicName(parsed.name);
-        const eventSchema = normalizeMagicPayloadSchema(parsed.eventSchema);
+        const directSchema = Magic.ZodType.safeParse(parsed);
+        if (directSchema.success) {
+          const name = normalizeMagicName(directSchema.data);
+          const eventSchema = normalizeMagicPayloadSchema(directSchema.data);
+          const response = Magic.AddCustomEventResponse.parse(
+            await send("Magic.addCustomEvent", { name, eventSchema: null }),
+          );
+          hooks.onCustomEvent?.(name, eventSchema);
+          return response;
+        }
+        const objectParams = Magic.AddCustomEventObjectParams.parse(parsed);
+        const name = normalizeMagicName(objectParams.name);
+        const eventSchema = normalizeMagicPayloadSchema(objectParams.eventSchema);
         const response = Magic.AddCustomEventResponse.parse(
-          await send("Magic.addCustomEvent", { ...parsed, name, eventSchema: null }),
+          await send("Magic.addCustomEvent", { ...objectParams, name, eventSchema: null }),
         );
         hooks.onCustomEvent?.(name, eventSchema);
         return response;

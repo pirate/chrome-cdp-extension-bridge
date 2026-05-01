@@ -84,10 +84,11 @@ export const MagicAddCustomCommandParamsSchema = z.object({
 });
 export type MagicAddCustomCommandParams = z.infer<typeof MagicAddCustomCommandParamsSchema>;
 
-export const MagicAddCustomEventParamsSchema = z.object({
+export const MagicAddCustomEventObjectParamsSchema = z.object({
   name: MagicNameSchema,
   eventSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
 });
+export const MagicAddCustomEventParamsSchema = z.union([MagicZodTypeSchema, MagicAddCustomEventObjectParamsSchema]);
 export type MagicAddCustomEventParams = z.infer<typeof MagicAddCustomEventParamsSchema>;
 
 export const MagicAddMiddlewareParamsSchema = z.object({
@@ -231,7 +232,7 @@ export const MagicCustomCommandRegistrationSchema = MagicAddCustomCommandParamsS
 });
 export type MagicCustomCommandRegistration = z.infer<typeof MagicCustomCommandRegistrationSchema>;
 
-export const MagicCustomEventRegistrationSchema = MagicAddCustomEventParamsSchema.extend({
+export const MagicCustomEventRegistrationSchema = MagicAddCustomEventObjectParamsSchema.extend({
   bindingName: z.string(),
 });
 export type MagicCustomEventRegistration = z.infer<typeof MagicCustomEventRegistrationSchema>;
@@ -372,6 +373,7 @@ export const Magic = {
   PayloadSchemaSpec: MagicPayloadSchemaSpecSchema,
   EvaluateParams: MagicEvaluateParamsSchema,
   AddCustomCommandParams: MagicAddCustomCommandParamsSchema,
+  AddCustomEventObjectParams: MagicAddCustomEventObjectParamsSchema,
   AddCustomEventParams: MagicAddCustomEventParamsSchema,
   AddMiddlewareParams: MagicAddMiddlewareParamsSchema,
   ConfigureParams: MagicConfigureParamsSchema,

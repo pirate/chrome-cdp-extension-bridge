@@ -78,10 +78,7 @@ const PageForegroundPageChanged = z
   .passthrough()
   .meta({ id: "Page.foregroundPageChanged" });
 
-await cdp.Magic.addCustomEvent({
-  name: PageForegroundPageChanged,
-  eventSchema: PageForegroundPageChanged,
-});
+await cdp.Magic.addCustomEvent(PageForegroundPageChanged);
 await cdp.Magic.evaluate({
   expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) =>
     cdp.emit("Page.foregroundPageChanged", {
@@ -185,13 +182,13 @@ dist/                     Built JS output used by the extension and Node CLI scr
 1. Open a raw CDP websocket to the browser. If no `cdp_url` is supplied, the JS client first tries the live stock-Chrome endpoint at `http://127.0.0.1:9222`, then auto-launches a test browser only if that is not reachable.
 2. `bridge/injector.js` either discovers an existing MagicCDP service worker target or installs the extension via `Extensions.loadUnpacked` when the connected browser permits it.
 3. Attach a session to that SW target and `Runtime.enable` on it.
-4. Optionally call `globalThis.MagicCDP.configure(...)` to push routing config into the SW (only needed when using `--loopback` or non-default server-side routing).
+4. Call `globalThis.MagicCDP.configure(...)` to push the resolved loopback websocket and any explicit server route overrides into the SW. The clients do this automatically by default.
 
 ### Send
 
 - `Magic.evaluate({ expression, params, cdpSessionId })` → `Runtime.evaluate` on the ext session, wrapping the expression with an IIFE that exposes `params` and `cdp = MagicCDP.attachToSession(...)`.
 - `Magic.addCustomCommand({ name, expression, ... })` → `Runtime.evaluate` calling `globalThis.MagicCDP.addCustomCommand({ ... })` with the user expression embedded as the handler.
-- `Magic.addCustomEvent({ name, eventSchema })` → `Runtime.addBinding({ name: "__MagicCDP_<name>" })`, then a `Runtime.evaluate` registering the event in `globalThis.MagicCDP`.
+- `Magic.addCustomEvent(EventSchema.meta({ id }))` → `Runtime.addBinding({ name: "__MagicCDP_<id>" })`, then a `Runtime.evaluate` registering the event in `globalThis.MagicCDP`.
 - `Magic.addMiddleware({ name, phase, expression })` → `Runtime.evaluate` registering a service-worker middleware for `phase: "request" | "response" | "event"`. Use `name: "*"` to match every method/event in that phase, or pass generated names like `cdp.Target.targetInfoChanged`.
 - `Custom.X(params)` → `Runtime.evaluate` calling `globalThis.MagicCDP.handleCommand("Custom.X", params, cdpSessionId)`.
 
@@ -216,7 +213,7 @@ When SW handlers `cdp.emit('Custom.X', payload)`, the SW invokes `globalThis.__M
 type CDPUpstream = "service_worker" | "direct_cdp" | "auto" | "loopback_cdp" | "chrome_debugger";
 
 // client-side defaults
-const clientRoutes = { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp" } as const;
+const clientRoutes = { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker" } as const;
 
 // server-side defaults (inside the SW)
 const serverRoutes = { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "auto" } as const;
@@ -415,5 +412,96 @@ smuggledCustomOnSubscribeTriggerEvent: 29.6 ms
 ```
 
 Custom roundtrip overhead is dominated by `Runtime.evaluate` + the SW's loopback CDP dial, not by wrap/unwrap. Avoid `auto` discovery in latency-sensitive paths if you can pre-configure `loopback_cdp_url` directly.
+
+</details>
+
+<details>
+<summary><b>macOS Chrome compatibility matrix (tested 2026-05-01)</b></summary>
+
+Tested browsers:
+
+- `/Applications/Google Chrome.app` — Google Chrome `148.0.7778.96 beta`
+- `/Applications/Google Chrome Canary.app` — Google Chrome `149.0.7819.0 canary`
+- Playwright Chrome for Testing — `147.0.7727.15`
+
+Latency columns:
+
+- `direct` — Magic client to browser raw CDP `Page.getFrameTree` against an attached `about:blank` page target.
+- `pong` — Magic client to browser to extension service worker `Magic.pong` round trip.
+- `loopback` — Magic client to browser to extension service worker to loopback CDP to browser `Page.getFrameTree`.
+- `debugger` — Magic client to browser to extension service worker to `chrome.debugger.sendCommand` `Page.getFrameTree`.
+
+The launched-browser rows used an isolated temporary user data dir. The live/default-profile row is separate because it depends on the user enabling Chrome's `chrome://inspect/#remote-debugging` flow and accepting Chrome's connection prompt.
+
+| Browser                           | UI               | Mode         | Works | `chrome.tabs.query` | `chrome.debugger` | `Browser.getVersion` | `Target.getTargets` | Default profile | direct ms | pong ms | loopback ms | debugger ms |
+| --------------------------------- | ---------------- | ------------ | ----- | ------------------- | ----------------- | -------------------- | ------------------- | --------------- | --------: | ------: | ----------: | ----------: |
+| Chrome Beta 148                   | `--headless=new` | `--direct`   | yes   | yes                 | no                | yes                  | yes                 | no              |       4.8 |       3 |           - |           - |
+| Chrome Beta 148                   | `--headless=new` | `--loopback` | yes   | yes                 | no                | yes                  | yes                 | no              |       2.3 |       2 |        13.5 |           - |
+| Chrome Beta 148                   | `--headless=new` | `--debugger` | no    | yes                 | no                | no                   | no                  | no              |       5.3 |       5 |           - |           - |
+| Chrome Beta 148                   | headful          | `--direct`   | yes   | yes                 | no                | yes                  | yes                 | no              |       5.1 |       1 |           - |           - |
+| Chrome Beta 148                   | headful          | `--loopback` | yes   | yes                 | no                | yes                  | yes                 | no              |       2.4 |       1 |        13.5 |           - |
+| Chrome Beta 148                   | headful          | `--debugger` | no    | yes                 | no                | no                   | no                  | no              |       2.2 |       2 |           - |           - |
+| Chrome Canary 149                 | `--headless=new` | `--direct`   | yes   | yes                 | yes               | yes                  | yes                 | no              |       2.2 |       1 |           - |           - |
+| Chrome Canary 149                 | `--headless=new` | `--loopback` | yes   | yes                 | yes               | yes                  | yes                 | no              |       2.6 |       1 |        14.4 |           - |
+| Chrome Canary 149                 | `--headless=new` | `--debugger` | yes   | yes                 | yes               | no                   | no                  | no              |       2.1 |       1 |           - |         1.4 |
+| Chrome Canary 149                 | headful          | `--direct`   | yes   | yes                 | yes               | yes                  | yes                 | no              |       2.4 |       1 |           - |           - |
+| Chrome Canary 149                 | headful          | `--loopback` | yes   | yes                 | yes               | yes                  | yes                 | no              |       2.2 |       1 |        13.5 |           - |
+| Chrome Canary 149                 | headful          | `--debugger` | yes   | yes                 | yes               | no                   | no                  | no              |       2.3 |       0 |           - |         1.2 |
+| Playwright Chrome for Testing 147 | `--headless=new` | `--direct`   | yes   | yes                 | yes\*             | yes                  | yes                 | no              |       2.3 |       3 |           - |           - |
+| Playwright Chrome for Testing 147 | `--headless=new` | `--loopback` | yes   | yes                 | yes\*             | yes                  | yes                 | no              |       1.9 |       1 |        13.0 |           - |
+| Playwright Chrome for Testing 147 | `--headless=new` | `--debugger` | yes   | yes                 | yes\*             | no                   | no                  | no              |       2.6 |       1 |           - |         0.7 |
+| Playwright Chrome for Testing 147 | headful          | `--direct`   | yes   | yes                 | yes\*             | yes                  | yes                 | no              |       2.0 |       1 |           - |           - |
+| Playwright Chrome for Testing 147 | headful          | `--loopback` | yes   | yes                 | yes\*             | yes                  | yes                 | no              |       2.4 |       1 |        12.5 |           - |
+| Playwright Chrome for Testing 147 | headful          | `--debugger` | yes   | yes                 | yes\*             | no                   | no                  | no              |       2.1 |       1 |           - |         1.2 |
+
+`*` Playwright Chrome for Testing exposes `chrome.debugger` when the Magic extension is launched with `--load-extension`. With auto-injection only, `--direct` and `--loopback` still work, but `chrome.debugger` is not available in the borrowed/injected service worker.
+
+Live/default-profile status:
+
+| Browser                           | UI               | Mode     | Result                                                                                                 |
+| --------------------------------- | ---------------- | -------- | ------------------------------------------------------------------------------------------------------ |
+| Chrome Beta 148                   | `--headless=new` | `--live` | not applicable                                                                                         |
+| Chrome Beta 148                   | headful          | `--live` | current advertised `DevToolsActivePort` was stale; websocket failed with `ECONNREFUSED 127.0.0.1:9222` |
+| Chrome Canary 149                 | `--headless=new` | `--live` | not applicable                                                                                         |
+| Chrome Canary 149                 | headful          | `--live` | no active live endpoint found                                                                          |
+| Playwright Chrome for Testing 147 | `--headless=new` | `--live` | not applicable                                                                                         |
+| Playwright Chrome for Testing 147 | headful          | `--live` | no active live endpoint found                                                                          |
+
+Minimum viable macOS CLI args:
+
+| Mode                  | Browsers                          | Args                                                                                                                              |
+| --------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `--direct` headful    | all three                         | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                                       |
+| `--direct` headless   | all three                         | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                        |
+| `--loopback` headful  | all three                         | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> --remote-allow-origins=* about:blank`                              |
+| `--loopback` headless | all three                         | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> --remote-allow-origins=* about:blank`               |
+| `--debugger`          | Chrome Beta 148                   | no working set found; `chrome.debugger` is unavailable in the extension service worker                                            |
+| `--debugger` headful  | Chrome Canary 149                 | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                                       |
+| `--debugger` headless | Chrome Canary 149                 | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                        |
+| `--debugger` headful  | Playwright Chrome for Testing 147 | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> --load-extension=<repo>/dist/extension about:blank`                |
+| `--debugger` headless | Playwright Chrome for Testing 147 | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> --load-extension=<repo>/dist/extension about:blank` |
+
+Recommended full macOS launch args:
+
+```bash
+--remote-debugging-port=<port>
+--user-data-dir=<temp-profile>
+--remote-allow-origins=*
+--enable-unsafe-extension-debugging
+--load-extension=<repo>/dist/extension
+--no-first-run
+--no-default-browser-check
+--disable-default-apps
+--disable-background-networking
+--disable-backgrounding-occluded-windows
+--disable-renderer-backgrounding
+--disable-background-timer-throttling
+--disable-sync
+--password-store=basic
+--use-mock-keychain
+about:blank
+```
+
+Add `--headless=new` for headless launches. Do not pass `--no-sandbox`, `--disable-gpu`, or `--remote-debugging-address` on macOS. On Linux only, pass `--no-sandbox` when there is no usable sandbox/display environment.
 
 </details>

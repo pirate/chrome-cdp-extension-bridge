@@ -257,7 +257,7 @@ async function main() {
       })
       .passthrough()
       .meta({ id: "Custom.foregroundTargetChanged" });
-    await cdp.Magic.addCustomEvent({ name: ForegroundTargetChanged, eventSchema: ForegroundTargetChanged });
+    await cdp.Magic.addCustomEvent(ForegroundTargetChanged);
     cdp.on(ForegroundTargetChanged, (event) => {
       console.log("Custom.foregroundTargetChanged ->", event);
       foregroundEvents.push(event);

@@ -49,7 +49,7 @@ import {
   CdpEventFrameSchema,
   CdpResponseFrameSchema,
   MagicAddCustomCommandParamsSchema,
-  MagicAddCustomEventParamsSchema,
+  MagicAddCustomEventObjectParamsSchema,
   MagicAddMiddlewareParamsSchema,
   MagicEvaluateParamsSchema,
   normalizeMagicName,
@@ -340,7 +340,7 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
   // so the response can be steered back to the right Playwright CDPSession.
   if (MAGIC_METHODS.has(method) || ROUTE_TO_SW_RE.test(method)) {
     if (method === "Magic.addCustomEvent") {
-      const addEventParams = MagicAddCustomEventParamsSchema.parse(params ?? {});
+      const addEventParams = MagicAddCustomEventObjectParamsSchema.parse(params ?? {});
       const eventName = normalizeMagicName(addEventParams.name);
       // two-step: addBinding, then evaluate the addCustomEvent registration.
       const upId = state.nextUpstreamId++;

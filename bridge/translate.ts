@@ -5,7 +5,6 @@
 
 import type {
   MagicAddCustomCommandParams,
-  MagicAddCustomEventParams,
   MagicAddMiddlewareParams,
   MagicBindingPayload,
   MagicCustomPayload,
@@ -119,7 +118,7 @@ export function wrapMagicAddCustomCommand({
   };
 }
 
-export function wrapMagicAddCustomEvent({ name }: MagicAddCustomEventParams): cdp.types.ts.Runtime.EvaluateParams {
+export function wrapMagicAddCustomEvent({ name }: { name: string }): cdp.types.ts.Runtime.EvaluateParams {
   const eventName = normalizeMagicName(name);
   return {
     expression: `
@@ -183,7 +182,7 @@ function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, c
   }
 
   if (method === "Magic.addCustomEvent") {
-    const eventParams = params as MagicAddCustomEventParams;
+    const eventParams = params as { name: any };
     const eventName = normalizeMagicName(eventParams.name);
     return [
       {
