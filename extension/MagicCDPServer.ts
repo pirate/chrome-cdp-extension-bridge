@@ -427,8 +427,14 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
             const pageTargets = targetInfos.filter((target) => target.type === "page");
             resolvedTargetId =
               pageTargets.find((target) => resolvedTabUrl && target.url === resolvedTabUrl)?.targetId ||
-              (pageTargets.length === 1 ? pageTargets[0]?.targetId : null) ||
+              pageTargets[0]?.targetId ||
               null;
+          }
+          if (!resolvedTargetId) {
+            const created = (await callOnWs("Target.createTarget", {
+              url: "about:blank#magic-cdp",
+            })) as cdp.types.ts.Target.CreateTargetResult;
+            resolvedTargetId = created.targetId || null;
           }
         }
         if (!resolvedTargetId) throw new Error(`loopback_cdp route for ${method} could not resolve a page target.`);
@@ -463,7 +469,16 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         if (resolvedDebuggee[key] === null || resolvedDebuggee[key] === undefined) delete resolvedDebuggee[key];
       }
       if (Object.keys(resolvedDebuggee).length === 0) {
-        const [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
+        let [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tab?.id) [tab] = await chromeApi.tabs.query({});
+        if (!tab?.id) {
+          try {
+            tab = await chromeApi.tabs.create({ url: "https://example.com/#magic-cdp", active: true });
+          } catch {
+            const win = await chromeApi.windows.create({ url: "https://example.com/#magic-cdp", focused: true });
+            tab = win.tabs?.[0] || null;
+          }
+        }
         if (!tab?.id) throw new Error(`chrome_debugger route for ${method} could not find an active tab.`);
         resolvedDebuggee.tabId = tab.id;
       }
