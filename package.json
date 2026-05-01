@@ -1,0 +1,14 @@
+{
+  "name": "magic-cdp-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node playwright-demo.mjs",
+    "bridge": "node bridge.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.56.1",
+    "ws": "^8.18.0"
+  }
+}
