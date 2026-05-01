@@ -57,7 +57,7 @@ import {
 import { events } from "../types/zod.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_EXTENSION_PATH = path.join(ROOT, "extension");
+const DEFAULT_EXTENSION_PATH = path.resolve(ROOT, "..", "extension");
 const DEFAULT_PORT = 9223;
 const DEFAULT_UPSTREAM = "http://127.0.0.1:9222";
 

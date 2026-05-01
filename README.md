@@ -37,7 +37,12 @@ import { z } from "zod";
 // In stock Google Chrome, visit chrome://inspect/#remote-debugging first to
 // expose the current browser at localhost:9222. Passing cdp_url is optional
 // when that endpoint is live.
-const cdp = new MagicCDPClient({ cdp_url: "http://127.0.0.1:9222" }); // ws://... URLs work too
+const cdp_url = "http://127.0.0.1:9222"; // ws://... URLs work too
+const cdp = new MagicCDPClient({
+  cdp_url,
+  routes: { "Target.getTargets": "service_worker" },
+  server: { loopback_cdp_url: cdp_url, routes: { "*.*": "loopback_cdp" } },
+});
 await cdp.connect();
 
 // use it like a normal CDP connection, send normal CDP, register for normal CDP events
@@ -58,7 +63,9 @@ await cdp.Magic.addCustomCommand({
     tabId: (await chrome.debugger.getTargets()).find(t => t.id === targetId)?.tabId ?? null
   })`,
 });
-await cdp.send("Custom.tabIdFromTargetId", { targetId: "3423A1..." }); // -> { tabId: 22352432 }
+const { targetInfos } = await cdp.Target.getTargets();
+const pageTarget = targetInfos.find((targetInfo) => targetInfo.type === "page");
+console.log(await cdp.send("Custom.tabIdFromTargetId", { targetId: pageTarget.targetId })); // -> { tabId: 22352432 }
 
 // ✨ set up new custom CDP events to fire + receive them just like normal CDP
 // this example sets up a truly accurate "foreground focus" tracking event,
@@ -85,21 +92,26 @@ await cdp.Magic.evaluate({
 });
 cdp.on(PageForegroundPageChanged, console.log);
 
-// ✨ Intercept, modify, and extend existing CDP commands/events/params on the wire
+// ✨ Intercept, modify, and extend existing CDP commands/results/events on the wire
 await cdp.Magic.addMiddleware({
-  name: cdp.Target.targetInfoChanged,
-  phase: cdp.EVENT,
+  name: cdp.Target.getTargets,
+  phase: cdp.RESPONSE,
   expression: `async (payload, next) => {
-    const { tabId } = await cdp.send("Custom.tabIdFromTargetId", {
-      targetId: payload.targetInfo.targetId,
-    });
-    payload.targetInfo.tabId = tabId;
+    for (const targetInfo of payload.targetInfos) {
+      const { tabId } = await cdp.send("Custom.tabIdFromTargetId", {
+        targetId: targetInfo.targetId,
+      });
+      targetInfo.tabId = tabId;
+    }
     return next(payload);
   }`,
 });
+console.log(await cdp.Target.getTargets()); // TargetInfo entries now include tabId
 
 // typed + zod-enforced imperative aliases are generated for standard CDP too
-console.log(await cdp.Target.createTarget({ url: "https://example.com" }));
+const created = await cdp.Target.createTarget({ url: "https://example.com" });
+await cdp.Target.activateTarget({ targetId: created.targetId }); // triggers Page.foregroundPageChanged
+console.log(created);
 ```
 
 ## Run the demos
@@ -108,6 +120,7 @@ Each demo launches Chrome with the extension loaded, headful on macOS and `--hea
 
 ```sh
 pnpm run demo:js                    # defaults to --loopback; also supports --direct / --debugger
+python3 -m pip install websocket-client
 pnpm run demo:python
 pnpm run demo:go
 ```
@@ -159,7 +172,7 @@ dist/                     Built JS output used by the extension and Node CLI scr
 
 - Stock Google Chrome can be used without relaunch flags: visit `chrome://inspect/#remote-debugging` to expose the current browser at `http://127.0.0.1:9222`, and load/install the MagicCDP extension in that profile. If no `cdp_url` is passed, the JS client probes that endpoint before auto-launching a test browser.
 - Automated/test browsers can still preload the extension with `--load-extension=<path>`. `Extensions.loadUnpacked` is used as a fallback when the connected browser exposes it over CDP.
-- Node ≥ 22 (we use the native global `WebSocket`), Python ≥ 3.11 with `websocket-client`, Go ≥ 1.24 with `gobwas/ws`.
+- Node ≥ 22, Python ≥ 3.11 with `websocket-client`, Go ≥ 1.24 with `gobwas/ws`.
 
 ---
 
@@ -202,10 +215,10 @@ When SW handlers `cdp.emit('Custom.X', payload)`, the SW invokes `globalThis.__M
 type CDPUpstream = "service_worker" | "direct_cdp" | "auto" | "loopback_cdp" | "chrome_debugger";
 
 // client-side defaults
-{ "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp" }
+const clientRoutes = { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp" } as const;
 
 // server-side defaults (inside the SW)
-{ "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "auto" }
+const serverRoutes = { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "auto" } as const;
 ```
 
 - **`service_worker`** — handle in the extension SW.
