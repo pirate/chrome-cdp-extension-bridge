@@ -87,11 +87,15 @@ export function unwrapEvaluateResult(result) {
 }
 
 // Returns { event, data } or null when the binding is not a MagicCDP event,
-// or when the payload is scoped to a different cdpSessionId than ourSessionId.
+// when the payload is scoped to a different cdpSessionId than ourSessionId,
+// or when the payload string is not valid JSON.
 export function unwrapBindingCalled(params, ourSessionId = null) {
   const event = eventNameFor(params?.name || "");
   if (!event) return null;
-  const payload = JSON.parse(params.payload || "{}");
+  let payload;
+  try { payload = JSON.parse(params.payload || "{}"); }
+  catch { return null; }
+  if (payload == null || typeof payload !== "object") return null;
   if (ourSessionId != null && payload.cdpSessionId && payload.cdpSessionId !== ourSessionId) return null;
   const data = Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
   return { event, data };

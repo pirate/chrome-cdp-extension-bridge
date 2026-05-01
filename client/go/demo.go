@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -99,7 +100,10 @@ func main() {
 	if chromePath == "" {
 		chromePath = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 	}
-	root, _ := filepath.Abs(filepath.Join("..", ".."))
+	// Resolve repo root from this source file so the demo runs correctly from
+	// any CWD (`go run ./client/go`, `go run .` from inside client/go, etc.).
+	_, thisFile, _, _ := runtime.Caller(0)
+	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	extensionPath := filepath.Join(root, "extension")
 	profile, _ := os.MkdirTemp("", "magic-cdp-go.")
 	defer os.RemoveAll(profile)

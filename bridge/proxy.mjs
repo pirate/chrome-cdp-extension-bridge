@@ -118,11 +118,22 @@ async function ensureUpstream(upstreamState, { autoLaunch, launchOptions }) {
   if (!autoLaunch) {
     throw new Error(`Upstream CDP at ${upstreamState.url} is not reachable. Pass --no-auto-launch only when an upstream is already running.`);
   }
-  if (upstreamState.launched) return;  // already launched, just wait
-  log(`upstream ${upstreamState.url} not reachable, launching local Chrome...`);
-  upstreamState.launched = await launchChrome(launchOptions);
-  upstreamState.url = upstreamState.launched.cdpUrl;
-  log(`launched local Chrome at ${upstreamState.url}`);
+  // dedupe concurrent launch attempts: stash the in-flight promise on
+  // upstreamState so callers racing into ensureUpstream all await the same
+  // single launchChrome.
+  if (!upstreamState.launchPromise) {
+    log(`upstream ${upstreamState.url} not reachable, launching local Chrome...`);
+    upstreamState.launchPromise = launchChrome(launchOptions).then(launched => {
+      upstreamState.launched = launched;
+      upstreamState.url = launched.cdpUrl;
+      log(`launched local Chrome at ${upstreamState.url}`);
+      return launched;
+    }).catch(err => {
+      upstreamState.launchPromise = null;
+      throw err;
+    });
+  }
+  await upstreamState.launchPromise;
 }
 
 function rewriteWsUrls(value, host) {
@@ -307,10 +318,11 @@ function handleUpstreamMessage(state, msg) {
   // hide bridge-attached session traffic from the client
   if (msg.sessionId && state.hiddenSessionIds.has(msg.sessionId)) return;
 
-  // hide all events about the extension SW target. If the client's auto-attach
-  // creates a fresh orphan session against that target, hide it and detach.
-  const targetId = msg.params?.targetInfo?.targetId || msg.params?.targetId || null;
-  if (targetId && state.hiddenTargetIds.has(targetId)) return;
+  // If the client's auto-attach creates a fresh orphan session against the
+  // hidden SW target, hide that session and detach it upstream. This MUST run
+  // before the generic hiddenTargetIds drop below: for an attachedToTarget
+  // event, msg.params.targetInfo.targetId is the SW target (which we want to
+  // act on), not a target the client owns.
   if (msg.method === "Target.attachedToTarget" && msg.params?.targetInfo?.targetId
       && state.hiddenTargetIds.has(msg.params.targetInfo.targetId)) {
     const orphan = msg.params.sessionId;
@@ -322,6 +334,10 @@ function handleUpstreamMessage(state, msg) {
     }
     return;
   }
+
+  // hide all other events about the extension SW target.
+  const targetId = msg.params?.targetInfo?.targetId || msg.params?.targetId || null;
+  if (targetId && state.hiddenTargetIds.has(targetId)) return;
   if (msg.method?.startsWith("Target.detached") && msg.params?.sessionId && state.hiddenSessionIds.has(msg.params.sessionId)) return;
 
   if (!state.bootstrapped) return; // do not leak bootstrap events

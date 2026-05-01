@@ -20,7 +20,10 @@ const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
 
 export async function ensureMagicCDPExtension({ send, extensionPath, timeoutMs = 10_000, discoveryWaitMs = 2_000 } = {}) {
   if (typeof send !== "function") throw new Error("ensureMagicCDPExtension requires { send }");
-  if (!extensionPath) throw new Error("ensureMagicCDPExtension requires { extensionPath }");
+  // extensionPath is only required as a fallback, when discovery does not turn
+  // up an already-loaded MagicCDP service worker. Validate at the point of use
+  // (step 2) so callers running against a browser that already has the
+  // extension loaded don't have to provide a path at all.
 
   // 1. Discover an existing MagicCDP service worker. Extensions loaded with
   // --load-extension at browser launch take a moment to spin their SW *and*
@@ -63,6 +66,12 @@ export async function ensureMagicCDPExtension({ send, extensionPath, timeoutMs =
   for (const a of attached) await send("Target.detachFromTarget", { sessionId: a.sessionId }).catch(() => {});
 
   // 2. Try Extensions.loadUnpacked.
+  if (!extensionPath) {
+    throw new Error(
+      `No existing MagicCDP service worker was found and no extensionPath was provided to install one.\n` +
+      `Either start the browser with --load-extension=<path> so the SW exists at connect time, or pass extensionPath to ensureMagicCDPExtension/MagicCDPClient.`,
+    );
+  }
   let loadResult;
   try {
     loadResult = await send("Extensions.loadUnpacked", { path: extensionPath });

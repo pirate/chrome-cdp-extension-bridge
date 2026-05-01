@@ -46,16 +46,35 @@ def event_name_for(binding_name: str):
 
 
 def route_for(method: str, routes: dict) -> str:
-    fallback = "direct_cdp"
-    for pattern, route in (routes or {}).items():
-        if pattern == "*.*":
-            fallback = route
+    """Match `method` against `routes` deterministically.
+
+    Precedence:
+      1. exact match (e.g. "Browser.getVersion")
+      2. longest-prefix wildcard match (e.g. "Magic.*")
+      3. "*.*" fallback
+      4. hard-coded "direct_cdp" if nothing matches
+
+    Without this ordering, a custom exact route like {"Browser.getVersion":
+    "direct_cdp"} could be shadowed by a wildcard like {"*.*":
+    "service_worker"} that happened to be inserted earlier in the dict.
+    """
+    routes = routes or {}
+    if method in routes:
+        return routes[method]
+    best_prefix_len = -1
+    best_route = None
+    for pattern, route in routes.items():
+        if pattern == "*.*" or not pattern.endswith(".*"):
             continue
-        if pattern.endswith(".*") and method.startswith(pattern[:-1]):
-            return route
-        if pattern == method:
-            return route
-    return fallback
+        prefix = pattern[:-1]
+        if method.startswith(prefix) and len(prefix) > best_prefix_len:
+            best_prefix_len = len(prefix)
+            best_route = route
+    if best_route is not None:
+        return best_route
+    if "*.*" in routes:
+        return routes["*.*"]
+    return "direct_cdp"
 
 
 def wrap_magic_evaluate(params: dict, session_id: str):
@@ -139,10 +158,18 @@ def unwrap_evaluate_result(result: dict):
 
 
 def unwrap_binding_called(params: dict, our_session_id: str):
+    """Returns {"event", "data"} or None when the binding is not a MagicCDP
+    event, when the payload is scoped to a different cdpSessionId than ours,
+    or when the payload string is not valid JSON."""
     event = event_name_for(params.get("name") or "")
     if event is None:
         return None
-    payload = json.loads(params.get("payload") or "{}")
+    try:
+        payload = json.loads(params.get("payload") or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
     if our_session_id is not None and payload.get("cdpSessionId") and payload["cdpSessionId"] != our_session_id:
         return None
     data = payload["data"] if "data" in payload else payload
@@ -235,10 +262,17 @@ class MagicCDPClient:
         msg = {"id": msg_id, "method": method, "params": params or {}}
         if session_id:
             msg["sessionId"] = session_id
-        self._ws.send(json.dumps(msg))
+        try:
+            self._ws.send(json.dumps(msg))
+        except Exception:
+            with self._lock:
+                self._pending.pop(msg_id, None)
+            raise
         try:
             response = done.get(timeout=timeout)
         except Empty:
+            with self._lock:
+                self._pending.pop(msg_id, None)
             raise RuntimeError(f"{method} timed out after {timeout}s")
         if response.get("error"):
             err = response["error"]

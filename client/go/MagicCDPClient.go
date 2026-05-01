@@ -67,21 +67,37 @@ func eventNameFor(bindingName string) string {
 	return strings.ReplaceAll(bindingName[len(bindingPrefix):], "_", ".")
 }
 
+// routeFor matches `method` against `routes` deterministically:
+//   1. exact match (e.g. "Browser.getVersion")
+//   2. longest-prefix wildcard match (e.g. "Magic.*" beats "M.*")
+//   3. "*.*" fallback
+//   4. hard-coded "direct_cdp" if none match
+// Go's map iteration order is randomized, so we cannot rely on a single pass
+// over the map -- different runs would pick different routes when a method is
+// covered by both an exact key and a wildcard.
 func routeFor(method string, routes map[string]string) string {
-	fallback := "direct_cdp"
+	if route, ok := routes[method]; ok {
+		return route
+	}
+	bestPrefixLen := -1
+	bestRoute := ""
 	for pattern, route := range routes {
-		if pattern == "*.*" {
-			fallback = route
+		if pattern == "*.*" || !strings.HasSuffix(pattern, ".*") {
 			continue
 		}
-		if strings.HasSuffix(pattern, ".*") && strings.HasPrefix(method, pattern[:len(pattern)-1]) {
-			return route
-		}
-		if pattern == method {
-			return route
+		prefix := pattern[:len(pattern)-1]
+		if strings.HasPrefix(method, prefix) && len(prefix) > bestPrefixLen {
+			bestPrefixLen = len(prefix)
+			bestRoute = route
 		}
 	}
-	return fallback
+	if bestPrefixLen >= 0 {
+		return bestRoute
+	}
+	if route, ok := routes["*.*"]; ok {
+		return route
+	}
+	return "direct_cdp"
 }
 
 // --- wrap helpers (port of bridge/translate.mjs) -------------------------
@@ -126,8 +142,15 @@ func wrapMagicAddCustomCommand(params map[string]any) map[string]any {
 }
 
 func wrapMagicAddCustomEvent(params map[string]any) map[string]any {
-	name, _ := json.Marshal(params["name"])
-	bn, _ := json.Marshal(bindingNameFor(params["name"].(string)))
+	rawName, _ := params["name"].(string)
+	if rawName == "" {
+		// fall back to "" so the SW raises a clear "name must be in
+		// Domain.event form" error rather than panicking on a bad type
+		// assertion here.
+		rawName = ""
+	}
+	name, _ := json.Marshal(rawName)
+	bn, _ := json.Marshal(bindingNameFor(rawName))
 	pSchema, _ := json.Marshal(params["payloadSchema"])
 	return evalParams(fmt.Sprintf(
 		`globalThis.MagicCDP.addCustomEvent({ name: %s, bindingName: %s, payloadSchema: %s })`,
@@ -260,26 +283,31 @@ func (c *MagicCDPClient) Connect() error {
 	c.conn = conn
 	go c.reader()
 
+	// once the reader goroutine is running, any further error must call Close
+	// to tear it down; otherwise the goroutine + ws connection leak.
 	ext, err := c.ensureExtension()
 	if err != nil {
+		c.Close()
 		return err
 	}
 	c.ExtensionID = ext["extensionId"].(string)
 	c.ExtTargetID = ext["targetId"].(string)
 	c.ExtSessionID = ext["sessionId"].(string)
 	if _, err := c.sendRaw("Runtime.enable", map[string]any{}, c.ExtSessionID); err != nil {
+		c.Close()
 		return err
 	}
 
 	if c.opts.Server != nil {
 		serverJSON, _ := json.Marshal(c.opts.Server)
 		_, err := c.sendRaw("Runtime.evaluate", map[string]any{
-			"expression":                 fmt.Sprintf("globalThis.MagicCDP.configure(%s)", string(serverJSON)),
-			"awaitPromise":               true,
-			"returnByValue":              true,
+			"expression":                  fmt.Sprintf("globalThis.MagicCDP.configure(%s)", string(serverJSON)),
+			"awaitPromise":                true,
+			"returnByValue":               true,
 			"allowUnsafeEvalBlockedByCSP": true,
 		}, c.ExtSessionID)
 		if err != nil {
+			c.Close()
 			return fmt.Errorf("Magic.configure: %w", err)
 		}
 	}
@@ -373,6 +401,9 @@ func (c *MagicCDPClient) sendRaw(method string, params map[string]any, sessionID
 	}
 	select {
 	case <-time.After(10 * time.Second):
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, fmt.Errorf("%s timed out", method)
 	case resp := <-ch:
 		if errObj, ok := resp["error"].(map[string]any); ok {
@@ -415,6 +446,9 @@ func (c *MagicCDPClient) reader() {
 		}
 		method, _ := msg["method"].(string)
 		sessionID, _ := msg["sessionId"].(string)
+		// IMPORTANT: handlers run on their own goroutine, not on the reader.
+		// A handler that calls c.Send() would otherwise deadlock waiting on
+		// a response that this same goroutine is supposed to deliver.
 		if method == "Runtime.bindingCalled" && sessionID == c.ExtSessionID {
 			params, _ := msg["params"].(map[string]any)
 			if event, data, ok := unwrapBindingCalled(params, c.opts.SessionID); ok {
@@ -422,7 +456,7 @@ func (c *MagicCDPClient) reader() {
 				hs := append([]Handler(nil), c.handlers[event]...)
 				c.handlersMu.Unlock()
 				for _, h := range hs {
-					h(data)
+					go h(data)
 				}
 			}
 			continue
@@ -433,7 +467,7 @@ func (c *MagicCDPClient) reader() {
 			c.handlersMu.Unlock()
 			params, _ := msg["params"].(map[string]any)
 			for _, h := range hs {
-				h(params)
+				go h(params)
 			}
 		}
 	}

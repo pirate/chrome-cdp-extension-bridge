@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "demo:js": "node client/js/demo.mjs",
     "demo:python": "python3 client/python/demo.py",

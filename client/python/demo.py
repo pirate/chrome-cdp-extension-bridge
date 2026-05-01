@@ -10,6 +10,7 @@ Modes (mirror the JS / Go demos):
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -73,33 +74,39 @@ def main():
     mode = "debugger" if "debugger" in flags else "loopback" if "loopback" in flags else "direct"
     print(f"== mode: {mode} ==")
 
-    chrome_port = free_port()
-    profile_dir = tempfile.mkdtemp(prefix="magic-cdp-py.")
-    chrome_proc = subprocess.Popen([
-        CHROME,
-        "--headless=new", "--no-sandbox", "--disable-gpu",
-        "--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
-        "--no-first-run", "--no-default-browser-check",
-        f"--remote-debugging-port={chrome_port}",
-        f"--user-data-dir={profile_dir}",
-        f"--load-extension={EXTENSION_PATH}",
-        "about:blank",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    cdp_url = f"http://127.0.0.1:{chrome_port}"
-    wait_for_url(f"{cdp_url}/json/version")
-    print(f"upstream cdp: {cdp_url}")
-
-    cdp = MagicCDPClient(**client_options_for(mode, cdp_url))
-    events = []
-    events_lock = threading.Lock()
-
-    def on_demo(payload):
-        print(f"event -> {payload}")
-        with events_lock:
-            events.append(payload)
-    cdp.on("Custom.demo", on_demo)
-
+    # Allocate cleanup handles up front so an early failure (port allocation,
+    # mkdtemp, Popen, /json/version probe) still hits the try/finally and
+    # releases the temp profile dir + any partially-started Chrome.
+    chrome_proc = None
+    profile_dir = None
+    cdp = None
     try:
+        chrome_port = free_port()
+        profile_dir = tempfile.mkdtemp(prefix="magic-cdp-py.")
+        chrome_proc = subprocess.Popen([
+            CHROME,
+            "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
+            "--no-first-run", "--no-default-browser-check",
+            f"--remote-debugging-port={chrome_port}",
+            f"--user-data-dir={profile_dir}",
+            f"--load-extension={EXTENSION_PATH}",
+            "about:blank",
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cdp_url = f"http://127.0.0.1:{chrome_port}"
+        wait_for_url(f"{cdp_url}/json/version")
+        print(f"upstream cdp: {cdp_url}")
+
+        cdp = MagicCDPClient(**client_options_for(mode, cdp_url))
+        events = []
+        events_lock = threading.Lock()
+
+        def on_demo(payload):
+            print(f"event -> {payload}")
+            with events_lock:
+                events.append(payload)
+        cdp.on("Custom.demo", on_demo)
+
         cdp.connect()
         print(f"connected; ext {cdp.extension_id} session {cdp.session_id}")
 
@@ -127,11 +134,15 @@ def main():
         print(f"\nSUCCESS ({mode}): {len(events)} events")
         return 0
     finally:
-        cdp.close()
-        chrome_proc.terminate()
-        try: chrome_proc.wait(timeout=3)
-        except Exception: chrome_proc.kill()
-        subprocess.run(["rm", "-rf", profile_dir], check=False)
+        if cdp is not None:
+            try: cdp.close()
+            except Exception: pass
+        if chrome_proc is not None:
+            chrome_proc.terminate()
+            try: chrome_proc.wait(timeout=3)
+            except Exception: chrome_proc.kill()
+        if profile_dir is not None:
+            shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

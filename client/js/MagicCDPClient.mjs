@@ -37,14 +37,29 @@ const DEFAULT_CLIENT_ROUTES = {
   "*.*": "direct_cdp",
 };
 
-function routeFor(method, routes) {
-  let fallback = "direct_cdp";
-  for (const [pattern, route] of Object.entries(routes || {})) {
-    if (pattern === "*.*") { fallback = route; continue; }
-    if (pattern.endsWith(".*") && method.startsWith(pattern.slice(0, -1))) return route;
-    if (pattern === method) return route;
+// Match `method` against `routes` deterministically:
+//   1. exact match (e.g. "Browser.getVersion")
+//   2. longest-prefix wildcard match (e.g. "Magic.*" beats a less specific one)
+//   3. "*.*" fallback
+//   4. hard-coded "direct_cdp" if nothing matches
+// Object key insertion order in JS is stable but a more specific exact match
+// could otherwise be shadowed by a wildcard inserted earlier; this keeps
+// behavior predictable regardless of the routes map's construction order.
+function routeFor(method, routes = {}) {
+  if (Object.prototype.hasOwnProperty.call(routes, method)) return routes[method];
+  let bestPrefixLen = -1;
+  let bestRoute = null;
+  for (const [pattern, route] of Object.entries(routes)) {
+    if (pattern === "*.*" || !pattern.endsWith(".*")) continue;
+    const prefix = pattern.slice(0, -1);
+    if (method.startsWith(prefix) && prefix.length > bestPrefixLen) {
+      bestPrefixLen = prefix.length;
+      bestRoute = route;
+    }
   }
-  return fallback;
+  if (bestRoute !== null) return bestRoute;
+  if (Object.prototype.hasOwnProperty.call(routes, "*.*")) return routes["*.*"];
+  return "direct_cdp";
 }
 
 export function MagicCDPClient(options = {}) {
