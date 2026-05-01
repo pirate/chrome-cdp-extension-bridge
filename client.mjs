@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import http from "node:http";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -125,6 +126,100 @@ function createTypesProxy(pathParts = []) {
   );
 }
 
+function createSessionRouter(cdp) {
+  const targetSessions = new Map();
+  const frameSessions = new Map();
+  const executionContextSessions = new Map();
+  const pendingTargetAttachments = new Map();
+  const autoAttachSessions = new Set();
+
+  function enableAutoAttach(sessionId) {
+    if (!sessionId || autoAttachSessions.has(sessionId)) return;
+    autoAttachSessions.add(sessionId);
+    cdp.send("Target.setAutoAttach", targetAutoAttachParams, sessionId).catch(() => {});
+  }
+
+  async function attachTarget(targetId) {
+    if (targetSessions.has(targetId)) return targetSessions.get(targetId);
+    if (pendingTargetAttachments.has(targetId)) return pendingTargetAttachments.get(targetId);
+
+    const pending = cdp.send("Target.attachToTarget", { targetId, flatten: true })
+      .then(({ sessionId }) => {
+        targetSessions.set(targetId, sessionId);
+        enableAutoAttach(sessionId);
+        return sessionId;
+      })
+      .finally(() => pendingTargetAttachments.delete(targetId));
+    pendingTargetAttachments.set(targetId, pending);
+    return pending;
+  }
+
+  function indexEvent(message) {
+    const params = message.params || {};
+    const sessionId = message.sessionId || params.sessionId || null;
+
+    if (message.method === "Target.attachedToTarget") {
+      targetSessions.set(params.targetInfo.targetId, params.sessionId);
+      enableAutoAttach(params.sessionId);
+      return;
+    }
+
+    if (message.method === "Target.detachedFromTarget") {
+      for (const [targetId, targetSessionId] of targetSessions) {
+        if (targetSessionId === params.sessionId) targetSessions.delete(targetId);
+      }
+      for (const [frameId, frameSessionId] of frameSessions) {
+        if (frameSessionId === params.sessionId) frameSessions.delete(frameId);
+      }
+      for (const [contextId, contextSessionId] of executionContextSessions) {
+        if (contextSessionId === params.sessionId) executionContextSessions.delete(contextId);
+      }
+      return;
+    }
+
+    if (!sessionId) return;
+    const frameId = params.frame?.id || params.frameId || params.executionContextAuxData?.frameId || params.context?.auxData?.frameId;
+    if (frameId) frameSessions.set(frameId, sessionId);
+
+    const contextId = params.executionContextId || params.context?.id;
+    if (contextId != null) executionContextSessions.set(contextId, sessionId);
+  }
+
+  function indexResult(method, result, sessionId) {
+    if (!sessionId || method !== "Page.getFrameTree") return;
+
+    function visit(frameTree) {
+      if (!frameTree) return;
+      if (frameTree.frame?.id) frameSessions.set(frameTree.frame.id, sessionId);
+      for (const child of frameTree.childFrames || []) visit(child);
+    }
+
+    visit(result?.frameTree);
+  }
+
+  async function resolveSessionId(params = {}) {
+    if (params.sessionId) return params.sessionId;
+    if (params.targetId) return targetSessions.get(params.targetId) || attachTarget(params.targetId);
+    if (params.frameId && frameSessions.has(params.frameId)) return frameSessions.get(params.frameId);
+    if (params.executionContextId != null && executionContextSessions.has(params.executionContextId)) {
+      return executionContextSessions.get(params.executionContextId);
+    }
+    if (params.contextId != null && executionContextSessions.has(params.contextId)) {
+      return executionContextSessions.get(params.contextId);
+    }
+    return null;
+  }
+
+  return {
+    indexEvent,
+    indexResult,
+    resolveSessionId,
+    targetSessions,
+    frameSessions,
+    executionContextSessions,
+  };
+}
+
 export class RawCDP extends EventEmitter {
   constructor(wsUrl) {
     super();
@@ -203,6 +298,7 @@ export class MagicCDP {
     this.directCdpUrl = options.direct_cdp_url || options.cdp_url || null;
     this.extensionPath = options.extensionPath || defaultExtensionDir;
     this.executablePath = options.executablePath || defaultChromePath;
+    this.launchFlags = options.launchFlags || [];
     this.routes = {
       "Magic.*": "service_worker",
       "Custom.*": "service_worker",
@@ -229,6 +325,8 @@ export class MagicCDP {
     this._extensionId = options.extensionId || null;
     this._customCommands = new Map();
     this._customEvents = new Map();
+    this._sessionRouting = options.sessionRouting || options.session_routing || false;
+    this._sessionRouter = null;
     this._launched = null;
     this.lastPingTs = null;
     this.latency = null;
@@ -244,6 +342,7 @@ export class MagicCDP {
     const endpoint = await resolveCdpEndpoint(this.directCdpUrl);
     this._httpOrigin = endpoint.httpOrigin;
     this._cdp = await new RawCDP(endpoint.wsUrl).connect();
+    if (this._sessionRouting) this._sessionRouter = createSessionRouter(this._cdp);
     this._cdp.on("*", message => this.handleCdpEvent(message));
 
     await this.ensureExtensionLoaded();
@@ -257,6 +356,7 @@ export class MagicCDP {
     const profile = await mkdtemp(path.join(tmpdir(), "magic-cdp."));
     const process = spawn(this.executablePath, [
       ...defaultChromeFlags,
+      ...this.launchFlags,
       `--user-data-dir=${profile}`,
       "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${port}`,
@@ -347,14 +447,19 @@ export class MagicCDP {
   }
 
   async send(method, params = {}, options = {}) {
-    const sessionId = typeof options === "string" ? options : options.sessionId;
+    let sessionId = typeof options === "string" ? options : options.sessionId;
 
     if (method === "Magic.evaluate") return this.magicEvaluate(params);
     if (method === "Magic.addCustomCommand") return this.addCustomCommand(params);
     if (method === "Magic.addCustomEvent") return this.addCustomEvent(params);
 
     const upstream = routeFor(method, this.routes);
-    if (upstream === "direct_cdp") return this._cdp.send(method, params, sessionId);
+    if (upstream === "direct_cdp") {
+      if (!sessionId) sessionId = await this._sessionRouter?.resolveSessionId(params);
+      const result = await this._cdp.send(method, params, sessionId);
+      this._sessionRouter?.indexResult(method, result, sessionId);
+      return result;
+    }
     if (upstream === "service_worker") return this.sendToServiceWorker(method, params);
 
     throw new Error(`Unsupported client route "${upstream}" for ${method}`);
@@ -469,6 +574,8 @@ export class MagicCDP {
   }
 
   handleCdpEvent(message) {
+    this._sessionRouter?.indexEvent(message);
+
     if (message.sessionId === this._extCdpSessionId && message.method === "Runtime.bindingCalled") {
       this.handleMagicBinding(message.params);
       return;
@@ -514,9 +621,17 @@ export function MagicCDPClient(options = {}) {
 async function demo() {
   const argv = process.argv.slice(2);
   const mode = argv.includes("--debugger") ? "debugger" : argv.includes("--loopback") ? "loopback" : "direct";
+  const sessionRouting = argv.includes("--session-routing");
   const executablePath = argv.find(arg => !arg.startsWith("--")) || defaultChromePath;
   const cdp = MagicCDPClient({
     executablePath,
+    sessionRouting,
+    launchFlags: sessionRouting
+      ? [
+        "--site-per-process",
+        "--host-resolver-rules=MAP magic-a.test 127.0.0.1,MAP magic-b.test 127.0.0.1",
+      ]
+      : [],
     routes: {
       "Magic.*": "service_worker",
       "Custom.*": "service_worker",
@@ -535,7 +650,7 @@ async function demo() {
   try {
     await cdp.connect();
     connected = true;
-    console.log({ mode });
+    console.log({ mode, sessionRouting });
     console.log(await cdp.cdp.send("Browser.getVersion"));
     cdp.on("Magic.pong", event => console.log("Magic.pong", event));
     cdp.lastPingTs = Date.now();
@@ -554,7 +669,8 @@ async function demo() {
     console.log({ latency: cdp.latency });
 
     await setupForegroundTargetChangedDemo(cdp);
-    await runCommandPrompt(cdp, mode);
+    if (sessionRouting && mode === "direct") await runSessionRoutingDemo(cdp);
+    await runCommandPrompt(cdp, mode, sessionRouting);
   } catch (error) {
     if (!connected) await cdp.close().catch(() => {});
     throw error;
@@ -640,9 +756,101 @@ async function setupForegroundTargetChangedDemo(cdp) {
   await firstForegroundEvent;
 }
 
-async function runCommandPrompt(cdp, mode) {
+async function runSessionRoutingDemo(cdp) {
+  console.log("");
+  console.log("Session routing demo: target-scoped commands without sessionId");
+
+  const tabA = await cdp.send("Target.createTarget", { url: "https://example.com" });
+  const tabB = await cdp.send("Target.createTarget", { url: "https://example.org" });
+  await waitFor(() => cdp._sessionRouter?.targetSessions.has(tabA.targetId), {
+    label: "session for example.com target",
+  });
+  await waitFor(() => cdp._sessionRouter?.targetSessions.has(tabB.targetId), {
+    label: "session for example.org target",
+  });
+  await waitFor(async () => {
+    const result = await cdp.send("Runtime.evaluate", {
+      targetId: tabA.targetId,
+      expression: "location.href",
+      returnByValue: true,
+    });
+    return result.result.value === "https://example.com/";
+  }, {
+    label: "example.com navigation",
+  });
+  await waitFor(async () => {
+    const result = await cdp.send("Runtime.evaluate", {
+      targetId: tabB.targetId,
+      expression: "location.href",
+      returnByValue: true,
+    });
+    return result.result.value === "https://example.org/";
+  }, {
+    label: "example.org navigation",
+  });
+
+  const hrefA = await cdp.send("Runtime.evaluate", {
+    targetId: tabA.targetId,
+    expression: "location.href",
+    returnByValue: true,
+  });
+  const hrefB = await cdp.send("Runtime.evaluate", {
+    targetId: tabB.targetId,
+    expression: "location.href",
+    returnByValue: true,
+  });
+  console.log("two tabs, no sessionId", {
+    [tabA.targetId]: hrefA.result.value,
+    [tabB.targetId]: hrefB.result.value,
+  });
+
+  const webPort = await freePort();
+  const server = http.createServer((request, response) => {
+    if (request.headers.host?.startsWith("magic-a.test")) {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(`<!doctype html><title>Magic A</title><iframe src="http://magic-b.test:${webPort}/child"></iframe>`);
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><title>Magic B</title><script>globalThis.magicOopifMarker = 'inside-oopif'</script>`);
+  });
+  server.on("connection", socket => socket.unref());
+
+  await new Promise(resolve => server.listen(webPort, "127.0.0.1", resolve));
+  try {
+    const root = await cdp.send("Target.createTarget", { url: `http://magic-a.test:${webPort}/` });
+    await waitFor(() => cdp._sessionRouter?.targetSessions.has(root.targetId), {
+      label: "session for OOPIF root target",
+    });
+    const iframe = await waitFor(async () => {
+      const { targetInfos } = await cdp.send("Target.getTargets");
+      return targetInfos.find(target => target.type === "iframe" && target.url.includes("magic-b.test"));
+    }, {
+      timeoutMs: 10_000,
+      label: "OOPIF target",
+    });
+
+    const oopif = await cdp.send("Runtime.evaluate", {
+      targetId: iframe.targetId,
+      expression: "location.href + ' ' + globalThis.magicOopifMarker",
+      returnByValue: true,
+    });
+    console.log("OOPIF, no sessionId", {
+      rootTargetId: root.targetId,
+      iframeTargetId: iframe.targetId,
+      value: oopif.result.value,
+    });
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+}
+
+async function runCommandPrompt(cdp, mode, sessionRouting) {
   console.log("");
   console.log(`Browser remains running. Events will print in realtime. Mode: ${mode}.`);
+  if (sessionRouting) console.log("Session routing is enabled: targetId/frameId/executionContextId params can infer the CDP session.");
   console.log("Enter commands as Domain.method({param: 'value'}), e.g. Browser.getVersion({})");
   console.log("Example: Magic.evaluate({expression: 'chrome.tabs.query({active: true})'})");
   if (mode === "debugger") console.log("Debugger mode defaults to the active tab unless debuggee/tabId/targetId/extensionId is passed.");

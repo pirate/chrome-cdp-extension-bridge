@@ -99,6 +99,14 @@ Run the local demo:
 CHROME_PATH="/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" node client.mjs
 ```
 
+Run the session-routing demo:
+
+```sh
+CHROME_PATH="/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" node client.mjs --session-routing
+```
+
+That demo creates two separate page targets and one cross-site OOPIF, then runs `Runtime.evaluate` against each target using only `targetId`. No manual `sessionId` is passed.
+
 Or pass a Chromium or Chrome Canary executable:
 
 ```sh
@@ -247,6 +255,26 @@ The default server route is:
 ```
 
 When default `auto` routing is used, the extension probes only `http://127.0.0.1:9222`. It does not trust the port just because it is open or has the same extension installed. The client writes a per-connection browser token into the service worker over the known direct CDP connection, and loopback discovery verifies that same token through `localhost:9222` before using it.
+
+### Session Routing Middleware
+
+Direct CDP mode can optionally infer flattened target sessions so users can omit `sessionId` for target-scoped commands:
+
+```ts
+const cdp = await MagicCDPClient({
+  cdp_url: 'http://localhost:9222',
+  sessionRouting: true,
+}).connect()
+
+const { targetId } = await cdp.send('Target.createTarget', { url: 'https://example.com' })
+const result = await cdp.send('Runtime.evaluate', {
+  targetId,
+  expression: 'location.href',
+  returnByValue: true,
+})
+```
+
+When enabled, the client indexes flattened `Target.attachedToTarget` / `Target.detachedFromTarget`, frame, and execution-context events. If a direct CDP request omits `sessionId` but includes `targetId`, `frameId`, `executionContextId`, or `contextId`, MagicCDP resolves the right session and sends the command there. Manual `sessionId` still wins.
 
 ## Detailed Transport Explainer
 
