@@ -10,7 +10,8 @@
     "demo:js": "node client/js/demo.mjs",
     "demo:python": "python3 client/python/demo.py",
     "demo:go": "(cd client/go && go run .)",
-    "proxy": "node bridge/proxy.mjs"
+    "proxy": "node bridge/proxy.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "ws": "^8.18.0"
