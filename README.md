@@ -1,6 +1,19 @@
 # MagicCDP
 
-Three CDP primitives that turn the existing Chrome DevTools Protocol websocket into a custom command + event bus, so you can call `chrome.*` extension APIs and define your own `Custom.*` methods/events without inventing a sidecar transport.
+CDP sucks today. It is difficult for agents and humans to use without a library because it was never designed for stateless remote browser automatiion.
+
+- lacks the ability to use it statelessly without maintaining mappings of sessionIds, targetIds, frameIds, execution context IDs, backendNodeId ownership, and event listeners
+
+- lacks the ability to register custom CDP commands, abstractions, and events
+
+- lacks the ability to easily call chrome.* extension APIs for things like `chrome.tabs.query({ active: true })`
+
+- lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of backendNodeId, targetId, and frameId
+
+While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
+
+MagicCDP does not aim to solve all of these issues directly either. Instead it solves a simpler problem: allowing us to customize and extend CDP with custom commands.
+Then we use those basic primitives to fix the shortcomings in CDP by implementing our own custom events (all sent over a normal CDP websocket to a stock Chromium browser).
 
 | Primitive                | What it does                                                                                            |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
@@ -9,35 +22,73 @@ Three CDP primitives that turn the existing Chrome DevTools Protocol websocket i
 | `Magic.addCustomEvent`   | Register a `Custom.*` event your SW handlers can `emit()`                                               |
 | `Magic.addMiddleware`    | Intercept service-worker-routed requests, responses, or events by name or `*`                           |
 
-Stock CDP libraries (Playwright, chromedp, raw websocket clients) speak this without modification: the extension is a small ES-module service worker, and the wrap/unwrap is just `Runtime.evaluate` + `Runtime.addBinding` under the hood.
+Instead of inventing yet another browser driver library, MagicCDP fixes the issue at the root.
+
+It's perfectly compatible with playwright, puppeteer, etc. with no modifications. You can do things like `patchright` does, but generically at the CDP layer instead of having to patch libraries.
+
+You can send `Magic.*`, `Custom.*`, etc. through standard playwright/puppeteer/other-driver-managed cdp sessions, there is a client/{py,js,go}/demo.{py,ts,go} for each language demonstrating this.
 
 ## Use it
 
 ```ts
-// JS (Node 22+). Python and Go expose the same surface and parameter names —
-// see client/python/MagicCDPClient.py and client/go/MagicCDPClient.go.
 import { MagicCDPClient } from "./client/js/MagicCDPClient.js";
 
-const cdp = new MagicCDPClient({ cdp_url: "ws://127.0.0.1:9222/devtools/browser/..." });
-// http://127.0.0.1:9222 also works as shorthand; it is resolved to ws:// once at connect time.
+const cdp = new MagicCDPClient({ cdp_url: "http://127.0.0.1:9222" });   // ws://... urls works too
 await cdp.connect();
 
-// 1. run extension code with chrome.* in scope
-const tab = await cdp.send("Magic.evaluate", {
-  expression: "(await chrome.tabs.query({ active: true }))[0]",
-});
+// use it like a normal CDP connection, send normal CDP, register for normal CDP events
+console.log(await cdp.send("Browser.getVersion"))
+cdp.on("Target.targetInfoChanged", console.log)
 
-// 2. register a custom command
+
+// ✨ use Magic to register & use new custom CDP commands!
 await cdp.send("Magic.addCustomCommand", {
-  name: "Custom.echo",
-  expression: "async (params) => { await cdp.emit('Custom.demo', params); return params; }",
+    name: "Custom.tabIdFromTargetId",
+    expression: `async ({ targetId }) => ({
+      tabId: (await chrome.debugger.getTargets()).find(t => t.id === targetId)?.tabId
+    })`,
+})
+await cdp.send("Custom.tabIdFromTargetId", {targetId: '3423A1...'})   // -> 22352432
+
+// ✨ set up new custom CDP events to fire + receive them just like normal CDP
+// this example sets up a truly accurate "foreground focus" tracking event,
+// which CDP doesn't have natively https://issues.chromium.org/issues/497896141
+await cdp.Magic.addCustomEvent({
+  name: "Page.foregroundPageChanged",
+  eventSchema: {
+    targetId: cdp.types.zod.Target.TargetID.nullable(),
+    url: z.string().nullable(),
+    tabId: z.number().nullable().optional(),
+  },
 });
+await cdp.Magic.evaluate({
+  expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+    await cdp.emit("Page.foregroundPageChanged", {
+      tabId,
+      targetId: (await chrome.debugger.getTargets()).find(t => t.tabId === tabId)?.id
+    });
+  })`,
+});
+cdp.on("Page.foregroundPageChanged", console.log);
 
-// 3. register + listen for a custom event
-await cdp.send("Magic.addCustomEvent", { name: "Custom.demo" });
-cdp.on("Custom.demo", (payload) => console.log("event:", payload));
+// ✨ Intercept, modify, and extend existing CDP commands/events/params on the wire
+await cdp.Magic.addMiddleware({
+  name: "Target.targetInfoChanged",
+  phase: "event",
+  expression: `async (payload, next, ctx) => {
+    const { tabId } = await cdp.send("Custom.tabIdFromTargetId", {
+      targetId: payload.targetInfo.targetId,
+    });
+    payload.targetInfo.tabId = tabId;
+    return next(payload);
+  }`,
+});
+```
 
-console.log(await cdp.send("Custom.echo", { value: "hi" }));
+```ts
+// it also provides nicely typed + zod enforced imperative-style equivalents for everything
+await cdp.on(cdp.Target.targetCreated, (targetInfo: cdp.types.ts.Target.TargetInfo) => console.log(targetInfo))
+console.log(await cdp.Target.createTarget({url: 'https://example.com'}))
 ```
 
 ## Run the demos
