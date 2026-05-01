@@ -1,3 +1,5 @@
 node_modules/
 package-lock.json
-go-demo/magiccdp-go-demo
+client/go/magiccdp
+client/go/magic-cdp-go
+__pycache__/
