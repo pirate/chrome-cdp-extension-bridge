@@ -12,7 +12,7 @@ CDP is powerful but it's been stretched to many use-cases beyond its initial aud
 
 While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
 
-MagicCDP does not aim to solve all of these issues directly either. Instead it solves a simpler problem: allowing us to customize and extend CDP with custom commands.
+MagicCDP does not aim to solve all of these issues directly either. Instead it solves a simpler problem: allowing us to customize and extend CDP with new commands.
 Then we use those basic primitives to fix the shortcomings in CDP by implementing our own custom events (all sent over a normal CDP websocket to a stock Chromium browser).
 
 | Primitive                | What it does                                                                                            |
