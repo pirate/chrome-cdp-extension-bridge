@@ -44,6 +44,7 @@ const dbg = (...args) => { if (DEBUG) console.log("[proxy:dbg]", ...args); };
 
 const MAGIC_METHODS = new Set(["Magic.evaluate", "Magic.addCustomCommand", "Magic.addCustomEvent"]);
 const ROUTE_TO_SW_RE = /^(Magic|Custom)\./;
+const isWsUrl = url => /^wss?:\/\//i.test(url);
 
 // --- public API -------------------------------------------------------------
 
@@ -61,6 +62,16 @@ export async function startProxy({
   const server = http.createServer(async (req, res) => {
     try {
       await ensureUpstream(upstreamState, { autoLaunch, launchOptions });
+      if (isWsUrl(upstreamState.url)) {
+        if (req.url === "/json/version") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://${req.headers.host}/devtools/browser/proxy` }));
+        } else {
+          res.writeHead(404);
+          res.end("HTTP discovery is unavailable for a ws:// upstream.");
+        }
+        return;
+      }
       const upstreamRes = await fetch(`${upstreamState.url}${req.url}`);
       const text = await upstreamRes.text();
       const contentType = upstreamRes.headers.get("content-type") || "";
@@ -111,9 +122,15 @@ export async function startProxy({
 // --- upstream probe / lazy launch ------------------------------------------
 
 async function ensureUpstream(upstreamState, { autoLaunch, launchOptions }) {
+  if (isWsUrl(upstreamState.url)) return;
   try {
     const r = await fetch(`${upstreamState.url}/json/version`);
-    if (r.ok) return;
+    if (r.ok) {
+      const { webSocketDebuggerUrl } = await r.json();
+      if (!webSocketDebuggerUrl) throw new Error(`GET ${upstreamState.url}/json/version returned no webSocketDebuggerUrl`);
+      upstreamState.url = webSocketDebuggerUrl;
+      return;
+    }
   } catch {}
   if (!autoLaunch) {
     throw new Error(`Upstream CDP at ${upstreamState.url} is not reachable. Pass --no-auto-launch only when an upstream is already running.`);
@@ -125,7 +142,7 @@ async function ensureUpstream(upstreamState, { autoLaunch, launchOptions }) {
     log(`upstream ${upstreamState.url} not reachable, launching local Chrome...`);
     upstreamState.launchPromise = launchChrome(launchOptions).then(launched => {
       upstreamState.launched = launched;
-      upstreamState.url = launched.cdpUrl;
+      upstreamState.url = launched.wsUrl;
       log(`launched local Chrome at ${upstreamState.url}`);
       return launched;
     }).catch(err => {
@@ -149,9 +166,7 @@ function rewriteWsUrls(value, host) {
 async function handleConnection(client, earlyBuffer, earlyHandler, upstreamState, { extensionPath, autoLaunch, launchOptions }) {
   await ensureUpstream(upstreamState, { autoLaunch, launchOptions });
 
-  const versionRes = await fetch(`${upstreamState.url}/json/version`);
-  const { webSocketDebuggerUrl } = await versionRes.json();
-  const upstream = new WebSocket(webSocketDebuggerUrl);
+  const upstream = new WebSocket(upstreamState.url);
   await new Promise((resolve, reject) => {
     upstream.addEventListener("open", resolve, { once: true });
     upstream.addEventListener("error", reject, { once: true });

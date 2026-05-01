@@ -26,13 +26,31 @@ const defaultRoutes = {
 
 let nextLoopbackId = 1;
 
+async function resolveCDPEndpoint(endpoint) {
+  if (!endpoint || /^wss?:\/\//i.test(endpoint)) return endpoint;
+  const { webSocketDebuggerUrl } = await fetch(`${endpoint}/json/version`).then(r => r.json());
+  if (!webSocketDebuggerUrl) throw new Error(`loopback_cdp_url HTTP discovery returned no webSocketDebuggerUrl.`);
+  return webSocketDebuggerUrl;
+}
+
+async function openCDPSocket(endpoint) {
+  if (!/^wss?:\/\//i.test(endpoint)) {
+    throw new Error(`loopback_cdp_url must be a ws:// or wss:// CDP websocket URL, got ${endpoint}.`);
+  }
+  return new Promise((resolve, reject) => {
+    const w = new WebSocket(endpoint);
+    w.addEventListener("open", () => resolve(w), { once: true });
+    w.addEventListener("error", reject, { once: true });
+  });
+}
+
 export const MagicCDPServer = {
   routes: { ...defaultRoutes },
   loopback_cdp_url: null,
   browserToken: null,
 
   async configure({ loopback_cdp_url = this.loopback_cdp_url, routes, browserToken = this.browserToken } = {}) {
-    this.loopback_cdp_url = loopback_cdp_url;
+    this.loopback_cdp_url = await resolveCDPEndpoint(loopback_cdp_url);
     this.browserToken = browserToken;
     if (routes) this.routes = { ...defaultRoutes, ...routes };
     else { this.routes = { ...defaultRoutes }; await this.discoverLoopbackCDP(); }
@@ -137,8 +155,8 @@ export const MagicCDPServer = {
         }, sessionId);
         if (result.result?.value !== true) return { loopback_cdp_url: null, verified: false };
 
-        this.loopback_cdp_url = url;
-        return { loopback_cdp_url: url, verified: true, version };
+        this.loopback_cdp_url = version.webSocketDebuggerUrl;
+        return { loopback_cdp_url: this.loopback_cdp_url, verified: true, version };
       } finally { ws.close(); }
     } catch { return { loopback_cdp_url: null, verified: false }; }
   },
@@ -146,12 +164,7 @@ export const MagicCDPServer = {
   async sendLoopback(method, params = {}) {
     if (!this.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
 
-    const { webSocketDebuggerUrl } = await fetch(`${this.loopback_cdp_url}/json/version`).then(r => r.json());
-    const ws = await new Promise((resolve, reject) => {
-      const w = new WebSocket(webSocketDebuggerUrl);
-      w.addEventListener("open", () => resolve(w), { once: true });
-      w.addEventListener("error", reject, { once: true });
-    });
+    const ws = await openCDPSocket(this.loopback_cdp_url);
     try {
       const callOnWs = (m, p = {}, sid = null) => {
         const id = nextLoopbackId++;

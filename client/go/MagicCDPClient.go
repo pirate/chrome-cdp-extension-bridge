@@ -10,8 +10,8 @@
 // Public methods: Connect, Send(method, params), On(event, handler), Close.
 // Synchronous; one background goroutine reads frames off the WS.
 //
-// Wrap/unwrap is inlined to mirror bridge/translate.mjs without an extra
-// file. Same wire format as the JS / Python sides.
+// Route and MagicCDP wire translation lives in translate.go. This file owns
+// websocket transport, request bookkeeping, extension discovery, and events.
 //
 // Transport: gobwas/ws is intentionally low-level. We hold the underlying
 // net.Conn ourselves and use wsutil.ReadServerText / WriteClientText to push
@@ -41,170 +41,30 @@ import (
 	"github.com/google/uuid"
 )
 
-const bindingPrefix = "__MagicCDP_"
-
 var (
 	swURLRE      = regexp.MustCompile(`^chrome-extension://[a-z]+/service_worker\.js$`)
 	extIDFromURL = regexp.MustCompile(`^chrome-extension://([a-z]+)/`)
 )
 
-func DefaultClientRoutes() map[string]string {
-	return map[string]string{
-		"Magic.*":  "service_worker",
-		"Custom.*": "service_worker",
-		"*.*":      "direct_cdp",
+func websocketURLFor(endpoint string) (string, error) {
+	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
+		return endpoint, nil
 	}
-}
-
-func bindingNameFor(eventName string) string {
-	return bindingPrefix + strings.ReplaceAll(eventName, ".", "_")
-}
-
-func eventNameFor(bindingName string) string {
-	if !strings.HasPrefix(bindingName, bindingPrefix) {
-		return ""
+	resp, err := http.Get(endpoint + "/json/version")
+	if err != nil {
+		return "", fmt.Errorf("GET /json/version: %w", err)
 	}
-	return strings.ReplaceAll(bindingName[len(bindingPrefix):], "_", ".")
-}
-
-// routeFor matches `method` against `routes` deterministically:
-//   1. exact match (e.g. "Browser.getVersion")
-//   2. longest-prefix wildcard match (e.g. "Magic.*" beats "M.*")
-//   3. "*.*" fallback
-//   4. hard-coded "direct_cdp" if none match
-// Go's map iteration order is randomized, so we cannot rely on a single pass
-// over the map -- different runs would pick different routes when a method is
-// covered by both an exact key and a wildcard.
-func routeFor(method string, routes map[string]string) string {
-	if route, ok := routes[method]; ok {
-		return route
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var version map[string]any
+	if err := json.Unmarshal(body, &version); err != nil {
+		return "", fmt.Errorf("parse /json/version: %w", err)
 	}
-	bestPrefixLen := -1
-	bestRoute := ""
-	for pattern, route := range routes {
-		if pattern == "*.*" || !strings.HasSuffix(pattern, ".*") {
-			continue
-		}
-		prefix := pattern[:len(pattern)-1]
-		if strings.HasPrefix(method, prefix) && len(prefix) > bestPrefixLen {
-			bestPrefixLen = len(prefix)
-			bestRoute = route
-		}
+	wsURL, _ := version["webSocketDebuggerUrl"].(string)
+	if wsURL == "" {
+		return "", fmt.Errorf("HTTP discovery for %s returned no webSocketDebuggerUrl", endpoint)
 	}
-	if bestPrefixLen >= 0 {
-		return bestRoute
-	}
-	if route, ok := routes["*.*"]; ok {
-		return route
-	}
-	return "direct_cdp"
-}
-
-// --- wrap helpers (port of bridge/translate.mjs) -------------------------
-
-func evalParams(expression string) map[string]any {
-	return map[string]any{
-		"expression":                 expression,
-		"awaitPromise":               true,
-		"returnByValue":              true,
-		"allowUnsafeEvalBlockedByCSP": true,
-	}
-}
-
-func wrapMagicEvaluate(params map[string]any, sessionID string) map[string]any {
-	expr, _ := params["expression"].(string)
-	userParams := params["params"]
-	if userParams == nil {
-		userParams = map[string]any{}
-	}
-	cdpSessionID, _ := params["cdpSessionId"].(string)
-	if cdpSessionID == "" {
-		cdpSessionID = sessionID
-	}
-	up, _ := json.Marshal(userParams)
-	sid, _ := json.Marshal(cdpSessionID)
-	return evalParams(fmt.Sprintf(
-		`(async () => { const params = %s; const cdp = globalThis.MagicCDP.attachToSession(%s); const context = { cdp, MagicCDP: globalThis.MagicCDP, chrome: globalThis.chrome }; const value = (%s); return typeof value === 'function' ? await value(params, context) : value; })()`,
-		string(up), string(sid), expr,
-	))
-}
-
-func wrapMagicAddCustomCommand(params map[string]any) map[string]any {
-	name, _ := json.Marshal(params["name"])
-	expr, _ := params["expression"].(string)
-	exprJSON, _ := json.Marshal(expr)
-	pSchema, _ := json.Marshal(params["paramsSchema"])
-	rSchema, _ := json.Marshal(params["resultSchema"])
-	return evalParams(fmt.Sprintf(
-		`(() => { const handler = (%s); return globalThis.MagicCDP.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, meta) => { const cdp = globalThis.MagicCDP.attachToSession(meta.cdpSessionId); return await handler(params || {}, { cdp, MagicCDP: globalThis.MagicCDP, chrome: globalThis.chrome, meta }); }, }); })()`,
-		expr, string(name), string(pSchema), string(rSchema), string(exprJSON),
-	))
-}
-
-func wrapMagicAddCustomEvent(params map[string]any) map[string]any {
-	rawName, _ := params["name"].(string)
-	if rawName == "" {
-		// fall back to "" so the SW raises a clear "name must be in
-		// Domain.event form" error rather than panicking on a bad type
-		// assertion here.
-		rawName = ""
-	}
-	name, _ := json.Marshal(rawName)
-	bn, _ := json.Marshal(bindingNameFor(rawName))
-	pSchema, _ := json.Marshal(params["payloadSchema"])
-	return evalParams(fmt.Sprintf(
-		`globalThis.MagicCDP.addCustomEvent({ name: %s, bindingName: %s, payloadSchema: %s })`,
-		string(name), string(bn), string(pSchema),
-	))
-}
-
-func wrapCustomCommand(method string, params map[string]any, sessionID string) map[string]any {
-	m, _ := json.Marshal(method)
-	p, _ := json.Marshal(params)
-	meta, _ := json.Marshal(map[string]any{"cdpSessionId": sessionID})
-	return evalParams(fmt.Sprintf(`globalThis.MagicCDP.handleCommand(%s, %s, %s)`, string(m), string(p), string(meta)))
-}
-
-func unwrapEvaluateResult(result map[string]any) (any, error) {
-	if ex, ok := result["exceptionDetails"].(map[string]any); ok {
-		msg := ""
-		if e, ok := ex["exception"].(map[string]any); ok {
-			if d, ok := e["description"].(string); ok {
-				msg = d
-			}
-		}
-		if msg == "" {
-			if t, ok := ex["text"].(string); ok {
-				msg = t
-			}
-		}
-		if msg == "" {
-			msg = "Runtime.evaluate failed"
-		}
-		return nil, fmt.Errorf("%s", msg)
-	}
-	inner, _ := result["result"].(map[string]any)
-	return inner["value"], nil
-}
-
-func unwrapBindingCalled(params map[string]any, ourSessionID string) (string, any, bool) {
-	name, _ := params["name"].(string)
-	event := eventNameFor(name)
-	if event == "" {
-		return "", nil, false
-	}
-	payloadStr, _ := params["payload"].(string)
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil || payload == nil {
-		payload = map[string]any{}
-	}
-	if sid, ok := payload["cdpSessionId"].(string); ok && sid != "" && ourSessionID != "" && sid != ourSessionID {
-		return "", nil, false
-	}
-	if data, ok := payload["data"]; ok {
-		return event, data, true
-	}
-	return event, payload, true
+	return wsURL, nil
 }
 
 // --- public types --------------------------------------------------------
@@ -225,19 +85,19 @@ type Options struct {
 type Handler func(data any)
 
 type MagicCDPClient struct {
-	opts          Options
-	conn          net.Conn
-	writeMu       sync.Mutex
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.Mutex
-	nextID        int64
-	pending       map[int64]chan map[string]any
-	handlers      map[string][]Handler
-	handlersMu    sync.Mutex
-	ExtensionID   string
-	ExtTargetID   string
-	ExtSessionID  string
+	opts         Options
+	conn         net.Conn
+	writeMu      sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	nextID       int64
+	pending      map[int64]chan map[string]any
+	handlers     map[string][]Handler
+	handlersMu   sync.Mutex
+	ExtensionID  string
+	ExtTargetID  string
+	ExtSessionID string
 }
 
 func New(opts Options) *MagicCDPClient {
@@ -263,17 +123,18 @@ func New(opts Options) *MagicCDPClient {
 func (c *MagicCDPClient) SessionID() string { return c.opts.SessionID }
 
 func (c *MagicCDPClient) Connect() error {
-	resp, err := http.Get(c.opts.CDPURL + "/json/version")
+	wsURL, err := websocketURLFor(c.opts.CDPURL)
 	if err != nil {
-		return fmt.Errorf("GET /json/version: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var version map[string]any
-	if err := json.Unmarshal(body, &version); err != nil {
-		return fmt.Errorf("parse /json/version: %w", err)
+	c.opts.CDPURL = wsURL
+	if c.opts.Server != nil && c.opts.Server.LoopbackCDPURL != "" {
+		loopbackURL, err := websocketURLFor(c.opts.Server.LoopbackCDPURL)
+		if err != nil {
+			return err
+		}
+		c.opts.Server.LoopbackCDPURL = loopbackURL
 	}
-	wsURL, _ := version["webSocketDebuggerUrl"].(string)
 
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	conn, _, _, err := ws.Dial(c.ctx, wsURL)
@@ -299,14 +160,7 @@ func (c *MagicCDPClient) Connect() error {
 	}
 
 	if c.opts.Server != nil {
-		serverJSON, _ := json.Marshal(c.opts.Server)
-		_, err := c.sendRaw("Runtime.evaluate", map[string]any{
-			"expression":                  fmt.Sprintf("globalThis.MagicCDP.configure(%s)", string(serverJSON)),
-			"awaitPromise":                true,
-			"returnByValue":               true,
-			"allowUnsafeEvalBlockedByCSP": true,
-		}, c.ExtSessionID)
-		if err != nil {
+		if _, err := c.sendTranslated(translateServerConfigure(c.opts.Server)); err != nil {
 			c.Close()
 			return fmt.Errorf("Magic.configure: %w", err)
 		}
@@ -318,43 +172,11 @@ func (c *MagicCDPClient) Send(method string, params map[string]any) (any, error)
 	if params == nil {
 		params = map[string]any{}
 	}
-	route := routeFor(method, c.opts.Routes)
-	switch route {
-	case "service_worker":
-		switch method {
-		case "Magic.evaluate":
-			r, err := c.sendRaw("Runtime.evaluate", wrapMagicEvaluate(params, c.opts.SessionID), c.ExtSessionID)
-			if err != nil {
-				return nil, err
-			}
-			return unwrapEvaluateResult(r)
-		case "Magic.addCustomCommand":
-			r, err := c.sendRaw("Runtime.evaluate", wrapMagicAddCustomCommand(params), c.ExtSessionID)
-			if err != nil {
-				return nil, err
-			}
-			return unwrapEvaluateResult(r)
-		case "Magic.addCustomEvent":
-			name, _ := params["name"].(string)
-			if _, err := c.sendRaw("Runtime.addBinding", map[string]any{"name": bindingNameFor(name)}, c.ExtSessionID); err != nil {
-				return nil, err
-			}
-			r, err := c.sendRaw("Runtime.evaluate", wrapMagicAddCustomEvent(params), c.ExtSessionID)
-			if err != nil {
-				return nil, err
-			}
-			return unwrapEvaluateResult(r)
-		default:
-			r, err := c.sendRaw("Runtime.evaluate", wrapCustomCommand(method, params, c.opts.SessionID), c.ExtSessionID)
-			if err != nil {
-				return nil, err
-			}
-			return unwrapEvaluateResult(r)
-		}
-	case "direct_cdp":
-		return c.sendRaw(method, params, "")
+	translated, err := translateClientCommand(method, params, c.opts.Routes, c.opts.SessionID)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("unsupported client route %q for %s", route, method)
+	return c.sendTranslated(translated)
 }
 
 func (c *MagicCDPClient) On(event string, handler Handler) {
@@ -376,6 +198,31 @@ func (c *MagicCDPClient) Close() {
 }
 
 // --- internals -----------------------------------------------------------
+
+func (c *MagicCDPClient) sendTranslated(translated translatedCommand) (any, error) {
+	if translated.Target == "direct_cdp" {
+		step := translated.Steps[0]
+		return c.sendRaw(step.Method, step.Params, "")
+	}
+	if translated.Target != "service_worker" {
+		return nil, fmt.Errorf("unsupported translated target %q", translated.Target)
+	}
+
+	var result map[string]any
+	unwrap := ""
+	for _, step := range translated.Steps {
+		r, err := c.sendRaw(step.Method, step.Params, c.ExtSessionID)
+		if err != nil {
+			return nil, err
+		}
+		result = r
+		unwrap = step.Unwrap
+	}
+	if unwrap == "evaluate" {
+		return unwrapEvaluateResult(result)
+	}
+	return result, nil
+}
 
 func (c *MagicCDPClient) sendRaw(method string, params map[string]any, sessionID string) (map[string]any, error) {
 	c.mu.Lock()
@@ -511,7 +358,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 		}
 		for _, a := range seen {
 			probe, err := c.sendRaw("Runtime.evaluate", map[string]any{
-				"expression":   "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+				"expression":    "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
 				"returnByValue": true,
 			}, a.SessionID)
 			if err != nil {

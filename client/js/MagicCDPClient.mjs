@@ -19,11 +19,9 @@ import { fileURLToPath } from "node:url";
 import { launchChrome } from "../../bridge/launcher.mjs";
 import { ensureMagicCDPExtension } from "../../bridge/injector.mjs";
 import {
-  bindingNameFor,
-  wrapMagicEvaluate,
-  wrapMagicAddCustomCommand,
-  wrapMagicAddCustomEvent,
-  wrapCustomCommand,
+  DEFAULT_CLIENT_ROUTES,
+  translateClientCommand,
+  translateServerConfigure,
   unwrapEvaluateResult,
   unwrapBindingCalled,
 } from "../../bridge/translate.mjs";
@@ -31,35 +29,21 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_EXTENSION_PATH = path.resolve(HERE, "..", "..", "extension");
 
-const DEFAULT_CLIENT_ROUTES = {
-  "Magic.*": "service_worker",
-  "Custom.*": "service_worker",
-  "*.*": "direct_cdp",
-};
+async function webSocketUrlFor(endpoint, name = "cdp_url") {
+  if (/^wss?:\/\//i.test(endpoint)) return endpoint;
+  const response = await fetch(`${endpoint}/json/version`);
+  if (!response.ok) throw new Error(`GET ${endpoint}/json/version -> ${response.status}`);
+  const { webSocketDebuggerUrl } = await response.json();
+  if (!webSocketDebuggerUrl) throw new Error(`${name} HTTP discovery returned no webSocketDebuggerUrl`);
+  return webSocketDebuggerUrl;
+}
 
-// Match `method` against `routes` deterministically:
-//   1. exact match (e.g. "Browser.getVersion")
-//   2. longest-prefix wildcard match (e.g. "Magic.*" beats a less specific one)
-//   3. "*.*" fallback
-//   4. hard-coded "direct_cdp" if nothing matches
-// Object key insertion order in JS is stable but a more specific exact match
-// could otherwise be shadowed by a wildcard inserted earlier; this keeps
-// behavior predictable regardless of the routes map's construction order.
-function routeFor(method, routes = {}) {
-  if (Object.prototype.hasOwnProperty.call(routes, method)) return routes[method];
-  let bestPrefixLen = -1;
-  let bestRoute = null;
-  for (const [pattern, route] of Object.entries(routes)) {
-    if (pattern === "*.*" || !pattern.endsWith(".*")) continue;
-    const prefix = pattern.slice(0, -1);
-    if (method.startsWith(prefix) && prefix.length > bestPrefixLen) {
-      bestPrefixLen = prefix.length;
-      bestRoute = route;
-    }
-  }
-  if (bestRoute !== null) return bestRoute;
-  if (Object.prototype.hasOwnProperty.call(routes, "*.*")) return routes["*.*"];
-  return "direct_cdp";
+async function normalizeServerConfig(server) {
+  if (!server?.loopback_cdp_url) return server;
+  return {
+    ...server,
+    loopback_cdp_url: await webSocketUrlFor(server.loopback_cdp_url, "loopback_cdp_url"),
+  };
 }
 
 export function MagicCDPClient(options = {}) {
@@ -95,13 +79,12 @@ class MagicCDP extends EventEmitter {
   async connect() {
     if (!this.cdp_url) {
       this._launched = await launchChrome(this.launch_options);
-      this.cdp_url = this._launched.cdpUrl;
+      this.cdp_url = this._launched.wsUrl;
     }
-    const versionRes = await fetch(`${this.cdp_url}/json/version`);
-    if (!versionRes.ok) throw new Error(`GET ${this.cdp_url}/json/version -> ${versionRes.status}`);
-    const { webSocketDebuggerUrl } = await versionRes.json();
+    this.cdp_url = await webSocketUrlFor(this.cdp_url);
+    this.server = await normalizeServerConfig(this.server);
 
-    this.ws = new WebSocket(webSocketDebuggerUrl);
+    this.ws = new WebSocket(this.cdp_url);
     this.ws.addEventListener("message", event => this._onMessage(event.data));
     this.ws.addEventListener("close", () => this._rejectAll(new Error("CDP websocket closed")));
     this.ws.addEventListener("error", () => this._rejectAll(new Error(`CDP websocket error`)));
@@ -120,34 +103,17 @@ class MagicCDP extends EventEmitter {
     await this._sendRaw("Runtime.enable", {}, this.ext_session_id);
 
     if (this.server) {
-      await this._sendRaw("Runtime.evaluate", {
-        expression: `globalThis.MagicCDP.configure(${JSON.stringify(this.server)})`,
-        awaitPromise: true,
-        returnByValue: true,
-        allowUnsafeEvalBlockedByCSP: true,
-      }, this.ext_session_id);
+      await this._sendTranslated(translateServerConfigure(this.server));
     }
 
     return this;
   }
 
   async send(method, params = {}) {
-    const route = routeFor(method, this.routes);
-    if (route === "service_worker") {
-      if (method === "Magic.evaluate") {
-        return this._evalOnExt(wrapMagicEvaluate({ ...params, cdpSessionId: params.cdpSessionId ?? this.session_id }));
-      }
-      if (method === "Magic.addCustomCommand") {
-        return this._evalOnExt(wrapMagicAddCustomCommand(params));
-      }
-      if (method === "Magic.addCustomEvent") {
-        await this._sendRaw("Runtime.addBinding", { name: bindingNameFor(params.name) }, this.ext_session_id);
-        return this._evalOnExt(wrapMagicAddCustomEvent({ name: params.name, payloadSchema: params.payloadSchema ?? null }));
-      }
-      return this._evalOnExt(wrapCustomCommand(method, params, this.session_id));
-    }
-    if (route === "direct_cdp") return this._sendRaw(method, params);
-    throw new Error(`Unsupported client route "${route}" for ${method}`);
+    return this._sendTranslated(translateClientCommand(method, params, {
+      routes: this.routes,
+      cdpSessionId: this.session_id,
+    }));
   }
 
   async close() {
@@ -156,9 +122,22 @@ class MagicCDP extends EventEmitter {
     if (this._launched) await this._launched.close();
   }
 
-  async _evalOnExt(evalParams) {
-    const result = await this._sendRaw("Runtime.evaluate", evalParams, this.ext_session_id);
-    return unwrapEvaluateResult(result);
+  async _sendTranslated(translated) {
+    if (translated.target === "direct_cdp") {
+      const [step] = translated.steps;
+      return this._sendRaw(step.method, step.params ?? {});
+    }
+    if (translated.target !== "service_worker") {
+      throw new Error(`Unsupported translated target "${translated.target}"`);
+    }
+
+    let result = {};
+    let unwrap = null;
+    for (const step of translated.steps) {
+      result = await this._sendRaw(step.method, step.params ?? {}, this.ext_session_id);
+      unwrap = step.unwrap ?? null;
+    }
+    return unwrap === "evaluate" ? unwrapEvaluateResult(result) : result;
   }
 
   _sendRaw(method, params = {}, sessionId = null) {

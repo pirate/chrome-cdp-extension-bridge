@@ -12,7 +12,7 @@ const EXTENSION_PATH = path.resolve(HERE, "..", "extension");
 const getTargetsOverride = String.raw`
 async (params) => {
   const [upstream, tabs] = await Promise.all([
-    globalThis.MagicCDP.sendLoopback("Target.getTargets", params),
+    MagicCDP.sendLoopback("Target.getTargets", params),
     chrome.tabs.query({}),
   ]);
 
@@ -35,15 +35,14 @@ async (params) => {
 
 const setDiscoverTargetsOverride = String.raw`
 async (params) => {
-  if (!globalThis.MagicCDP.loopback_cdp_url) throw new Error("loopback_cdp_url is required");
+  if (!MagicCDP.loopback_cdp_url) throw new Error("loopback_cdp_url is required");
 
   const state = globalThis.__magicTargetForwarder ||= { nextId: 1, pending: new Map(), ws: null };
   const needsSocket = !state.ws || state.ws.readyState === WebSocket.CLOSING || state.ws.readyState === WebSocket.CLOSED;
 
   if (needsSocket) {
-    const version = await fetch(globalThis.MagicCDP.loopback_cdp_url + "/json/version").then(response => response.json());
     state.ws = await new Promise((resolve, reject) => {
-      const ws = new WebSocket(version.webSocketDebuggerUrl);
+      const ws = new WebSocket(MagicCDP.loopback_cdp_url);
       ws.addEventListener("open", () => resolve(ws), { once: true });
       ws.addEventListener("error", reject, { once: true });
     });
@@ -68,13 +67,12 @@ async (params) => {
         tabId = tab?.id ?? null;
       } catch {}
 
-      await globalThis.MagicCDP.emit("Target.targetCreated", {
+      await MagicCDP.emit("Target.targetCreated", {
         ...(msg.params || {}),
         targetInfo: {
           ...(msg.params?.targetInfo || {}),
           tabId,
         },
-        magicForwarded: true,
       });
     });
   }
@@ -110,6 +108,8 @@ test("service-worker routed standard CDP commands and events can be transformed"
 
   try {
     await cdp.connect();
+    assert.equal(cdp.cdp_url, chrome.wsUrl);
+    assert.equal(cdp.server.loopback_cdp_url, chrome.wsUrl);
 
     const rawTargets = await cdp._sendRaw("Target.getTargets");
     assert.ok(rawTargets.targetInfos?.length > 0, "expected raw Target.getTargets targetInfos");
@@ -145,7 +145,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
     const forwardedEvent = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("timed out waiting for transformed Target.targetCreated")), 10_000);
       cdp.on("Target.targetCreated", params => {
-        if (!params.magicForwarded) return;
+        if (!Object.hasOwn(params.targetInfo || {}, "tabId")) return;
         clearTimeout(timeout);
         resolve(params);
       });
@@ -155,7 +155,6 @@ test("service-worker routed standard CDP commands and events can be transformed"
     await cdp._sendRaw("Target.createTarget", { url: "about:blank#magic-cdp-event-test" });
 
     const event = await forwardedEvent;
-    assert.equal(event.magicForwarded, true);
     assert.ok(Object.hasOwn(event.targetInfo, "tabId"), "transformed event targetInfo should include tabId");
   } finally {
     try { await cdp.send("Target.setDiscoverTargets", { discover: false }); } catch {}

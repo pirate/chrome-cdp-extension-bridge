@@ -64,9 +64,9 @@ async function main() {
   // can drop extraFlags entirely and the injector will install the extension
   // over CDP itself.
   const chrome = await launchChrome({ extraFlags: [`--load-extension=${EXTENSION_PATH}`] });
-  console.log("upstream cdp:", chrome.cdpUrl);
+  console.log("upstream cdp:", chrome.wsUrl);
 
-  const cdp = MagicCDPClient(clientOptionsFor(mode, chrome.cdpUrl));
+  const cdp = MagicCDPClient(clientOptionsFor(mode, chrome.wsUrl));
   const events = [];
   cdp.on("Custom.demo", payload => { console.log("event ->", payload); events.push(payload); });
 
@@ -89,7 +89,7 @@ async function main() {
     await cdp.send("Magic.addCustomEvent", { name: "Custom.demo" });
     await cdp.send("Magic.addCustomCommand", {
       name: "Custom.echo",
-      expression: "async (params, { cdp }) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
+      expression: "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
     });
 
     console.log("Custom.echo        ->", await cdp.send("Custom.echo", { value: `hello-from-js-${mode}` }));

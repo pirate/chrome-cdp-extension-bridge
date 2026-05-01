@@ -29,19 +29,23 @@ func freePort() int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func waitForJSON(url string, deadline time.Time) error {
+func waitForJSON(url string, deadline time.Time) (map[string]any, error) {
 	for time.Now().Before(deadline) {
 		resp, err := (&http.Client{Timeout: 500 * time.Millisecond}).Get(url)
 		if err == nil {
-			io.Copy(io.Discard, resp.Body)
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode < 500 {
-				return nil
+				var data map[string]any
+				if err := json.Unmarshal(body, &data); err != nil {
+					return nil, err
+				}
+				return data, nil
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for %s", url)
+	return nil, fmt.Errorf("timeout waiting for %s", url)
 }
 
 func optionsFor(mode, cdpURL, extensionPath string) Options {
@@ -123,10 +127,12 @@ func main() {
 	}
 	defer func() { _ = chrome.Process.Kill(); _, _ = chrome.Process.Wait() }()
 
-	cdpURL := fmt.Sprintf("http://127.0.0.1:%d", chromePort)
-	if err := waitForJSON(cdpURL+"/json/version", time.Now().Add(10*time.Second)); err != nil {
+	httpURL := fmt.Sprintf("http://127.0.0.1:%d", chromePort)
+	version, err := waitForJSON(httpURL+"/json/version", time.Now().Add(10*time.Second))
+	if err != nil {
 		log.Fatal(err)
 	}
+	cdpURL, _ := version["webSocketDebuggerUrl"].(string)
 	fmt.Println("upstream cdp:", cdpURL)
 
 	cdp := New(optionsFor(mode, cdpURL, extensionPath))
@@ -168,7 +174,7 @@ func main() {
 	}
 	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
 		"name":       "Custom.echo",
-		"expression": "async (params, { cdp }) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
+		"expression": "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
 	}); err != nil {
 		log.Fatal(err)
 	}

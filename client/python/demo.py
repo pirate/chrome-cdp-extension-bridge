@@ -93,8 +93,8 @@ def main():
             f"--load-extension={EXTENSION_PATH}",
             "about:blank",
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        cdp_url = f"http://127.0.0.1:{chrome_port}"
-        wait_for_url(f"{cdp_url}/json/version")
+        http_url = f"http://127.0.0.1:{chrome_port}"
+        cdp_url = wait_for_url(f"{http_url}/json/version")["webSocketDebuggerUrl"]
         print(f"upstream cdp: {cdp_url}")
 
         cdp = MagicCDPClient(**client_options_for(mode, cdp_url))
@@ -118,7 +118,7 @@ def main():
         cdp.send("Magic.addCustomEvent", {"name": "Custom.demo"})
         cdp.send("Magic.addCustomCommand", {
             "name": "Custom.echo",
-            "expression": "async (params, { cdp }) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
+            "expression": "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
         })
         print(f"Custom.echo        -> {cdp.send('Custom.echo', {'value': f'hello-from-py-{mode}'})}")
         print(f"Custom.echo        -> {cdp.send('Custom.echo', {'value': f'second-{mode}'})}")

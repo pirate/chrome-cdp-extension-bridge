@@ -17,7 +17,8 @@ Stock CDP libraries (Playwright, chromedp, raw websocket clients) speak this wit
 // see client/python/MagicCDPClient.py and client/go/MagicCDPClient.go.
 import { MagicCDPClient } from "./client/js/MagicCDPClient.mjs";
 
-const cdp = new MagicCDPClient({ cdp_url: "http://127.0.0.1:9222" });
+const cdp = new MagicCDPClient({ cdp_url: "ws://127.0.0.1:9222/devtools/browser/..." });
+// http://127.0.0.1:9222 also works as shorthand; it is resolved to ws:// once at connect time.
 await cdp.connect();
 
 // 1. run extension code with chrome.* in scope
@@ -28,7 +29,7 @@ const tab = await cdp.send("Magic.evaluate", {
 // 2. register a custom command
 await cdp.send("Magic.addCustomCommand", {
   name: "Custom.echo",
-  expression: "async (params, { cdp }) => { await cdp.emit('Custom.demo', params); return params; }",
+  expression: "async (params) => { await cdp.emit('Custom.demo', params); return params; }",
 });
 
 // 3. register + listen for a custom event
@@ -140,7 +141,7 @@ type CDPUpstream = "service_worker" | "direct_cdp" | "auto" | "loopback_cdp" | "
 - **`service_worker`** — handle in the extension SW.
 - **`direct_cdp`** (client only) — send straight to the browser CDP websocket.
 - **`auto`** (server only) — try `loopback_cdp` first, fall back to `chrome_debugger`.
-- **`loopback_cdp`** (server only) — SW dials a CDP websocket reachable from the browser (default `http://127.0.0.1:9222`). Useful for `Browser.*` commands that `chrome.debugger` doesn't support.
+- **`loopback_cdp`** (server only) — SW dials a CDP websocket reachable from the browser. You may pass `http://host:port` as shorthand, but it is resolved to the concrete `ws://.../devtools/...` URL at configuration time. Useful for `Browser.*` commands that `chrome.debugger` doesn't support.
 - **`chrome_debugger`** (server only) — `chrome.debugger.sendCommand` against `params.debuggee || { tabId, targetId, extensionId }`, defaulting to the active last-focused tab.
 
 Route resolution is **deterministic across all three language clients**: exact-method match → longest-prefix wildcard → `*.*` fallback. This avoids map-iteration nondeterminism (Go) and key-insertion-order shadowing (JS/Python).
@@ -310,7 +311,7 @@ flowchart LR
 **Alternatives considered**
 
 - `chrome.debugger` — used as the server-side fallback, but doesn't expose other connected CDP clients or the raw protocol stream.
-- Extension WebSocket → `ws://localhost:9222` directly — the root path isn't a CDP endpoint; the real WS URL must come from `/json/version`.
+- Extension WebSocket → pass the actual `ws://.../devtools/browser/...` CDP endpoint directly; HTTP `/json/*` discovery is only a compatibility fallback for `http://host:port` shorthand.
 - Listening to another CDP client's traffic — separate clients don't see each other's frames.
 - WebMCP — page-visible/tool-oriented, unsuitable when page JS must not detect the control plane.
 - `Extensions.*` storage mailbox — slower and more brittle than the SW target.

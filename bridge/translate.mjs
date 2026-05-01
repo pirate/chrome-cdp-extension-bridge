@@ -5,10 +5,33 @@
 
 export const BINDING_PREFIX = "__MagicCDP_";
 
+export const DEFAULT_CLIENT_ROUTES = {
+  "Magic.*": "service_worker",
+  "Custom.*": "service_worker",
+  "*.*": "direct_cdp",
+};
+
 export const bindingNameFor = eventName => BINDING_PREFIX + eventName.replaceAll(".", "_");
 
 export const eventNameFor = bindingName =>
   bindingName.startsWith(BINDING_PREFIX) ? bindingName.slice(BINDING_PREFIX.length).replaceAll("_", ".") : null;
+
+export function routeFor(method, routes = {}) {
+  if (Object.prototype.hasOwnProperty.call(routes, method)) return routes[method];
+  let bestPrefixLen = -1;
+  let bestRoute = null;
+  for (const [pattern, route] of Object.entries(routes)) {
+    if (pattern === "*.*" || !pattern.endsWith(".*")) continue;
+    const prefix = pattern.slice(0, -1);
+    if (method.startsWith(prefix) && prefix.length > bestPrefixLen) {
+      bestPrefixLen = prefix.length;
+      bestRoute = route;
+    }
+  }
+  if (bestRoute !== null) return bestRoute;
+  if (Object.prototype.hasOwnProperty.call(routes, "*.*")) return routes["*.*"];
+  return "direct_cdp";
+}
 
 // --- outbound: MagicCDP method -> Runtime.* params on the extension session --
 
@@ -18,9 +41,10 @@ export function wrapMagicEvaluate({ expression, params = {}, cdpSessionId = null
       (async () => {
         const params = ${JSON.stringify(params)};
         const cdp = globalThis.MagicCDP.attachToSession(${JSON.stringify(cdpSessionId)});
-        const context = { cdp, MagicCDP: globalThis.MagicCDP, chrome: globalThis.chrome };
+        const MagicCDP = globalThis.MagicCDP;
+        const chrome = globalThis.chrome;
         const value = (${expression});
-        return typeof value === "function" ? await value(params, context) : value;
+        return typeof value === "function" ? await value(params) : value;
       })()
     `,
     awaitPromise: true,
@@ -33,7 +57,6 @@ export function wrapMagicAddCustomCommand({ name, expression, paramsSchema = nul
   return {
     expression: `
       (() => {
-        const handler = (${expression});
         return globalThis.MagicCDP.addCustomCommand({
           name: ${JSON.stringify(name)},
           paramsSchema: ${JSON.stringify(paramsSchema)},
@@ -41,7 +64,10 @@ export function wrapMagicAddCustomCommand({ name, expression, paramsSchema = nul
           expression: ${JSON.stringify(expression)},
           handler: async (params, meta) => {
             const cdp = globalThis.MagicCDP.attachToSession(meta.cdpSessionId);
-            return await handler(params || {}, { cdp, MagicCDP: globalThis.MagicCDP, chrome: globalThis.chrome, meta });
+            const MagicCDP = globalThis.MagicCDP;
+            const chrome = globalThis.chrome;
+            const handler = (${expression});
+            return await handler(params || {});
           },
         });
       })()
@@ -73,6 +99,89 @@ export function wrapCustomCommand(method, params = {}, cdpSessionId = null) {
     awaitPromise: true,
     returnByValue: true,
     allowUnsafeEvalBlockedByCSP: true,
+  };
+}
+
+export function wrapMagicConfigure(config = {}) {
+  return {
+    expression: `
+      (async () => {
+        const deadline = Date.now() + 5000;
+        while (!globalThis.MagicCDP?.configure && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        if (!globalThis.MagicCDP?.configure) throw new Error("MagicCDP service worker global is unavailable.");
+        return globalThis.MagicCDP.configure(${JSON.stringify(config)});
+      })()
+    `,
+    awaitPromise: true,
+    returnByValue: true,
+    allowUnsafeEvalBlockedByCSP: true,
+  };
+}
+
+export function translateServiceWorkerCommand(method, params = {}, cdpSessionId = null) {
+  if (method === "Magic.addCustomEvent") {
+    return [
+      {
+        method: "Runtime.addBinding",
+        params: { name: bindingNameFor(params.name) },
+      },
+      {
+        method: "Runtime.evaluate",
+        params: wrapMagicAddCustomEvent({ name: params.name, payloadSchema: params.payloadSchema ?? null }),
+        unwrap: "evaluate",
+      },
+    ];
+  }
+
+  let runtimeParams;
+  if (method === "Magic.evaluate") {
+    runtimeParams = wrapMagicEvaluate({ ...params, cdpSessionId: params.cdpSessionId ?? cdpSessionId });
+  } else if (method === "Magic.addCustomCommand") {
+    runtimeParams = wrapMagicAddCustomCommand(params);
+  } else {
+    runtimeParams = wrapCustomCommand(method, params, params.cdpSessionId ?? cdpSessionId);
+  }
+
+  return [
+    {
+      method: "Runtime.evaluate",
+      params: runtimeParams,
+      unwrap: "evaluate",
+    },
+  ];
+}
+
+export function translateClientCommand(method, params = {}, { routes = DEFAULT_CLIENT_ROUTES, cdpSessionId = null } = {}) {
+  const route = routeFor(method, routes);
+  if (route === "direct_cdp") {
+    return {
+      route,
+      target: "direct_cdp",
+      steps: [{ method, params }],
+    };
+  }
+  if (route === "service_worker") {
+    return {
+      route,
+      target: "service_worker",
+      steps: translateServiceWorkerCommand(method, params, cdpSessionId),
+    };
+  }
+  throw new Error(`Unsupported client route "${route}" for ${method}`);
+}
+
+export function translateServerConfigure(config = {}) {
+  return {
+    target: "service_worker",
+    steps: [
+      {
+        method: "Runtime.evaluate",
+        params: wrapMagicConfigure(config),
+        unwrap: "evaluate",
+      },
+    ],
   };
 }
 

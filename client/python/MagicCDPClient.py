@@ -9,9 +9,6 @@ Constructor parameter names mirror the JS / Go ports:
 
 Public methods: connect(), send(method, params), on(event, handler), close().
 Synchronous (blocking) API; one background thread reads frames off the WS.
-
-Wrap/unwrap is inlined here to mirror bridge/translate.mjs without an extra
-file. Same wire format as the JS side (encodeBindingPayload).
 """
 
 import json
@@ -24,156 +21,26 @@ from queue import Queue, Empty
 
 from websocket import create_connection
 
-BINDING_PREFIX = "__MagicCDP_"
+from translate import (
+    DEFAULT_CLIENT_ROUTES,
+    translate_client_command,
+    translate_server_configure,
+    unwrap_binding_called,
+    unwrap_evaluate_result,
+)
+
 SW_URL_RE = re.compile(r"^chrome-extension://[a-z]+/service_worker\.js$")
 EXT_ID_FROM_URL_RE = re.compile(r"^chrome-extension://([a-z]+)/")
 
-DEFAULT_CLIENT_ROUTES = {
-    "Magic.*": "service_worker",
-    "Custom.*": "service_worker",
-    "*.*": "direct_cdp",
-}
 
-
-def binding_name_for(event_name: str) -> str:
-    return BINDING_PREFIX + event_name.replace(".", "_")
-
-
-def event_name_for(binding_name: str):
-    if not binding_name.startswith(BINDING_PREFIX):
-        return None
-    return binding_name[len(BINDING_PREFIX):].replace("_", ".")
-
-
-def route_for(method: str, routes: dict) -> str:
-    """Match `method` against `routes` deterministically.
-
-    Precedence:
-      1. exact match (e.g. "Browser.getVersion")
-      2. longest-prefix wildcard match (e.g. "Magic.*")
-      3. "*.*" fallback
-      4. hard-coded "direct_cdp" if nothing matches
-
-    Without this ordering, a custom exact route like {"Browser.getVersion":
-    "direct_cdp"} could be shadowed by a wildcard like {"*.*":
-    "service_worker"} that happened to be inserted earlier in the dict.
-    """
-    routes = routes or {}
-    if method in routes:
-        return routes[method]
-    best_prefix_len = -1
-    best_route = None
-    for pattern, route in routes.items():
-        if pattern == "*.*" or not pattern.endswith(".*"):
-            continue
-        prefix = pattern[:-1]
-        if method.startswith(prefix) and len(prefix) > best_prefix_len:
-            best_prefix_len = len(prefix)
-            best_route = route
-    if best_route is not None:
-        return best_route
-    if "*.*" in routes:
-        return routes["*.*"]
-    return "direct_cdp"
-
-
-def wrap_magic_evaluate(params: dict, session_id: str):
-    expression = params["expression"]
-    user_params = params.get("params", {})
-    cdp_session_id = params.get("cdpSessionId") or session_id
-    return {
-        "expression": (
-            "(async () => {\n"
-            f"  const params = {json.dumps(user_params)};\n"
-            f"  const cdp = globalThis.MagicCDP.attachToSession({json.dumps(cdp_session_id)});\n"
-            "  const context = { cdp, MagicCDP: globalThis.MagicCDP, chrome: globalThis.chrome };\n"
-            f"  const value = ({expression});\n"
-            "  return typeof value === 'function' ? await value(params, context) : value;\n"
-            "})()"
-        ),
-        "awaitPromise": True,
-        "returnByValue": True,
-        "allowUnsafeEvalBlockedByCSP": True,
-    }
-
-
-def wrap_magic_add_custom_command(params: dict):
-    return {
-        "expression": (
-            "(() => {\n"
-            f"  const handler = ({params['expression']});\n"
-            "  return globalThis.MagicCDP.addCustomCommand({\n"
-            f"    name: {json.dumps(params['name'])},\n"
-            f"    paramsSchema: {json.dumps(params.get('paramsSchema'))},\n"
-            f"    resultSchema: {json.dumps(params.get('resultSchema'))},\n"
-            f"    expression: {json.dumps(params['expression'])},\n"
-            "    handler: async (params, meta) => {\n"
-            "      const cdp = globalThis.MagicCDP.attachToSession(meta.cdpSessionId);\n"
-            "      return await handler(params || {}, { cdp, MagicCDP: globalThis.MagicCDP, chrome: globalThis.chrome, meta });\n"
-            "    },\n"
-            "  });\n"
-            "})()"
-        ),
-        "awaitPromise": True,
-        "returnByValue": True,
-        "allowUnsafeEvalBlockedByCSP": True,
-    }
-
-
-def wrap_magic_add_custom_event(params: dict):
-    return {
-        "expression": (
-            "globalThis.MagicCDP.addCustomEvent({\n"
-            f"  name: {json.dumps(params['name'])},\n"
-            f"  bindingName: {json.dumps(binding_name_for(params['name']))},\n"
-            f"  payloadSchema: {json.dumps(params.get('payloadSchema'))},\n"
-            "})"
-        ),
-        "awaitPromise": True,
-        "returnByValue": True,
-        "allowUnsafeEvalBlockedByCSP": True,
-    }
-
-
-def wrap_custom_command(method: str, params: dict, session_id: str):
-    return {
-        "expression": (
-            f"globalThis.MagicCDP.handleCommand("
-            f"{json.dumps(method)}, {json.dumps(params)}, "
-            f"{json.dumps({'cdpSessionId': session_id})})"
-        ),
-        "awaitPromise": True,
-        "returnByValue": True,
-        "allowUnsafeEvalBlockedByCSP": True,
-    }
-
-
-def unwrap_evaluate_result(result: dict):
-    if result.get("exceptionDetails"):
-        ex = result["exceptionDetails"]
-        msg = (ex.get("exception") or {}).get("description") or ex.get("text") or "Runtime.evaluate failed"
-        raise RuntimeError(msg)
-    inner = result.get("result") or {}
-    return inner.get("value")
-
-
-def unwrap_binding_called(params: dict, our_session_id: str):
-    """Returns {"event", "data"} or None when the binding is not a MagicCDP
-    event, when the payload is scoped to a different cdpSessionId than ours,
-    or when the payload string is not valid JSON."""
-    event = event_name_for(params.get("name") or "")
-    if event is None:
-        return None
-    try:
-        payload = json.loads(params.get("payload") or "{}")
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if our_session_id is not None and payload.get("cdpSessionId") and payload["cdpSessionId"] != our_session_id:
-        return None
-    data = payload["data"] if "data" in payload else payload
-    return {"event": event, "data": data}
+def websocket_url_for(endpoint: str) -> str:
+    if re.match(r"^wss?://", endpoint, re.I):
+        return endpoint
+    with urllib.request.urlopen(f"{endpoint}/json/version", timeout=5) as r:
+        ws_url = json.loads(r.read()).get("webSocketDebuggerUrl")
+    if not ws_url:
+        raise RuntimeError(f"HTTP discovery for {endpoint} returned no webSocketDebuggerUrl")
+    return ws_url
 
 
 class MagicCDPClient:
@@ -197,9 +64,10 @@ class MagicCDPClient:
         self._closed = False
 
     def connect(self):
-        with urllib.request.urlopen(f"{self.cdp_url}/json/version", timeout=5) as r:
-            ws_url = json.loads(r.read())["webSocketDebuggerUrl"]
-        self._ws = create_connection(ws_url)
+        self.cdp_url = websocket_url_for(self.cdp_url)
+        if self.server and self.server.get("loopback_cdp_url"):
+            self.server = {**self.server, "loopback_cdp_url": websocket_url_for(self.server["loopback_cdp_url"])}
+        self._ws = create_connection(self.cdp_url)
         self._reader_thread = threading.Thread(target=self._reader, daemon=True)
         self._reader_thread.start()
 
@@ -210,29 +78,16 @@ class MagicCDPClient:
         self._send_raw("Runtime.enable", {}, self.ext_session_id)
 
         if self.server:
-            self._send_raw("Runtime.evaluate", {
-                "expression": f"globalThis.MagicCDP.configure({json.dumps(self.server)})",
-                "awaitPromise": True,
-                "returnByValue": True,
-                "allowUnsafeEvalBlockedByCSP": True,
-            }, self.ext_session_id)
+            self._send_translated(translate_server_configure(self.server))
         return self
 
     def send(self, method, params=None):
-        params = params or {}
-        route = route_for(method, self.routes)
-        if route == "service_worker":
-            if method == "Magic.evaluate":
-                return unwrap_evaluate_result(self._send_raw("Runtime.evaluate", wrap_magic_evaluate(params, self.session_id), self.ext_session_id))
-            if method == "Magic.addCustomCommand":
-                return unwrap_evaluate_result(self._send_raw("Runtime.evaluate", wrap_magic_add_custom_command(params), self.ext_session_id))
-            if method == "Magic.addCustomEvent":
-                self._send_raw("Runtime.addBinding", {"name": binding_name_for(params["name"])}, self.ext_session_id)
-                return unwrap_evaluate_result(self._send_raw("Runtime.evaluate", wrap_magic_add_custom_event(params), self.ext_session_id))
-            return unwrap_evaluate_result(self._send_raw("Runtime.evaluate", wrap_custom_command(method, params, self.session_id), self.ext_session_id))
-        if route == "direct_cdp":
-            return self._send_raw(method, params)
-        raise RuntimeError(f"Unsupported client route '{route}' for {method}")
+        return self._send_translated(translate_client_command(
+            method,
+            params or {},
+            routes=self.routes,
+            cdp_session_id=self.session_id,
+        ))
 
     def on(self, event, handler):
         self._handlers.setdefault(event, []).append(handler)
@@ -252,6 +107,20 @@ class MagicCDPClient:
             pass
 
     # --- internals ---------------------------------------------------------
+
+    def _send_translated(self, translated):
+        if translated["target"] == "direct_cdp":
+            step = translated["steps"][0]
+            return self._send_raw(step["method"], step.get("params") or {})
+        if translated["target"] != "service_worker":
+            raise RuntimeError(f"Unsupported translated target {translated['target']!r}")
+
+        result = {}
+        unwrap = None
+        for step in translated["steps"]:
+            result = self._send_raw(step["method"], step.get("params") or {}, self.ext_session_id)
+            unwrap = step.get("unwrap")
+        return unwrap_evaluate_result(result) if unwrap == "evaluate" else result
 
     def _send_raw(self, method, params=None, session_id=None, timeout=10):
         with self._lock:
