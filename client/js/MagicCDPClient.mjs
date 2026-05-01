@@ -15,7 +15,6 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocket } from "ws";
 
 import { launchChrome } from "../../bridge/launcher.mjs";
 import { ensureMagicCDPExtension } from "../../bridge/injector.mjs";
@@ -88,12 +87,12 @@ class MagicCDP extends EventEmitter {
     const { webSocketDebuggerUrl } = await versionRes.json();
 
     this.ws = new WebSocket(webSocketDebuggerUrl);
-    this.ws.on("message", buf => this._onMessage(buf));
-    this.ws.on("close", () => this._rejectAll(new Error("CDP websocket closed")));
-    this.ws.on("error", err => this._rejectAll(new Error(`CDP websocket error: ${err.message}`)));
+    this.ws.addEventListener("message", event => this._onMessage(event.data));
+    this.ws.addEventListener("close", () => this._rejectAll(new Error("CDP websocket closed")));
+    this.ws.addEventListener("error", () => this._rejectAll(new Error(`CDP websocket error`)));
     await new Promise((resolve, reject) => {
-      this.ws.once("open", resolve);
-      this.ws.once("error", reject);
+      this.ws.addEventListener("open", resolve, { once: true });
+      this.ws.addEventListener("error", reject, { once: true });
     });
 
     const ext = await ensureMagicCDPExtension({

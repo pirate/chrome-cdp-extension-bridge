@@ -19,7 +19,7 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer } from "ws";
 
 import { launchChrome } from "./launcher.mjs";
 import { ensureMagicCDPExtension } from "./injector.mjs";
@@ -142,8 +142,8 @@ async function handleConnection(client, earlyBuffer, earlyHandler, upstreamState
   const { webSocketDebuggerUrl } = await versionRes.json();
   const upstream = new WebSocket(webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
-    upstream.once("open", resolve);
-    upstream.once("error", reject);
+    upstream.addEventListener("open", resolve, { once: true });
+    upstream.addEventListener("error", reject, { once: true });
   });
 
   // per-connection state
@@ -161,14 +161,14 @@ async function handleConnection(client, earlyBuffer, earlyHandler, upstreamState
     queuedFromClient: [],
   };
 
-  upstream.on("message", buf => {
+  upstream.addEventListener("message", event => {
     let msg;
-    try { msg = JSON.parse(buf); } catch (e) { log("upstream parse error", e.message); return; }
+    try { msg = JSON.parse(event.data); } catch (e) { log("upstream parse error", e.message); return; }
     dbg("upstream->", msg.id ?? "", msg.method ?? "(response)", msg.sessionId ?? "");
     handleUpstreamMessage(state, msg);
   });
-  upstream.on("close", () => { try { client.close(); } catch {} });
-  upstream.on("error", e => { log("upstream ws error:", e.message); try { client.close(1011, e.message.slice(0,120)); } catch {} });
+  upstream.addEventListener("close", () => { try { client.close(); } catch {} });
+  upstream.addEventListener("error", () => { log("upstream ws error"); try { client.close(1011, "upstream error"); } catch {} });
   client.on("close", () => { try { upstream.close(); } catch {} });
 
   // Bootstrap: ensure the MagicCDP extension is present and attach a hidden

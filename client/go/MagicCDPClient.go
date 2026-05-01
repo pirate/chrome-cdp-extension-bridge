@@ -13,6 +13,11 @@
 // Wrap/unwrap is inlined to mirror bridge/translate.mjs without an extra
 // file. Same wire format as the JS / Python sides.
 //
+// Transport: gobwas/ws is intentionally low-level. We hold the underlying
+// net.Conn ourselves and use wsutil.ReadServerText / WriteClientText to push
+// raw JSON []byte over the websocket -- no message types, no schema, no
+// dependency on chromedp/cdproto's static method enumeration.
+//
 // Package note: Go disallows two packages in one directory, so this file is
 // in `package main` alongside demo.go. To use as a library, copy this file
 // into your own package and rename `package main` to your package name.
@@ -24,13 +29,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/coder/websocket"
+	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 	"github.com/google/uuid"
 )
 
@@ -196,7 +203,8 @@ type Handler func(data any)
 
 type MagicCDPClient struct {
 	opts          Options
-	ws            *websocket.Conn
+	conn          net.Conn
+	writeMu       sync.Mutex
 	ctx           context.Context
 	cancel        context.CancelFunc
 	mu            sync.Mutex
@@ -245,12 +253,11 @@ func (c *MagicCDPClient) Connect() error {
 	wsURL, _ := version["webSocketDebuggerUrl"].(string)
 
 	c.ctx, c.cancel = context.WithCancel(context.Background())
-	conn, _, err := websocket.Dial(c.ctx, wsURL, nil)
+	conn, _, _, err := ws.Dial(c.ctx, wsURL)
 	if err != nil {
 		return fmt.Errorf("websocket dial: %w", err)
 	}
-	conn.SetReadLimit(64 * 1024 * 1024)
-	c.ws = conn
+	c.conn = conn
 	go c.reader()
 
 	ext, err := c.ensureExtension()
@@ -335,8 +342,8 @@ func (c *MagicCDPClient) Close() {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	if c.ws != nil {
-		_ = c.ws.Close(websocket.StatusNormalClosure, "")
+	if c.conn != nil {
+		_ = c.conn.Close()
 	}
 }
 
@@ -355,7 +362,10 @@ func (c *MagicCDPClient) sendRaw(method string, params map[string]any, sessionID
 		msg["sessionId"] = sessionID
 	}
 	body, _ := json.Marshal(msg)
-	if err := c.ws.Write(c.ctx, websocket.MessageText, body); err != nil {
+	c.writeMu.Lock()
+	err := wsutil.WriteClientText(c.conn, body)
+	c.writeMu.Unlock()
+	if err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -377,7 +387,7 @@ func (c *MagicCDPClient) sendRaw(method string, params map[string]any, sessionID
 
 func (c *MagicCDPClient) reader() {
 	for {
-		_, data, err := c.ws.Read(c.ctx)
+		data, err := wsutil.ReadServerText(c.conn)
 		if err != nil {
 			c.mu.Lock()
 			pending := c.pending

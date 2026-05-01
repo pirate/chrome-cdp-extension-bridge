@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "demo": "node playwright-demo.mjs",
-    "bridge": "node bridge.mjs"
+    "demo:js": "node client/js/demo.mjs",
+    "demo:python": "python3 client/python/demo.py",
+    "demo:go": "(cd client/go && go run .)",
+    "proxy": "node bridge/proxy.mjs"
   },
   "dependencies": {
-    "playwright": "1.56.1",
     "ws": "^8.18.0"
   }
 }
