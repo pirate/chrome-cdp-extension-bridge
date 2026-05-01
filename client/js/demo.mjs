@@ -19,6 +19,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { createInterface } from "node:readline/promises";
 
 import { MagicCDPClient } from "./MagicCDPClient.mjs";
 import { launchChrome } from "../../bridge/launcher.mjs";
@@ -100,9 +101,51 @@ async function main() {
     if (events.length < 2) throw new Error(`expected >=2 Custom.demo events, got ${events.length}`);
 
     console.log(`\nSUCCESS (${mode}): ${events.length} events`);
+
+    // Drop into an interactive prompt when stdin is a TTY. Lets you poke at
+    // the live browser: type Domain.method({...JS object literal...}) and
+    // see the result; events you've subscribed to print as they arrive. Skip
+    // the prompt when run non-interactively (CI, piped stdin) so the demo
+    // exits cleanly after assertions.
+    if (process.stdin.isTTY) {
+      cdp.on("Target.attachedToTarget", e => console.log("\n[event] Target.attachedToTarget", e));
+      await runRepl(cdp, mode);
+    }
   } finally {
     await cdp.close();
     await chrome.close();
+  }
+}
+
+async function runRepl(cdp, mode) {
+  console.log(`\nBrowser remains running. Mode: ${mode}.`);
+  console.log("Enter commands as Domain.method({...}). Examples:");
+  console.log("  Browser.getVersion({})");
+  console.log("  Magic.evaluate({expression: \"chrome.tabs.query({active: true})\"})");
+  console.log("  Custom.echo({value: 'hi'})");
+  console.log("Type exit or quit to disconnect (browser keeps running).");
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      let line;
+      try { line = (await rl.question("MagicCDP> ")).trim(); }
+      catch { break; }
+      if (!line) continue;
+      if (line === "exit" || line === "quit") break;
+      try {
+        const match = line.match(/^([A-Za-z_][\w]*\.[A-Za-z_][\w]*)(?:\(([\s\S]*)\))?$/);
+        if (!match) throw new Error("format: Domain.method({...})");
+        const [, method, raw = ""] = match;
+        const params = raw.trim() ? Function(`"use strict"; return (${raw});`)() : {};
+        const result = await cdp.send(method, params);
+        console.log(JSON.stringify(result, null, 2));
+      } catch (e) {
+        console.error("error:", e?.message || e);
+      }
+    }
+  } finally {
+    rl.close();
   }
 }
 

@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,10 +18,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/term"
 )
 
 func freePort() int {
@@ -199,9 +204,69 @@ func main() {
 		time.Sleep(20 * time.Millisecond)
 	}
 	eventsMu.Lock()
-	defer eventsMu.Unlock()
-	if len(events) < 2 {
-		log.Fatalf("expected >=2 Custom.demo events, got %d", len(events))
+	got := len(events)
+	eventsMu.Unlock()
+	if got < 2 {
+		log.Fatalf("expected >=2 Custom.demo events, got %d", got)
 	}
-	fmt.Printf("\nSUCCESS (%s): %d events\n", mode, len(events))
+	fmt.Printf("\nSUCCESS (%s): %d events\n", mode, got)
+
+	// TTY-only REPL. Lets you poke at the live browser interactively;
+	// subscribed events print as they arrive. Skip when stdin is not a tty
+	// (CI / piped input / /dev/null) so the demo exits cleanly after
+	// assertions.
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		cdp.On("Target.attachedToTarget", func(p any) {
+			b, _ := json.Marshal(p)
+			fmt.Printf("\n[event] Target.attachedToTarget %s\n", string(b))
+		})
+		runRepl(cdp, mode)
+	}
+}
+
+func runRepl(cdp *MagicCDPClient, mode string) {
+	fmt.Printf("\nBrowser remains running. Mode: %s.\n", mode)
+	fmt.Println("Enter commands as Domain.method({...JSON params...}). Examples:")
+	fmt.Println(`  Browser.getVersion({})`)
+	fmt.Println(`  Magic.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
+	fmt.Println(`  Custom.echo({"value": "hi"})`)
+	fmt.Println("Type exit or quit to disconnect (browser keeps running).")
+	cmdRE := regexp.MustCompile(`^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$`)
+	sc := bufio.NewScanner(os.Stdin)
+	fmt.Print("MagicCDP> ")
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			fmt.Print("MagicCDP> ")
+			continue
+		}
+		if line == "exit" || line == "quit" {
+			break
+		}
+		m := cmdRE.FindStringSubmatch(line)
+		if m == nil {
+			fmt.Println("error: format: Domain.method({...JSON...})")
+			fmt.Print("MagicCDP> ")
+			continue
+		}
+		method := m[1]
+		raw := strings.TrimSpace(m[2])
+		params := map[string]any{}
+		if raw != "" {
+			if err := json.Unmarshal([]byte(raw), &params); err != nil {
+				fmt.Printf("error: parse params: %v\n", err)
+				fmt.Print("MagicCDP> ")
+				continue
+			}
+		}
+		result, err := cdp.Send(method, params)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			fmt.Print("MagicCDP> ")
+			continue
+		}
+		b, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(b))
+		fmt.Print("MagicCDP> ")
+	}
 }
