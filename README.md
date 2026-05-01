@@ -100,11 +100,15 @@ python3 client/python/demo.py
 ( cd client/go && go run . )
 ```
 
-Or use the transparent proxy with any vanilla CDP client (Playwright, chromedp, etc.) — it speaks normal CDP plus `Magic.*` / `Custom.*` for anything connected to it:
+## Transparent Proxy
+
+Upgrade any vanilla CDP client like Stagehand, Playwright, or Puppeteer transparently with support for `Magic.*` / `Custom.*` commands and events.
 
 ```sh
 node bridge/proxy.js --upstream http://127.0.0.1:9222 --port 9223
-# then point e.g. chromium.connectOverCDP("http://127.0.0.1:9223") at it
+# playwright.chromium.connect("http://127.0.0.1:9223")
+# playwright page.getCDPSession().send('Magic.evaluate', {expression: '1+1'}) -> 2
+# ✨ All Magic CDP commands now work through playwright! you can modify/extend playwright behavior to your heart's content
 ```
 
 ## Routing modes
@@ -113,11 +117,11 @@ node bridge/proxy.js --upstream http://127.0.0.1:9222 --port 9223
 
 | Mode         | Standard CDP path                                                  | Use when                                                                        |
 | ------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| `--direct`   | client → upstream CDP socket directly                              | You already have a CDP endpoint and don't need extension interception.          |
 | `--loopback` | client → SW → SW dials its own WS back to localhost:9222 → CDP     | Default. You need the SW to intercept/inspect/rewrite normal traffic.           |
 | `--debugger` | client → SW → `chrome.debugger.sendCommand` against the active tab | The browser exposes no remote CDP port and you only have extension permissions. |
+| `--direct`   | client → sends non-Magic CDP commands to browser CDP directly      | You already have a CDP endpoint and don't need extension interception.          |
 
-Pass via `routes: { "*.*": "direct_cdp" | "service_worker" }` on the client and `server: { routes: { "*.*": "loopback_cdp" | "chrome_debugger" } }` for the SW side. The library route default is `direct_cdp`; the demos default to `--loopback`.
+Pass via `routes: { "*.*": "direct_cdp" | "service_worker" }` on the client and `server: { routes: { "*.*": "loopback_cdp" | "chrome_debugger" } }` for the SW side. The demos default to `--loopback` (the most powerful mode).
 
 ## Repository layout
 
