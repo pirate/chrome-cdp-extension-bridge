@@ -60,29 +60,28 @@ await cdp.Magic.addCustomEvent({
     url: z.string().nullable(),
     tabId: z.number().nullable().optional(),
   },
-});
+})
 await cdp.Magic.evaluate({
   expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     await cdp.emit("Page.foregroundPageChanged", {
       tabId,
       targetId: (await chrome.debugger.getTargets()).find(t => t.tabId === tabId)?.id
-    });
+    })
   })`,
-});
-cdp.on("Page.foregroundPageChanged", console.log);
+})
+cdp.on("Page.foregroundPageChanged", console.log)
 
 // ✨ Intercept, modify, and extend existing CDP commands/events/params on the wire
 await cdp.Magic.addMiddleware({
   name: "Target.targetInfoChanged",
   phase: "event",
   expression: `async (payload, next, ctx) => {
-    const { tabId } = await cdp.send("Custom.tabIdFromTargetId", {
-      targetId: payload.targetInfo.targetId,
-    });
-    payload.targetInfo.tabId = tabId;
-    return next(payload);
+    // add .tabId next to .targetId in all Target.targetInfoChanged events the browser emits
+    const {tabId} = await cdp.send('Custom.tabIdFromTargetId', payload.targetInfo)
+    payload.targetInfo.tabId = tabId
+    return next(payload)
   }`,
-});
+})
 ```
 
 ```ts
