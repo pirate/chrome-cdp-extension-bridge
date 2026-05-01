@@ -1,6 +1,6 @@
 # MagicCDP
 
-CDP sucks today. It is difficult for agents and humans to use without a library because it lacks:
+CDP sucks today. It is difficult for agents and humans to use without a library because it was never designed for stateless remote browser automatiion. It lacks:
 
 - the ability to use it statelessly without maintaining mappings of sessionIds, targetIds, frameIds, execution context IDs, backendNodeId ownership, and event listeners
 - the ability to register custom CDP commands, abstractions, and events
