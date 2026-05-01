@@ -1,0 +1,83 @@
+bridge/launcher.ts
+  4d3da161764d70bb 14-15,21,26,30,37-39,45-77,120,146-148
+types/zod.ts
+  4d3da161764d70bb 6-2196
+extension/service_worker.ts
+  4d3da161764d70bb 8-54
+client/go/MagicCDPClient.go
+  4d3da161764d70bb 483-498
+extension/offscreen/keepalive.html
+  4d3da161764d70bb 1-10
+types/aliases.ts
+  4d3da161764d70bb 1-11183
+extension/MagicCDPServer.ts
+  4d3da161764d70bb 51-64,107,115,123
+extension/manifest.json
+  4d3da161764d70bb 11
+bridge/proxy.ts
+  1a5b80bc24b48487 22,79-87,188-191,241
+  4d3da161764d70bb 55,344,351,357,436
+package.json
+  4d3da161764d70bb 10,16-17
+types/codegen.ts
+  4d3da161764d70bb 50-57,86-89,91,102-228,235-245,248-251,253-259,262-264,298,301
+extension/offscreen/keepalive.ts
+  4d3da161764d70bb 1-20
+client/go/demo.go
+  4d3da161764d70bb 120
+bridge/injector.ts
+  4d3da161764d70bb 14,18-19,26-31,49-61,96,110,116,129-131,136
+client/python/demo.py
+  4d3da161764d70bb 27
+client/js/MagicCDPClient.ts
+  1a5b80bc24b48487 4-5,18-19,69-79,168-174,177-187,189-191,193-204,310,313
+  4d3da161764d70bb 14,20,24-25,46,51,85-92,106-108,132-134,136-148,153-157,188,192,210,225-228,233,246-251,341,344-347,350-351
+bridge/translate.ts
+  4d3da161764d70bb 38-51,97,102-104,122-123,127-129,143,148,187,191,195
+types/magic.ts
+  4d3da161764d70bb 6-7,30-71,80,82-83,88-89,94,146-188,369-372,383-388
+  1a5b80bc24b48487 353
+types/cdp.ts
+  4d3da161764d70bb 4-8,11,20-24,35-40
+client/js/demo.ts
+  4d3da161764d70bb 22,26,97,104,109,111-116,126,128,144,146,163-170,172,180-186,188-193,246-247
+test/routed-default-overrides.test.ts
+  4d3da161764d70bb 110-114,144,146,157,159,163-164,182-184,200,207
+client/python/MagicCDPClient.py
+  4d3da161764d70bb 282-291
+README.md
+  4d3da161764d70bb 9,11,29,34-35,37-40,44-61,66-67,69-77,79-80,82,84-86,90-97,99,101-102,110-112,120-123,144-145,147-150,152,155,160-161,171-172,180-181,378-379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "8e40ababbea6089b524236d332e80cd1dd69c9ee",
+  "prompts": {
+    "1a5b80bc24b48487": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019de290-2a4d-7cd1-97a3-e9783fd804d9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Nick Sweeting",
+      "messages": [],
+      "total_additions": 71,
+      "total_deletions": 21,
+      "accepted_lines": 69,
+      "overriden_lines": 0
+    },
+    "4d3da161764d70bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019de23b-775a-7942-ac60-2b4126abe6b5",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Nick Sweeting",
+      "messages": [],
+      "total_additions": 28686,
+      "total_deletions": 14926,
+      "accepted_lines": 16359,
+      "overriden_lines": 0
+    }
+  }
+}
