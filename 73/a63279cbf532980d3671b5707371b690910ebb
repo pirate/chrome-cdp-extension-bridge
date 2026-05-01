@@ -1,0 +1,39 @@
+package.json
+  1a5b80bc24b48487 16
+client/js/demo.ts
+  4d3da161764d70bb 15-17,53-57,62-67,73-78,156-160,179-184,187,189,197-212,224,242,252-263,267,270,288-297,299-302,304-308,310-312,334
+  1a5b80bc24b48487 274-286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "73a63279cbf532980d3671b5707371b690910ebb",
+  "prompts": {
+    "1a5b80bc24b48487": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019de290-2a4d-7cd1-97a3-e9783fd804d9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Nick Sweeting",
+      "messages": [],
+      "total_additions": 15,
+      "total_deletions": 15,
+      "accepted_lines": 977,
+      "overriden_lines": 8
+    },
+    "4d3da161764d70bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019de23b-775a-7942-ac60-2b4126abe6b5",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Nick Sweeting",
+      "messages": [],
+      "total_additions": 104,
+      "total_deletions": 61,
+      "accepted_lines": 1212,
+      "overriden_lines": 14
+    }
+  }
+}
