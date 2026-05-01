@@ -1,90 +1,57 @@
-// End-to-end demo:
-//   1. Launch local Chromium with the MagicCDP extension already loaded
-//      (--load-extension), with the CDP port open on localhost. This step is
-//      what we are saying any user can already do — no MagicCDP client code is
-//      involved.
-//   2. Spawn the standalone MagicCDPBridge proxy in front of that browser.
-//   3. Connect Playwright via vanilla `chromium.connectOverCDP(bridgeUrl)`.
-//   4. From an unmodified Playwright CDPSession, send Magic.* / Custom.*
-//      commands and receive Custom.* events.
+// End-to-end demo: stock Playwright connecting through the MagicCDPBridge.
+//
+// What this proves:
+//   - A vanilla `chromium.connectOverCDP(...)` against the proxy
+//   - A vanilla `CDPSession.send('Magic.*' / 'Custom.*', ...)` from Playwright
+//   - A vanilla `CDPSession.on('Custom.demo', ...)` receiving binding events
+//
+// Test environment notes:
+//   The Playwright-bundled chromium 141 used here exposes the Extensions CDP
+//   domain in its protocol descriptor but the loadUnpacked handler returns
+//   "Method not available." For that reason we launch upstream with
+//   --load-extension via launcher.mjs's extraFlags. injector.mjs notices that
+//   a MagicCDP service worker is already present and takes the "discovered"
+//   precedence path — Extensions.loadUnpacked is never invoked here. On Chrome
+//   Canary or any build where loadUnpacked is implemented, the demo would work
+//   identically without --load-extension and the precedence flips to "injected".
 
-import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import net from "node:net";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
 
+import { launchChrome, freePort } from "./launcher.mjs";
+import { startProxy } from "./proxy.mjs";
+
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const EXT = path.join(ROOT, "extension");
-const CHROME = process.env.CHROME_PATH || "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
-
-async function freePort() {
-  const s = net.createServer();
-  await new Promise(r => s.listen(0, "127.0.0.1", r));
-  const { port } = s.address();
-  await new Promise(r => s.close(r));
-  return port;
-}
-
-async function waitForUrl(url, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try { const r = await fetch(url); if (r.ok) return await r.json(); } catch {}
-    await sleep(60);
-  }
-  throw new Error(`timeout waiting for ${url}`);
-}
+const EXTENSION_PATH = path.join(ROOT, "extension");
 
 async function main() {
   const events = [];
-  let chromeProc, bridgeProc, browser, profileDir;
+  let chrome, proxy, browser;
 
   try {
-    // 1. launch Chromium with the MagicCDP extension preloaded
-    profileDir = await mkdtemp(path.join(tmpdir(), "magic-cdp-pw."));
-    const chromePort = await freePort();
-    console.log("== launching Chromium with MagicCDP extension at port", chromePort);
-    chromeProc = spawn(CHROME, [
-      "--headless=new",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--enable-unsafe-extension-debugging",
-      "--remote-allow-origins=*",
-      `--remote-debugging-port=${chromePort}`,
-      `--user-data-dir=${profileDir}`,
-      `--load-extension=${EXT}`,
-      "about:blank",
-    ], { stdio: ["ignore", "ignore", "ignore"] });
-    const chromeVersion = await waitForUrl(`http://127.0.0.1:${chromePort}/json/version`);
-    console.log("chromium up:", chromeVersion.Browser);
+    // 1. Launch upstream Chrome ourselves so we can pass --load-extension as a
+    //    workaround for the local chromium build (see test environment notes).
+    console.log("== launching upstream Chrome (with --load-extension workaround) ==");
+    chrome = await launchChrome({ extraFlags: [`--load-extension=${EXTENSION_PATH}`] });
+    console.log("upstream cdp:", chrome.cdpUrl);
 
-    // 2. spawn MagicCDPBridge as a separate process in front of Chrome
-    const bridgePort = await freePort();
-    const bridgeUrl = `http://127.0.0.1:${bridgePort}`;
-    console.log("\n== spawning MagicCDPBridge at", bridgeUrl);
-    bridgeProc = spawn(process.execPath, [
-      path.join(ROOT, "bridge.mjs"),
-      "--upstream", `http://127.0.0.1:${chromePort}`,
-      "--port", String(bridgePort),
-    ], { stdio: ["ignore", "inherit", "inherit"] });
-    await waitForUrl(`${bridgeUrl}/json/version`);
+    // 2. Start the proxy in front of that Chrome. The proxy's ensure-extension
+    //    step will discover the already-loaded MagicCDP SW (no injection
+    //    needed). Default port 9223 is fine.
+    console.log("\n== starting MagicCDPBridge ==");
+    const port = await freePort();
+    proxy = await startProxy({ port, upstream: chrome.cdpUrl, autoLaunch: false, extensionPath: EXTENSION_PATH });
 
-    // 3. connect Playwright via vanilla connectOverCDP
-    console.log("\n== connecting Playwright via connectOverCDP through bridge ==");
-    browser = await chromium.connectOverCDP(bridgeUrl);
-    console.log("playwright connected. contexts:", browser.contexts().length);
-
+    // 3. Connect Playwright via vanilla connectOverCDP.
+    console.log("\n== connecting Playwright via connectOverCDP through proxy ==");
+    browser = await chromium.connectOverCDP(proxy.url);
     const ctx = browser.contexts()[0] ?? await browser.newContext();
     const page = ctx.pages()[0] ?? await ctx.newPage();
-    console.log("page url:", page.url());
-
-    // Vanilla Playwright CDPSession scoped to a page target.
     const session = await ctx.newCDPSession(page);
 
-    console.log("\n== prove standard CDP still works through the bridge ==");
+    console.log("\n== prove standard CDP still works through the proxy ==");
     console.log("Browser.getVersion ->", await session.send("Browser.getVersion"));
 
     console.log("\n== Magic.evaluate from a vanilla Playwright CDPSession ==");
@@ -121,12 +88,11 @@ async function main() {
     if (echo1.echoed !== "hello-from-playwright") throw new Error("echo1 did not roundtrip");
     if (echo2.echoed !== "second-roundtrip") throw new Error("echo2 did not roundtrip");
 
-    console.log("\nSUCCESS: Playwright CDPSession sent Magic commands and received Magic events through the bridge.");
+    console.log("\nSUCCESS: Playwright CDPSession sent Magic commands and received Magic events through the proxy.");
   } finally {
     try { await browser?.close(); } catch {}
-    try { bridgeProc?.kill("SIGTERM"); } catch {}
-    try { chromeProc?.kill("SIGTERM"); } catch {}
-    if (profileDir) await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    try { await proxy?.close(); } catch {}
+    try { await chrome?.close(); } catch {}
   }
 }
 
