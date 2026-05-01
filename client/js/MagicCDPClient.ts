@@ -1,7 +1,8 @@
 // MagicCDPClient (JS): importable, no CLI, no demo code.
 //
 // Constructor parameter names match across JS / Python / Go ports:
-//   cdp_url           upstream CDP URL (string, default null -> autolaunch)
+//   cdp_url           upstream CDP URL (string, default null -> try localhost:9222,
+//                       then autolaunch)
 //   extension_path    extension directory (string, default ../../extension)
 //   routes            client-side routing dict (default { "Magic.*": "service_worker",
 //                       "Custom.*": "service_worker", "*.*": "direct_cdp" })
@@ -10,12 +11,18 @@
 //
 // Public methods: connect, send(method, params), on(event, handler), close.
 
+// oxlint-disable typescript-eslint/no-unsafe-declaration-merging -- alias members are assigned in the constructor.
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import WebSocket from "ws";
+import type { RawData } from "ws";
+import type { z } from "zod";
 
 import { launchChrome } from "../../bridge/launcher.js";
 import { injectExtensionIfNeeded } from "../../bridge/injector.js";
+import { createCdpAliases } from "../../types/aliases.js";
+import type { CdpAliases } from "../../types/aliases.js";
 import {
   bindingNameFor,
   DEFAULT_CLIENT_ROUTES,
@@ -36,11 +43,12 @@ import type {
   ProtocolResult,
   TranslatedCommand,
 } from "../../types/magic.js";
-import { CdpEventFrameSchema, CdpResponseFrameSchema } from "../../types/magic.js";
+import { CdpEventFrameSchema, CdpResponseFrameSchema, Magic, normalizeMagicName } from "../../types/magic.js";
 import { events } from "../../types/zod.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_EXTENSION_PATH = path.resolve(HERE, "..", "..", "extension");
+const DEFAULT_LIVE_CDP_URL = "http://127.0.0.1:9222";
 
 type PendingCommand = {
   method: string;
@@ -58,10 +66,28 @@ type ClientOptions = {
 async function webSocketUrlFor(endpoint: string, name = "cdp_url") {
   if (/^wss?:\/\//i.test(endpoint)) return endpoint;
   const response = await fetch(`${endpoint}/json/version`);
-  if (!response.ok) throw new Error(`GET ${endpoint}/json/version -> ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 404) {
+      const url = new URL(endpoint);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.pathname = "/devtools/browser";
+      url.search = "";
+      url.hash = "";
+      return url.toString();
+    }
+    throw new Error(`GET ${endpoint}/json/version -> ${response.status}`);
+  }
   const { webSocketDebuggerUrl } = await response.json();
   if (!webSocketDebuggerUrl) throw new Error(`${name} HTTP discovery returned no webSocketDebuggerUrl`);
   return webSocketDebuggerUrl;
+}
+
+async function liveWebSocketUrlFor(endpoint = DEFAULT_LIVE_CDP_URL) {
+  try {
+    return await webSocketUrlFor(endpoint, "live_cdp_url");
+  } catch {
+    return null;
+  }
 }
 
 export class MagicCDPClient extends EventEmitter {
@@ -77,6 +103,9 @@ export class MagicCDPClient extends EventEmitter {
   ext_target_id: string | null;
   extension_id: string | null;
   latency: MagicPingLatency | null;
+  event_schemas: Map<string, z.ZodType>;
+  command_params_schemas: Map<string, z.ZodType>;
+  command_result_schemas: Map<string, z.ZodType>;
   _launched: Awaited<ReturnType<typeof launchChrome>> | null;
 
   constructor({
@@ -100,13 +129,32 @@ export class MagicCDPClient extends EventEmitter {
     this.ext_target_id = null;
     this.extension_id = null;
     this.latency = null;
+    this.event_schemas = new Map();
+    this.command_params_schemas = new Map();
+    this.command_result_schemas = new Map();
     this._launched = null;
+
+    Object.assign(
+      this,
+      createCdpAliases((method, params) => this.send(method, params), {
+        onCustomCommand: (name, paramsSchema, resultSchema) => {
+          if (paramsSchema) this.command_params_schemas.set(name, paramsSchema);
+          if (resultSchema) this.command_result_schemas.set(name, resultSchema);
+        },
+        onCustomEvent: (name, eventSchema) => {
+          if (eventSchema) this.event_schemas.set(name, eventSchema);
+        },
+      }),
+    );
   }
 
   async connect() {
     if (!this.cdp_url) {
-      this._launched = await launchChrome(this.launch_options);
-      this.cdp_url = this._launched.wsUrl;
+      this.cdp_url = await liveWebSocketUrlFor();
+      if (!this.cdp_url) {
+        this._launched = await launchChrome(this.launch_options);
+        this.cdp_url = this._launched.wsUrl;
+      }
     }
     const inputCdpUrl = this.cdp_url;
     this.cdp_url = await webSocketUrlFor(this.cdp_url);
@@ -117,24 +165,51 @@ export class MagicCDPClient extends EventEmitter {
       }
     }
 
-    this.ws = new WebSocket(this.cdp_url);
-    this.ws.addEventListener("message", (event) => this._onMessage(event.data));
-    this.ws.addEventListener("close", () => this._rejectAll(new Error("CDP websocket closed")));
-    this.ws.addEventListener("error", () => this._rejectAll(new Error(`CDP websocket error`)));
-    await new Promise((resolve, reject) => {
-      this.ws.addEventListener("open", resolve, { once: true });
-      this.ws.addEventListener("error", reject, { once: true });
+    this.ws = new WebSocket(this.cdp_url, { origin: undefined });
+    this.ws.on("message", (data) => this._onMessage(data));
+    this.ws.on("close", () => this._rejectAll(new Error("CDP websocket closed")));
+    this.ws.on("error", () => this._rejectAll(new Error(`CDP websocket error`)));
+    await new Promise<void>((resolve, reject) => {
+      this.ws.once("open", resolve);
+      this.ws.once("error", reject);
     });
 
-    const ext = await injectExtensionIfNeeded({
-      send: (method, params, sessionId) => this._sendFrame(method, params, sessionId),
-      extensionPath: this.extension_path,
-    });
+    let ext;
+    try {
+      ext = await injectExtensionIfNeeded({
+        send: (method, params, sessionId) => this._sendFrame(method, params, sessionId),
+        extensionPath: this.extension_path,
+      });
+    } catch (error) {
+      const html = `<!doctype html><title>Enable MagicCDP</title><main style="font:16px system-ui;margin:40px;max-width:820px"><h1>Enable MagicCDP</h1><p>A MagicCDP client has connected, but was unable to set up the extra Magic.* commands because extension installation over CDP is only allowed in Chrome Canary or Chromium. Google Chrome users must install the extension manually and use chrome://inspect/#remote-debugging to open CDP.</p><ol><li>Download Chrome Canary or Chromium instead. MagicCDP can auto-launch these for you.</li><li>Connect to any remote Chrome launched with:<pre>--remote-debugging-address=127.0.0.1
+--remote-debugging-port=9222
+--enable-unsafe-extension-debugging
+--remote-allow-origins=*</pre></li><li>Install the extension manually via chrome://extensions/ &gt; Developer mode &gt; Load unpacked &gt; magiccdp.zip<br><code>${this.extension_path}</code></li></ol></main>`;
+      try {
+        const { targetId } = (await this._sendFrame("Target.createTarget", { url: "about:blank" })) as any;
+        const { sessionId } = (await this._sendFrame("Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        })) as any;
+        await this._sendFrame(
+          "Runtime.evaluate",
+          {
+            expression: `document.open();document.write(${JSON.stringify(html)});document.close();`,
+            returnByValue: true,
+          },
+          sessionId as string,
+        );
+        await this._sendFrame("Page.bringToFront", {}, sessionId as string);
+        await this._sendFrame("Target.detachFromTarget", { sessionId });
+      } catch {}
+      throw error;
+    }
     this.extension_id = ext.extensionId;
     this.ext_target_id = ext.targetId;
     this.ext_session_id = ext.sessionId;
     await this._sendFrame("Runtime.enable", {}, this.ext_session_id);
     await this._sendFrame("Runtime.addBinding", { name: bindingNameFor("Magic.pong") }, this.ext_session_id);
+    this.event_schemas.set("Magic.pong", Magic.PongEvent);
 
     if (this.server) {
       await this._sendRaw(
@@ -149,13 +224,15 @@ export class MagicCDPClient extends EventEmitter {
     return this;
   }
 
-  async send(method: string, params: ProtocolParams = {}) {
-    return this._sendRaw(
-      wrapCommandIfNeeded(method, params, {
+  async send(method: string, params: unknown = {}) {
+    const commandParams = this.command_params_schemas.get(method)?.parse(params ?? {}) ?? params ?? {};
+    const result = await this._sendRaw(
+      wrapCommandIfNeeded(method, commandParams as ProtocolParams, {
         routes: this.routes,
         cdpSessionId: this.ext_session_id,
       }),
     );
+    return this.command_result_schemas.get(method)?.parse(result) ?? result;
   }
 
   async close() {
@@ -166,6 +243,14 @@ export class MagicCDPClient extends EventEmitter {
       this.ws?.close();
     } catch {}
     if (this._launched) await this._launched.close();
+  }
+
+  on(eventName, listener) {
+    return super.on(typeof eventName === "symbol" ? eventName : normalizeMagicName(eventName), listener);
+  }
+
+  once(eventName, listener) {
+    return super.once(typeof eventName === "symbol" ? eventName : normalizeMagicName(eventName), listener);
   }
 
   async _measurePingLatency() {
@@ -224,10 +309,10 @@ export class MagicCDPClient extends EventEmitter {
     this.pending.clear();
   }
 
-  _onMessage(buf: string) {
+  _onMessage(buf: string | RawData) {
     let msg: CdpResponseFrame | CdpEventFrame;
     try {
-      const parsed = JSON.parse(buf);
+      const parsed = JSON.parse(typeof buf === "string" ? buf : buf.toString());
       msg = "id" in parsed ? CdpResponseFrameSchema.parse(parsed) : CdpEventFrameSchema.parse(parsed);
     } catch {
       return;
@@ -255,9 +340,14 @@ export class MagicCDPClient extends EventEmitter {
         event.sessionId || null,
         this.ext_session_id,
       );
-      if (u) this.emit(u.event, u.data);
+      if (u) this.emit(u.event, this.event_schemas.get(u.event)?.parse(u.data) ?? u.data);
       return;
     }
-    if (event.method) this.emit(event.method, event.params || {}, event.sessionId || null);
+    if (event.method) {
+      const schema = (events as Record<string, z.ZodType | undefined>)[event.method];
+      this.emit(event.method, schema?.parse(event.params || {}) ?? event.params ?? {}, event.sessionId || null);
+    }
   }
 }
+
+export interface MagicCDPClient extends CdpAliases {}

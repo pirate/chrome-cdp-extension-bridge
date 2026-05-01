@@ -107,7 +107,11 @@ async (payload, next) => {
 `;
 
 test("service-worker routed standard CDP commands and events can be transformed", { timeout: 45_000 }, async () => {
-  const chrome = await launchChrome({ extraFlags: [`--load-extension=${EXTENSION_PATH}`] });
+  const chrome = await launchChrome({
+    headless: process.platform === "linux",
+    noSandbox: process.platform === "linux",
+    extraFlags: [`--load-extension=${EXTENSION_PATH}`],
+  });
   const cdp = new MagicCDPClient({
     cdp_url: chrome.cdpUrl,
     routes: {
@@ -137,9 +141,9 @@ test("service-worker routed standard CDP commands and events can be transformed"
       name: "Custom.tabIdFromTargetId",
       expression: tabIdFromTargetIdCommand,
     });
-    await cdp.send("Magic.addMiddleware", {
+    await cdp.Magic.addMiddleware({
       name: "*",
-      phase: "response",
+      phase: cdp.RESPONSE,
       expression: addTabIdMiddleware,
     });
     const middlewareTargets = await cdp.send("Target.getTargets");
@@ -150,14 +154,14 @@ test("service-worker routed standard CDP commands and events can be transformed"
       "wildcard response middleware should add tabId next to targetId inside TargetInfo",
     );
 
-    await cdp.send("Magic.addMiddleware", {
+    await cdp.Magic.addMiddleware({
       name: "*",
-      phase: "event",
+      phase: cdp.EVENT,
       expression: addTabIdMiddleware,
     });
 
-    await cdp.send("Magic.addCustomCommand", {
-      name: "Target.getTargets",
+    await cdp.Magic.addCustomCommand({
+      name: cdp.Target.getTargets,
       expression: getTargetsOverride,
     });
 
@@ -175,9 +179,9 @@ test("service-worker routed standard CDP commands and events can be transformed"
       "expected at least one page target to be matched to a chrome.tabs tab id",
     );
 
-    await cdp.send("Magic.addCustomEvent", { name: "Target.targetCreated" });
-    await cdp.send("Magic.addCustomCommand", {
-      name: "Target.setDiscoverTargets",
+    await cdp.Magic.addCustomEvent({ name: cdp.Target.targetCreated });
+    await cdp.Magic.addCustomCommand({
+      name: cdp.Target.setDiscoverTargets,
       expression: setDiscoverTargetsOverride,
     });
 
@@ -193,14 +197,14 @@ test("service-worker routed standard CDP commands and events can be transformed"
       });
     });
 
-    await cdp.send("Target.setDiscoverTargets", { discover: true });
+    await cdp.Target.setDiscoverTargets({ discover: true });
     await cdp._sendFrame("Target.createTarget", { url: "about:blank#magic-cdp-event-test" });
 
     const event = events["Target.targetCreated"].parse(await forwardedEvent);
     assert.ok(Object.hasOwn(event.targetInfo, "tabId"), "transformed event targetInfo should include tabId");
   } finally {
     try {
-      await cdp.send("Target.setDiscoverTargets", { discover: false });
+      await cdp.Target.setDiscoverTargets({ discover: false });
     } catch {}
     await cdp.close();
     await chrome.close();

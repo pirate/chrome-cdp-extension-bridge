@@ -279,9 +279,15 @@ class MagicCDPClient:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] == "service_worker" and t["url"] == sw_url:
                     a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
-                    return {
-                        "source": "injected", "extensionId": extension_id,
-                        "targetId": t["targetId"], "url": sw_url, "sessionId": a["sessionId"],
-                    }
+                    probe = self._send_frame("Runtime.evaluate", {
+                        "expression": "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+                        "returnByValue": True,
+                    }, a["sessionId"])
+                    if (probe.get("result") or {}).get("value") is True:
+                        return {
+                            "source": "injected", "extensionId": extension_id,
+                            "targetId": t["targetId"], "url": sw_url, "sessionId": a["sessionId"],
+                        }
+                    self._send_frame("Target.detachFromTarget", {"sessionId": a["sessionId"]})
             time.sleep(0.1)
         raise RuntimeError(f"Extensions.loadUnpacked installed {extension_id} but its SW did not appear")

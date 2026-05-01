@@ -11,17 +11,23 @@
 //      globalThis.MagicCDP. Use it. (source: "discovered")
 //   2. Otherwise call Extensions.loadUnpacked(extensionPath) and wait for that
 //      extension's service worker to appear. (source: "injected")
-//   3. Otherwise throw with explicit instructions for both failure modes,
-//      including the --load-extension fallback for Chrome builds where
-//      Extensions.loadUnpacked is unavailable.
+//   3. Otherwise throw with explicit instructions for both failure modes.
 
 import type { ProtocolParams, ProtocolResult } from "../types/magic.js";
 import { commands } from "../types/zod.js";
+import crypto from "node:crypto";
+import path from "node:path";
 
 const SW_URL_RE = /^chrome-extension:\/\/[a-z]+\/service_worker\.js$/;
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
 
 type SendCDP = (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
+
+function unpackedExtensionIdForPath(extensionPath: string) {
+  return [...crypto.createHash("sha256").update(path.resolve(extensionPath)).digest().subarray(0, 16)]
+    .map((byte) => String.fromCharCode(97 + (byte >> 4)) + String.fromCharCode(97 + (byte & 15)))
+    .join("");
+}
 
 export async function injectExtensionIfNeeded({
   send,
@@ -39,6 +45,19 @@ export async function injectExtensionIfNeeded({
   // up an already-loaded MagicCDP service worker. Validate at the point of use
   // (step 2) so callers running against a browser that already has the
   // extension loaded don't have to provide a path at all.
+
+  let wakeupTargetId: string | null = null;
+  const expectedExtensionId = extensionPath ? unpackedExtensionIdForPath(extensionPath) : null;
+  if (expectedExtensionId) {
+    try {
+      const { targetId } = commands["Target.createTarget"].result.parse(
+        await send("Target.createTarget", {
+          url: `chrome-extension://${expectedExtensionId}/offscreen/keepalive.html?magic-cdp-wakeup=${Date.now()}`,
+        }),
+      );
+      wakeupTargetId = targetId;
+    } catch {}
+  }
 
   // 1. Discover an existing MagicCDP service worker. Extensions loaded with
   // --load-extension at browser launch take a moment to spin their SW *and*
@@ -74,6 +93,7 @@ export async function injectExtensionIfNeeded({
           if (other.sessionId === a.sessionId) continue;
           await send("Target.detachFromTarget", { sessionId: other.sessionId }).catch(() => {});
         }
+        if (wakeupTargetId) await send("Target.closeTarget", { targetId: wakeupTargetId }).catch(() => {});
         return {
           source: "discovered",
           extensionId: a.url.match(EXT_ID_FROM_URL)?.[1],
@@ -87,12 +107,13 @@ export async function injectExtensionIfNeeded({
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   for (const a of attached) await send("Target.detachFromTarget", { sessionId: a.sessionId }).catch(() => {});
+  if (wakeupTargetId) await send("Target.closeTarget", { targetId: wakeupTargetId }).catch(() => {});
 
   // 2. Try Extensions.loadUnpacked.
   if (!extensionPath) {
     throw new Error(
       `No existing MagicCDP service worker was found and no extensionPath was provided to install one.\n` +
-        `Either start the browser with --load-extension=<path> so the SW exists at connect time, or pass extensionPath to injectExtensionIfNeeded/MagicCDPClient.`,
+        `Either load/install the MagicCDP extension in this Chrome profile, or pass extensionPath to injectExtensionIfNeeded/MagicCDPClient.`,
     );
   }
   let loadResult;
@@ -105,14 +126,14 @@ export async function injectExtensionIfNeeded({
           `  - No existing service worker with globalThis.MagicCDP was found in the browser.\n` +
           `  - Extensions.loadUnpacked is unavailable in this Chrome build ("${error.message}").\n\n` +
           `Fixes (any one of these):\n` +
-          `  1. Relaunch the browser with --load-extension=${extensionPath} (Chromium / Playwright builds).\n` +
-          `  2. Use Chrome Canary, which exposes Extensions.loadUnpacked over CDP.\n` +
-          `  3. Manually install the extension at chrome://extensions and reuse the running browser.\n`,
+          `  1. In stock Chrome, load the extension once at chrome://extensions and reconnect to the live localhost:9222 browser.\n` +
+          `  2. For automated/test browsers, relaunch with --load-extension=${extensionPath}.\n` +
+          `  3. Use a Chrome build/profile that exposes Extensions.loadUnpacked over CDP.\n`,
       );
     }
     throw new Error(
       `Extensions.loadUnpacked failed for ${extensionPath}: ${error.message}\n` +
-        `If the path is correct and the manifest is valid, the browser may not be running with --enable-unsafe-extension-debugging.`,
+        `If the path is correct and the manifest is valid, load the MagicCDP extension manually in chrome://extensions and reconnect.`,
     );
   }
   const extensionId = loadResult?.id || loadResult?.extensionId;

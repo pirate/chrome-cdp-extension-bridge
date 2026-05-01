@@ -480,10 +480,22 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 					return nil, err
 				}
 				sid, _ := a["sessionId"].(string)
-				return map[string]any{
-					"source": "injected", "extensionId": extID,
-					"targetId": tid, "url": swURL, "sessionId": sid,
-				}, nil
+				probe, err := c.sendFrame("Runtime.evaluate", map[string]any{
+					"expression":    "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+					"returnByValue": true,
+				}, sid)
+				if err != nil {
+					_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
+					continue
+				}
+				result, _ := probe["result"].(map[string]any)
+				if v, _ := result["value"].(bool); v {
+					return map[string]any{
+						"source": "injected", "extensionId": extID,
+						"targetId": tid, "url": swURL, "sessionId": sid,
+					}, nil
+				}
+				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

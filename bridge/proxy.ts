@@ -19,7 +19,7 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer } from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import type { RawData, WebSocket as ClientWebSocket } from "ws";
 
 import { launchChrome } from "./launcher.js";
@@ -52,6 +52,7 @@ import {
   MagicAddCustomEventParamsSchema,
   MagicAddMiddlewareParamsSchema,
   MagicEvaluateParamsSchema,
+  normalizeMagicName,
 } from "../types/magic.js";
 import { events } from "../types/zod.js";
 
@@ -74,6 +75,15 @@ const MAGIC_METHODS = new Set([
 ]);
 const ROUTE_TO_SW_RE = /^(Magic|Custom)\./;
 const isWsUrl = (url) => /^wss?:\/\//i.test(url);
+
+function liveBrowserWsUrl(endpoint: string) {
+  const url = new URL(endpoint);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/devtools/browser";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
 
 // --- public API -------------------------------------------------------------
 
@@ -175,6 +185,10 @@ async function ensureUpstream(
       upstreamState.url = webSocketDebuggerUrl;
       return;
     }
+    if (r.status === 404) {
+      upstreamState.url = liveBrowserWsUrl(upstreamState.url);
+      return;
+    }
   } catch {}
   if (!autoLaunch) {
     throw new Error(
@@ -224,7 +238,7 @@ async function handleConnection(
 ) {
   await ensureUpstream(upstreamState, { autoLaunch, launchOptions });
 
-  const upstream = new WebSocket(upstreamState.url);
+  const upstream = new WebSocket(upstreamState.url, { origin: undefined });
   await new Promise((resolve, reject) => {
     upstream.addEventListener("open", resolve, { once: true });
     upstream.addEventListener("error", reject, { once: true });
@@ -327,20 +341,20 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
   if (MAGIC_METHODS.has(method) || ROUTE_TO_SW_RE.test(method)) {
     if (method === "Magic.addCustomEvent") {
       const addEventParams = MagicAddCustomEventParamsSchema.parse(params ?? {});
+      const eventName = normalizeMagicName(addEventParams.name);
       // two-step: addBinding, then evaluate the addCustomEvent registration.
       const upId = state.nextUpstreamId++;
       state.pending.set(upId, {
         kind: "magic_add_event_step1",
         clientId: id,
         clientSessionId: sessionId || null,
-        eventName: addEventParams.name,
-        eventSchema: addEventParams.eventSchema ?? null,
+        eventName,
       });
       state.upstream.send(
         JSON.stringify({
           id: upId,
           method: "Runtime.addBinding",
-          params: { name: bindingNameFor(addEventParams.name) },
+          params: { name: bindingNameFor(eventName) },
           sessionId: state.extSessionId,
         }),
       );
@@ -419,7 +433,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
         JSON.stringify({
           id: upId,
           method: "Runtime.evaluate",
-          params: wrapMagicAddCustomEvent({ name: p.eventName ?? "", eventSchema: p.eventSchema }),
+          params: wrapMagicAddCustomEvent({ name: p.eventName ?? "" }),
           sessionId: state.extSessionId,
         }),
       );

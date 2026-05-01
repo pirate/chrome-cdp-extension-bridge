@@ -8,6 +8,6 @@
     "service_worker": "service_worker.js",
     "type": "module"
   },
-  "permissions": ["activeTab", "tabs", "debugger"],
+  "permissions": ["activeTab", "tabs", "debugger", "offscreen"],
   "host_permissions": ["<all_urls>", "http://localhost/*", "http://127.0.0.1/*", "ws://localhost/*", "ws://127.0.0.1/*"]
 }

@@ -35,6 +35,20 @@ export const bindingNameFor = (eventName: string) => BINDING_PREFIX + eventName.
 export const eventNameFor = (bindingName: string) =>
   bindingName.startsWith(BINDING_PREFIX) ? bindingName.slice(BINDING_PREFIX.length).replaceAll("_", ".") : null;
 
+function normalizeMagicName(
+  value: { id?: string; name?: string; meta?: () => { id?: unknown; name?: unknown } } | string,
+) {
+  if (typeof value === "string") return value;
+  const meta = typeof value?.meta === "function" ? value.meta() : undefined;
+  const name =
+    value?.id ??
+    (typeof meta?.id === "string" ? meta.id : undefined) ??
+    (typeof meta?.name === "string" ? meta.name : undefined) ??
+    value?.name;
+  if (typeof name !== "string" || !name) throw new Error("Expected a CDP name string or a named CDP schema/alias.");
+  return name;
+}
+
 export function routeFor(method: string, routes: MagicRoutes = {}) {
   if (Object.prototype.hasOwnProperty.call(routes, method)) return routes[method];
   let bestPrefixLen = -1;
@@ -79,16 +93,15 @@ export function wrapMagicEvaluate({
 export function wrapMagicAddCustomCommand({
   name,
   expression,
-  paramsSchema = null,
-  resultSchema = null,
 }: MagicAddCustomCommandParams): cdp.types.ts.Runtime.EvaluateParams {
+  const commandName = normalizeMagicName(name);
   return {
     expression: `
       (() => {
         return globalThis.MagicCDP.addCustomCommand({
-          name: ${JSON.stringify(name)},
-          paramsSchema: ${JSON.stringify(paramsSchema)},
-          resultSchema: ${JSON.stringify(resultSchema)},
+          name: ${JSON.stringify(commandName)},
+          paramsSchema: null,
+          resultSchema: null,
           expression: ${JSON.stringify(expression)},
           handler: async (params, cdpSessionId) => {
             const cdp = globalThis.MagicCDP.attachToSession(cdpSessionId);
@@ -106,16 +119,14 @@ export function wrapMagicAddCustomCommand({
   };
 }
 
-export function wrapMagicAddCustomEvent({
-  name,
-  eventSchema = null,
-}: MagicAddCustomEventParams): cdp.types.ts.Runtime.EvaluateParams {
+export function wrapMagicAddCustomEvent({ name }: MagicAddCustomEventParams): cdp.types.ts.Runtime.EvaluateParams {
+  const eventName = normalizeMagicName(name);
   return {
     expression: `
       globalThis.MagicCDP.addCustomEvent({
-        name: ${JSON.stringify(name)},
-        bindingName: ${JSON.stringify(bindingNameFor(name))},
-        eventSchema: ${JSON.stringify(eventSchema)},
+        name: ${JSON.stringify(eventName)},
+        bindingName: ${JSON.stringify(bindingNameFor(eventName))},
+        eventSchema: null,
       })
     `,
     awaitPromise: true,
@@ -129,11 +140,12 @@ export function wrapMagicAddMiddleware({
   phase,
   expression,
 }: MagicAddMiddlewareParams): cdp.types.ts.Runtime.EvaluateParams {
+  const middlewareName = normalizeMagicName(name);
   return {
     expression: `
       (() => {
         return globalThis.MagicCDP.addMiddleware({
-          name: ${JSON.stringify(name)},
+          name: ${JSON.stringify(middlewareName)},
           phase: ${JSON.stringify(phase)},
           expression: ${JSON.stringify(expression)},
           handler: async (payload, next, context = {}) => {
@@ -172,14 +184,15 @@ function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, c
 
   if (method === "Magic.addCustomEvent") {
     const eventParams = params as MagicAddCustomEventParams;
+    const eventName = normalizeMagicName(eventParams.name);
     return [
       {
         method: "Runtime.addBinding",
-        params: { name: bindingNameFor(eventParams.name) },
+        params: { name: bindingNameFor(eventName) },
       },
       {
         method: "Runtime.evaluate",
-        params: wrapMagicAddCustomEvent({ name: eventParams.name, eventSchema: eventParams.eventSchema ?? null }),
+        params: wrapMagicAddCustomEvent({ name: eventName }),
         unwrap: "evaluate" as const,
       },
     ];

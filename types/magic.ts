@@ -3,6 +3,8 @@ import { z } from "zod";
 import { commands, events } from "./zod.js";
 
 const zodUnion = (schemas: z.ZodType[]) => z.union(schemas as unknown as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+const isZodType = (value: unknown): value is z.ZodType =>
+  value != null && typeof value === "object" && typeof (value as z.ZodType).parse === "function";
 
 export const CdpCommandParamsSchema = z.lazy(() => zodUnion(Object.values(commands).map((command) => command.params)));
 export type CdpCommandParams = z.infer<typeof CdpCommandParamsSchema>;
@@ -25,6 +27,48 @@ export type MagicRoutes = z.infer<typeof MagicRoutesSchema>;
 export const MagicCustomPayloadSchema = z.object({}).passthrough();
 export type MagicCustomPayload = z.infer<typeof MagicCustomPayloadSchema>;
 
+export type MagicNamedValue = {
+  id?: string;
+  name?: string;
+  meta?: () => { id?: unknown; name?: unknown } | undefined;
+};
+
+export function normalizeMagicName(value: MagicName) {
+  if (typeof value === "string") return value;
+  const meta = typeof value?.meta === "function" ? value.meta() : undefined;
+  const name =
+    value?.id ??
+    (typeof meta?.id === "string" ? meta.id : undefined) ??
+    (typeof meta?.name === "string" ? meta.name : undefined) ??
+    value?.name;
+  if (typeof name !== "string" || !name) throw new Error("Expected a CDP name string or a named CDP schema/alias.");
+  return name;
+}
+
+export const MagicNameSchema = z.custom<string | MagicNamedValue>((value) => {
+  try {
+    normalizeMagicName(value as MagicName);
+    return true;
+  } catch {
+    return false;
+  }
+});
+export type MagicName = z.infer<typeof MagicNameSchema>;
+
+export const MagicZodTypeSchema = z.custom<z.ZodType>(isZodType);
+export type MagicZodType = z.infer<typeof MagicZodTypeSchema>;
+
+export const MagicPayloadShapeSchema = z.record(z.string(), MagicZodTypeSchema);
+export type MagicPayloadShape = z.infer<typeof MagicPayloadShapeSchema>;
+
+export const MagicPayloadSchemaSpecSchema = z.union([MagicZodTypeSchema, MagicPayloadShapeSchema]);
+export type MagicPayloadSchemaSpec = z.infer<typeof MagicPayloadSchemaSpecSchema>;
+
+export function normalizeMagicPayloadSchema(schema: MagicPayloadSchemaSpec | null | undefined) {
+  if (!schema) return null;
+  return isZodType(schema) ? schema : z.object(schema).passthrough();
+}
+
 export const MagicEvaluateParamsSchema = z.object({
   expression: z.string(),
   params: MagicCustomPayloadSchema.optional(),
@@ -33,21 +77,21 @@ export const MagicEvaluateParamsSchema = z.object({
 export type MagicEvaluateParams = z.infer<typeof MagicEvaluateParamsSchema>;
 
 export const MagicAddCustomCommandParamsSchema = z.object({
-  name: z.string(),
+  name: MagicNameSchema,
   expression: z.string(),
-  paramsSchema: z.unknown().nullable().optional(),
-  resultSchema: z.unknown().nullable().optional(),
+  paramsSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
+  resultSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
 });
 export type MagicAddCustomCommandParams = z.infer<typeof MagicAddCustomCommandParamsSchema>;
 
 export const MagicAddCustomEventParamsSchema = z.object({
-  name: z.string(),
-  eventSchema: z.unknown().nullable().optional(),
+  name: MagicNameSchema,
+  eventSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
 });
 export type MagicAddCustomEventParams = z.infer<typeof MagicAddCustomEventParamsSchema>;
 
 export const MagicAddMiddlewareParamsSchema = z.object({
-  name: z.string().optional(),
+  name: MagicNameSchema.optional(),
   phase: z.enum(["request", "response", "event"]),
   expression: z.string(),
 });
@@ -98,6 +142,50 @@ export const MagicCommandResultSchema = z.union([
   z.object({ ok: z.boolean() }).passthrough(),
 ]);
 export type MagicCommandResult = z.infer<typeof MagicCommandResultSchema>;
+
+export const MagicEvaluateResponseSchema = z.unknown();
+export type MagicEvaluateResponse = z.infer<typeof MagicEvaluateResponseSchema>;
+
+export const MagicAddCustomCommandResponseSchema = z
+  .object({
+    name: z.string(),
+    registered: z.boolean(),
+  })
+  .passthrough();
+export type MagicAddCustomCommandResponse = z.infer<typeof MagicAddCustomCommandResponseSchema>;
+
+export const MagicAddCustomEventResponseSchema = z
+  .object({
+    name: z.string(),
+    bindingName: z.string(),
+    registered: z.boolean(),
+  })
+  .passthrough();
+export type MagicAddCustomEventResponse = z.infer<typeof MagicAddCustomEventResponseSchema>;
+
+export const MagicAddMiddlewareResponseSchema = z
+  .object({
+    name: z.string(),
+    phase: z.enum(["request", "response", "event"]),
+    registered: z.boolean(),
+  })
+  .passthrough();
+export type MagicAddMiddlewareResponse = z.infer<typeof MagicAddMiddlewareResponseSchema>;
+
+export const MagicConfigureResponseSchema = z
+  .object({
+    loopback_cdp_url: z.string().nullable().optional(),
+    routes: MagicRoutesSchema,
+  })
+  .passthrough();
+export type MagicConfigureResponse = z.infer<typeof MagicConfigureResponseSchema>;
+
+export const MagicPingResponseSchema = z
+  .object({
+    ok: z.boolean(),
+  })
+  .passthrough();
+export type MagicPingResponse = z.infer<typeof MagicPingResponseSchema>;
 
 export const MagicBindingPayloadSchema = z.object({
   event: z.string(),
@@ -242,7 +330,6 @@ export const ProxyPendingSchema = z
     clientId: z.number().optional(),
     clientSessionId: z.string().nullable().optional(),
     eventName: z.string().optional(),
-    eventSchema: z.unknown().nullable().optional(),
     resolve: z.custom<(value: ProtocolResult) => void>().optional(),
     reject: z.custom<(error: Error) => void>().optional(),
   })
@@ -263,7 +350,7 @@ export type ProxyUpstreamState = z.infer<typeof ProxyUpstreamStateSchema>;
 
 export const ProxyConnectionStateSchema = z.object({
   client: z.custom<import("ws").WebSocket>(),
-  upstream: z.custom<WebSocket>(),
+  upstream: z.custom<import("ws").WebSocket>(),
   nextUpstreamId: z.number(),
   pending: z.custom<Map<number, ProxyPending>>(),
   extSessionId: z.string().nullable(),
@@ -279,6 +366,10 @@ export type ProxyConnectionState = z.infer<typeof ProxyConnectionStateSchema>;
 export const Magic = {
   Routes: MagicRoutesSchema,
   CustomPayload: MagicCustomPayloadSchema,
+  Name: MagicNameSchema,
+  ZodType: MagicZodTypeSchema,
+  PayloadShape: MagicPayloadShapeSchema,
+  PayloadSchemaSpec: MagicPayloadSchemaSpecSchema,
   EvaluateParams: MagicEvaluateParamsSchema,
   AddCustomCommandParams: MagicAddCustomCommandParamsSchema,
   AddCustomEventParams: MagicAddCustomEventParamsSchema,
@@ -289,6 +380,12 @@ export const Magic = {
   PingLatency: MagicPingLatencySchema,
   CommandParams: MagicCommandParamsSchema,
   CommandResult: MagicCommandResultSchema,
+  EvaluateResponse: MagicEvaluateResponseSchema,
+  AddCustomCommandResponse: MagicAddCustomCommandResponseSchema,
+  AddCustomEventResponse: MagicAddCustomEventResponseSchema,
+  AddMiddlewareResponse: MagicAddMiddlewareResponseSchema,
+  ConfigureResponse: MagicConfigureResponseSchema,
+  PingResponse: MagicPingResponseSchema,
   BindingPayload: MagicBindingPayloadSchema,
   CustomCommandRegistration: MagicCustomCommandRegistrationSchema,
   CustomEventRegistration: MagicCustomEventRegistrationSchema,

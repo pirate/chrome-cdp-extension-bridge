@@ -117,7 +117,7 @@ func main() {
 	// any CWD (`go run ./client/go`, `go run .` from inside client/go, etc.).
 	_, thisFile, _, _ := runtime.Caller(0)
 	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	extensionPath := filepath.Join(root, "extension")
+	extensionPath := filepath.Join(root, "dist", "extension")
 	profile, _ := os.MkdirTemp("", "magic-cdp-go.")
 	defer os.RemoveAll(profile)
 

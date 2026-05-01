@@ -48,6 +48,20 @@ const browserLevelDomains = new Set(["Browser", "Target", "SystemInfo"]);
 
 let nextLoopbackId = 1;
 
+function normalizeMagicName(
+  value: { id?: string; name?: string; meta?: () => { id?: unknown; name?: unknown } } | string,
+) {
+  if (typeof value === "string") return value;
+  const meta = typeof value?.meta === "function" ? value.meta() : undefined;
+  const name =
+    value?.id ??
+    (typeof meta?.id === "string" ? meta.id : undefined) ??
+    (typeof meta?.name === "string" ? meta.name : undefined) ??
+    value?.name;
+  if (typeof name !== "string" || !name) throw new Error("Expected a CDP name string or a named CDP schema/alias.");
+  return name;
+}
+
 async function resolveCDPEndpoint(endpoint: string | null) {
   if (!endpoint || /^wss?:\/\//i.test(endpoint)) return endpoint;
   const { webSocketDebuggerUrl } = await fetch(`${endpoint}/json/version`).then((r) => r.json());
@@ -90,6 +104,7 @@ export const MagicCDPServer = {
     expression = null,
     handler,
   }: MagicCustomCommandRegistration) {
+    name = normalizeMagicName(name);
     if (!name || !name.includes(".")) throw new Error("name must be in Domain.method form.");
     if (typeof handler !== "function") throw new Error(`Custom command ${name} was registered without a handler.`);
     commandHandlers.set(name, { name, handler, paramsSchema, resultSchema, expression });
@@ -97,6 +112,7 @@ export const MagicCDPServer = {
   },
 
   addCustomEvent({ name, bindingName, eventSchema = null }: MagicCustomEventRegistration) {
+    name = normalizeMagicName(name);
     if (!name || !name.includes(".")) throw new Error("name must be in Domain.event form.");
     if (!bindingName) throw new Error(`Custom event ${name} is missing a Runtime binding name.`);
     eventBindings.set(name, { name, bindingName, eventSchema });
@@ -104,6 +120,7 @@ export const MagicCDPServer = {
   },
 
   addMiddleware({ name = "*", phase, expression = null, handler }: MagicMiddlewareRegistration) {
+    name = normalizeMagicName(name);
     if (!["request", "response", "event"].includes(phase))
       throw new Error("phase must be request, response, or event.");
     if (name !== "*" && (!name || !name.includes("."))) throw new Error("name must be '*' or Domain.name form.");

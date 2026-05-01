@@ -6,9 +6,9 @@ CDP is powerful but it's been stretched to many use-cases beyond its initial aud
 
 - lacks the ability to register custom CDP commands, abstractions, and events
 
-- lacks the ability to easily call chrome.* extension APIs for things like `chrome.tabs.query({ active: true })`
+- lacks the ability to easily call chrome.\* extension APIs for things like `chrome.tabs.query({ active: true })`
 
-- *lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of unstable identifiers like sessionId, targetId, frameId, backendNodeId* (unrealistic dream? maybe not)
+- _lacks the ability to reference pages and elements with stable references across browser runs, such as XPath, URL, and frame index, instead of unstable identifiers like sessionId, targetId, frameId, backendNodeId_ (unrealistic dream? maybe not)
 
 While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
 
@@ -26,68 +26,80 @@ Instead of inventing yet another browser driver library, MagicCDP fixes the issu
 
 It's perfectly compatible with playwright, puppeteer, etc. with no modifications. You can do things like `patchright` does, but generically at the CDP layer instead of having to patch libraries.
 
-You can send `Magic.*`, `Custom.*`, etc. through standard playwright/puppeteer/other-driver-managed cdp sessions, there is a client/{py,js,go}/demo.{py,ts,go} for each language demonstrating this.
+You can send `Magic.*`, `Custom.*`, etc. through standard Playwright/Puppeteer/other-driver-managed CDP sessions; `client/js/demo.ts`, `client/python/demo.py`, and `client/go/demo.go` demonstrate the flow in each language.
 
 ## Use it
 
 ```ts
-import { MagicCDPClient } from "./client/js/MagicCDPClient.js";
+import { MagicCDPClient } from "./dist/client/js/MagicCDPClient.js";
+import { z } from "zod";
 
-const cdp = new MagicCDPClient({ cdp_url: "http://127.0.0.1:9222" });   // ws://... urls works too
+// In stock Google Chrome, visit chrome://inspect/#remote-debugging first to
+// expose the current browser at localhost:9222. Passing cdp_url is optional
+// when that endpoint is live.
+const cdp = new MagicCDPClient({ cdp_url: "http://127.0.0.1:9222" }); // ws://... URLs work too
 await cdp.connect();
 
 // use it like a normal CDP connection, send normal CDP, register for normal CDP events
-console.log(await cdp.send("Browser.getVersion"))
-cdp.on("Target.targetInfoChanged", console.log)
+console.log(await cdp.Browser.getVersion());
+cdp.on(cdp.Target.targetInfoChanged, console.log);
 
+// run extension code with chrome.* in scope
+const tab = await cdp.Magic.evaluate({
+  expression: "(await chrome.tabs.query({ active: true }))[0]",
+});
 
-// ✨ use Magic to register & use new custom CDP commands!
-await cdp.send("Magic.addCustomCommand", {
-    name: "Custom.tabIdFromTargetId",
-    expression: `async ({ targetId }) => ({
-      tabId: (await chrome.debugger.getTargets()).find(t => t.id === targetId)?.tabId
-    })`,
-})
-await cdp.send("Custom.tabIdFromTargetId", {targetId: '3423A1...'})   // -> 22352432
+// ✨ register and use custom CDP commands
+await cdp.Magic.addCustomCommand({
+  name: "Custom.tabIdFromTargetId",
+  paramsSchema: { targetId: cdp.types.zod.Target.TargetID },
+  resultSchema: { tabId: z.number().nullable() },
+  expression: `async ({ targetId }) => ({
+    tabId: (await chrome.debugger.getTargets()).find(t => t.id === targetId)?.tabId ?? null
+  })`,
+});
+await cdp.send("Custom.tabIdFromTargetId", { targetId: "3423A1..." }); // -> { tabId: 22352432 }
 
 // ✨ set up new custom CDP events to fire + receive them just like normal CDP
 // this example sets up a truly accurate "foreground focus" tracking event,
 // which CDP doesn't have natively https://issues.chromium.org/issues/497896141
-await cdp.Magic.addCustomEvent({
-  name: "Page.foregroundPageChanged",
-  eventSchema: {
+const PageForegroundPageChanged = z
+  .object({
     targetId: cdp.types.zod.Target.TargetID.nullable(),
-    url: z.string().nullable(),
-    tabId: z.number().nullable().optional(),
-  },
-})
+    tabId: z.number(),
+  })
+  .passthrough()
+  .meta({ id: "Page.foregroundPageChanged" });
+
+await cdp.Magic.addCustomEvent({
+  name: PageForegroundPageChanged,
+  eventSchema: PageForegroundPageChanged,
+});
 await cdp.Magic.evaluate({
-  expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-    await cdp.emit("Page.foregroundPageChanged", {
+  expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) =>
+    cdp.emit("Page.foregroundPageChanged", {
       tabId,
-      targetId: (await chrome.debugger.getTargets()).find(t => t.tabId === tabId)?.id
+      targetId: (await chrome.debugger.getTargets()).find(t => t.tabId === tabId)?.id ?? null
     })
-  })`,
-})
-cdp.on("Page.foregroundPageChanged", console.log)
+  )`,
+});
+cdp.on(PageForegroundPageChanged, console.log);
 
 // ✨ Intercept, modify, and extend existing CDP commands/events/params on the wire
 await cdp.Magic.addMiddleware({
-  name: "Target.targetInfoChanged",
-  phase: "event",
-  expression: `async (payload, next, ctx) => {
-    // add .tabId next to .targetId in all Target.targetInfoChanged events the browser emits
-    const {tabId} = await cdp.send('Custom.tabIdFromTargetId', payload.targetInfo)
-    payload.targetInfo.tabId = tabId
-    return next(payload)
+  name: cdp.Target.targetInfoChanged,
+  phase: cdp.EVENT,
+  expression: `async (payload, next) => {
+    const { tabId } = await cdp.send("Custom.tabIdFromTargetId", {
+      targetId: payload.targetInfo.targetId,
+    });
+    payload.targetInfo.tabId = tabId;
+    return next(payload);
   }`,
-})
-```
+});
 
-```ts
-// it also provides nicely typed + zod enforced imperative-style equivalents for everything
-await cdp.on(cdp.Target.targetCreated, (targetInfo: cdp.types.ts.Target.TargetInfo) => console.log(targetInfo))
-console.log(await cdp.Target.createTarget({url: 'https://example.com'}))
+// typed + zod-enforced imperative aliases are generated for standard CDP too
+console.log(await cdp.Target.createTarget({ url: "https://example.com" }));
 ```
 
 ## Run the demos
@@ -95,9 +107,9 @@ console.log(await cdp.Target.createTarget({url: 'https://example.com'}))
 Each demo launches Chrome with the extension loaded, headful on macOS and `--headless=new` on Linux, then exercises every primitive in the chosen mode:
 
 ```sh
-node client/js/demo.js              # defaults to --loopback; also supports --direct / --debugger
-python3 client/python/demo.py
-( cd client/go && go run . )
+pnpm run demo:js                    # defaults to --loopback; also supports --direct / --debugger
+pnpm run demo:python
+pnpm run demo:go
 ```
 
 ## Transparent Proxy
@@ -105,9 +117,10 @@ python3 client/python/demo.py
 Upgrade any vanilla CDP client like Stagehand, Playwright, or Puppeteer transparently with support for `Magic.*` / `Custom.*` commands and events.
 
 ```sh
-node bridge/proxy.js --upstream http://127.0.0.1:9222 --port 9223
-# playwright.chromium.connect("http://127.0.0.1:9223")
-# playwright page.getCDPSession().send('Magic.evaluate', {expression: '1+1'}) -> 2
+pnpm run proxy -- --upstream http://127.0.0.1:9222 --port 9223
+# const browser = await playwright.chromium.connectOverCDP("http://127.0.0.1:9223")
+# const session = await browser.contexts()[0].newCDPSession(page)
+# await session.send("Magic.evaluate", { expression: "1 + 1" }) // -> 2
 # ✨ All Magic CDP commands now work through playwright! you can modify/extend playwright behavior to your heart's content
 ```
 
@@ -116,10 +129,10 @@ node bridge/proxy.js --upstream http://127.0.0.1:9222 --port 9223
 `Magic.*` and `Custom.*` always go through the extension service worker. Routing only changes how _standard_ CDP methods (`Browser.*`, `Page.*`, `DOM.*`, …) are serviced:
 
 | Demo CLI Flag | Standard CDP path                                                  | Use when                                                                        |
-| ------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| `--loopback` | client → SW → SW dials its own WS back to localhost:9222 → CDP     | Default. You need the SW to intercept/inspect/rewrite normal traffic.           |
-| `--debugger` | client → SW → `chrome.debugger.sendCommand` against the active tab | The browser exposes no remote CDP port and you only have extension permissions. |
-| `--direct`   | client → sends non-Magic CDP commands to browser CDP directly      | You already have a CDP endpoint and don't need extension interception.          |
+| ------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `--loopback`  | client → SW → SW dials its own WS back to localhost:9222 → CDP     | Default. You need the SW to intercept/inspect/rewrite normal traffic.           |
+| `--debugger`  | client → SW → `chrome.debugger.sendCommand` against the active tab | The browser exposes no remote CDP port and you only have extension permissions. |
+| `--direct`    | client → sends non-Magic CDP commands to browser CDP directly      | You already have a CDP endpoint and don't need extension interception.          |
 
 Pass via `routes: { "*.*": "direct_cdp" | "service_worker" }` on the client and `server: { routes: { "*.*": "loopback_cdp" | "chrome_debugger" } }` for the SW side. The demos default to `--loopback` (the most powerful mode).
 
@@ -128,23 +141,24 @@ Pass via `routes: { "*.*": "direct_cdp" | "service_worker" }` on the client and 
 ```
 extension/                MV3 extension; service worker registers MagicCDPServer
   manifest.json
-  service_worker.js
-  MagicCDPServer.js
-  translate.js           -> ../bridge/translate.js (symlink)
+  service_worker.ts
+  MagicCDPServer.ts
 bridge/
-  translate.js           Pure stateless wrap/unwrap (used by both Node + SW)
-  launcher.js            Find chrome/chromium binary, spawn with CDP enabled
-  injector.js            Discover existing SW or Extensions.loadUnpacked it
-  proxy.js               Local CDP proxy (upgrades any vanilla CDP client)
+  translate.ts           Pure stateless wrap/unwrap (used by both Node + SW)
+  launcher.ts            Find chrome/chromium binary, spawn with CDP enabled
+  injector.ts            Discover existing SW or Extensions.loadUnpacked it
+  proxy.ts               Local CDP proxy (upgrades any vanilla CDP client)
 client/
-  js/MagicCDPClient.js + demo.js
+  js/MagicCDPClient.ts + demo.ts
   python/MagicCDPClient.py + demo.py
   go/MagicCDPClient.go + demo.go
+dist/                     Built JS output used by the extension and Node CLI scripts
 ```
 
 ## Requirements
 
-- Chromium-family browser launched with `--enable-unsafe-extension-debugging` and `--remote-allow-origins=*`. Chrome Canary is the verified host for `Extensions.loadUnpacked`; other Chromium builds work too if the extension is preloaded with `--load-extension`.
+- Stock Google Chrome can be used without relaunch flags: visit `chrome://inspect/#remote-debugging` to expose the current browser at `http://127.0.0.1:9222`, and load/install the MagicCDP extension in that profile. If no `cdp_url` is passed, the JS client probes that endpoint before auto-launching a test browser.
+- Automated/test browsers can still preload the extension with `--load-extension=<path>`. `Extensions.loadUnpacked` is used as a fallback when the connected browser exposes it over CDP.
 - Node ≥ 22 (we use the native global `WebSocket`), Python ≥ 3.11 with `websocket-client`, Go ≥ 1.24 with `gobwas/ws`.
 
 ---
@@ -154,8 +168,8 @@ client/
 
 ### Connect
 
-1. Open a raw CDP websocket to the browser (auto-launching one via `bridge/launcher.js` if no `cdp_url` is supplied).
-2. `bridge/injector.js` either discovers an existing MagicCDP service worker target or installs the extension via `Extensions.loadUnpacked`.
+1. Open a raw CDP websocket to the browser. If no `cdp_url` is supplied, the JS client first tries the live stock-Chrome endpoint at `http://127.0.0.1:9222`, then auto-launches a test browser only if that is not reachable.
+2. `bridge/injector.js` either discovers an existing MagicCDP service worker target or installs the extension via `Extensions.loadUnpacked` when the connected browser permits it.
 3. Attach a session to that SW target and `Runtime.enable` on it.
 4. Optionally call `globalThis.MagicCDP.configure(...)` to push routing config into the SW (only needed when using `--loopback` or non-default server-side routing).
 
@@ -163,8 +177,8 @@ client/
 
 - `Magic.evaluate({ expression, params, cdpSessionId })` → `Runtime.evaluate` on the ext session, wrapping the expression with an IIFE that exposes `params` and `cdp = MagicCDP.attachToSession(...)`.
 - `Magic.addCustomCommand({ name, expression, ... })` → `Runtime.evaluate` calling `globalThis.MagicCDP.addCustomCommand({ ... })` with the user expression embedded as the handler.
-- `Magic.addCustomEvent({ name })` → `Runtime.addBinding({ name: "__MagicCDP_<name>" })`, then a `Runtime.evaluate` registering the event in `globalThis.MagicCDP`.
-- `Magic.addMiddleware({ name, phase, expression })` → `Runtime.evaluate` registering a service-worker middleware for `phase: "request" | "response" | "event"`. Use `name: "*"` to match every method/event in that phase.
+- `Magic.addCustomEvent({ name, eventSchema })` → `Runtime.addBinding({ name: "__MagicCDP_<name>" })`, then a `Runtime.evaluate` registering the event in `globalThis.MagicCDP`.
+- `Magic.addMiddleware({ name, phase, expression })` → `Runtime.evaluate` registering a service-worker middleware for `phase: "request" | "response" | "event"`. Use `name: "*"` to match every method/event in that phase, or pass generated names like `cdp.Target.targetInfoChanged`.
 - `Custom.X(params)` → `Runtime.evaluate` calling `globalThis.MagicCDP.handleCommand("Custom.X", params, cdpSessionId)`.
 
 ### Receive
@@ -361,8 +375,8 @@ flowchart LR
 
 - This does not add real CDP methods to Chrome — the wire methods stay `Runtime.evaluate` + `Runtime.bindingCalled`. The `Magic.*` / `Custom.*` namespace is a client + SW convention.
 - Page JS does not see custom commands or event bindings.
-- `Extensions.loadUnpacked` is Chrome Canary-verified; other builds work via `--load-extension` + the discovery path in `injector.js`.
-- `--remote-allow-origins=*` is required so the extension origin can open WebSockets to `localhost:9222` for `loopback_cdp` mode.
+- Stock Google Chrome's `chrome://inspect/#remote-debugging` toggle can expose the current browser at `localhost:9222` without relaunching with `--remote-debugging-port`, `--enable-unsafe-extension-debugging`, or `--remote-allow-origins=*`.
+- If `Extensions.loadUnpacked` is unavailable in the connected browser, load/install the MagicCDP extension in that Chrome profile once and reconnect; the injector will use the discovery path.
 
 **Alternatives considered**
 

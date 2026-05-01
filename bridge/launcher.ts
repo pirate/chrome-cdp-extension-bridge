@@ -11,29 +11,69 @@ import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import WebSocket from "ws";
+import type { RawData } from "ws";
 
 const CANDIDATE_PATHS = [
   process.env.CHROME_PATH,
   "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome-canary",
   "/usr/bin/chromium",
   "/usr/bin/chromium-browser",
   "/usr/bin/google-chrome-stable",
+  "/usr/bin/google-chrome",
   "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
 ].filter((candidate): candidate is string => Boolean(candidate));
 
-const REQUIRED_FLAGS = [
+const DEFAULT_FLAGS = [
   "--enable-unsafe-extension-debugging",
   "--remote-allow-origins=*",
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-default-apps",
   "--disable-background-networking",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--disable-background-timer-throttling",
   "--disable-sync",
   "--password-store=basic",
   "--use-mock-keychain",
 ];
+
+async function wakePreloadedExtension(wsUrl: string) {
+  const ws = new WebSocket(wsUrl);
+  await new Promise<void>((resolve, reject) => {
+    ws.once("open", resolve);
+    ws.once("error", reject);
+  });
+
+  let nextId = 1;
+  const send = (method: string, params: Record<string, unknown> = {}) =>
+    new Promise<Record<string, unknown>>((resolve, reject) => {
+      const id = nextId++;
+      const onMessage = (raw: RawData) => {
+        const msg = JSON.parse(raw.toString());
+        if (msg.id !== id) return;
+        ws.off("message", onMessage);
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolve(msg.result || {});
+      };
+      ws.on("message", onMessage);
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+
+  try {
+    const { targetId } = await send("Target.createTarget", {
+      url: `about:blank#magic-cdp-extension-wakeup-${Date.now()}`,
+      newWindow: false,
+    });
+    if (typeof targetId === "string") await send("Target.closeTarget", { targetId }).catch(() => ({}));
+  } finally {
+    ws.close();
+  }
+}
 
 export function findChromeBinary(explicit?: string | null) {
   for (const candidate of [explicit, ...CANDIDATE_PATHS]) {
@@ -77,7 +117,7 @@ export async function launchChrome({
   const usePort = port || (await freePort());
   const profileDir = await mkdtemp(path.join(tmpdir(), "magic-cdp."));
   const flags = [
-    ...REQUIRED_FLAGS,
+    ...DEFAULT_FLAGS,
     headless ? "--headless=new" : null,
     "--disable-gpu",
     noSandbox ? "--no-sandbox" : null,
@@ -103,6 +143,9 @@ export async function launchChrome({
       const response = await fetch(`${cdpUrl}/json/version`);
       if (response.ok) {
         const version = await response.json();
+        if (extraFlags.some((flag) => flag.startsWith("--load-extension="))) {
+          await wakePreloadedExtension(version.webSocketDebuggerUrl).catch(() => {});
+        }
         return { proc, port: usePort, cdpUrl, wsUrl: version.webSocketDebuggerUrl, profileDir, close };
       }
     } catch {}

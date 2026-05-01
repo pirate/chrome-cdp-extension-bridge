@@ -16,15 +16,21 @@
 // + Custom.demo event roundtrip.
 
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
+import { z } from "zod";
 
 import { MagicCDPClient } from "./MagicCDPClient.js";
 import { launchChrome } from "../../bridge/launcher.js";
+import { cdp as protocol } from "../../types/cdp.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const EXTENSION_PATH = path.resolve(HERE, "..", "..", "extension");
+const EXTENSION_PATH =
+  [path.resolve(HERE, "..", "..", "extension"), path.resolve(HERE, "..", "..", "dist", "extension")].find((candidate) =>
+    existsSync(path.join(candidate, "service_worker.js")),
+  ) ?? path.resolve(HERE, "..", "..", "extension");
 
 function parseArgs(argv) {
   const flags = new Set(argv.filter((a) => a.startsWith("--")).map((a) => a.slice(2)));
@@ -42,11 +48,13 @@ function clientOptionsFor(mode, cdp_url) {
   if (mode === "direct") {
     return {
       cdp_url,
+      extension_path: EXTENSION_PATH,
       routes: { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp" },
     };
   }
   return {
     cdp_url,
+    extension_path: EXTENSION_PATH,
     routes: { "Magic.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker" },
     server: {
       routes: {
@@ -62,6 +70,9 @@ function clientOptionsFor(mode, cdp_url) {
 async function main() {
   const { mode } = parseArgs(process.argv.slice(2));
   console.log(`== mode: ${mode} ==`);
+  if (!existsSync(path.join(EXTENSION_PATH, "service_worker.js"))) {
+    throw new Error(`Built extension not found at ${EXTENSION_PATH}. Run pnpm run build first.`);
+  }
 
   // --load-extension is a workaround for builds where Extensions.loadUnpacked
   // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
@@ -92,20 +103,26 @@ async function main() {
     // tab-scoped and rejects browser-level methods like Browser.getVersion --
     // expected, just report.
     try {
-      console.log("Browser.getVersion ->", await cdp.send("Browser.getVersion"));
+      console.log("Browser.getVersion ->", await cdp.Browser.getVersion());
     } catch (e) {
       console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")");
     }
 
     console.log(
       "Magic.evaluate     ->",
-      await cdp.send("Magic.evaluate", {
+      await cdp.Magic.evaluate({
         expression: "({ extensionId: chrome.runtime.id })",
       }),
     );
 
-    await cdp.send("Magic.addCustomCommand", {
+    await cdp.Magic.addCustomCommand({
       name: "Custom.tabIdFromTargetId",
+      paramsSchema: {
+        targetId: protocol.types.zod.Target.TargetID,
+      },
+      resultSchema: {
+        tabId: z.number().nullable(),
+      },
       expression: `async ({ targetId }) => {
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.id === targetId);
@@ -115,9 +132,9 @@ async function main() {
         return { tabId: tab?.id ?? null };
       }`,
     });
-    await cdp.send("Magic.addMiddleware", {
+    await cdp.Magic.addMiddleware({
       name: "*",
-      phase: "response",
+      phase: cdp.RESPONSE,
       expression: `async (payload, next) => {
         const seen = new WeakSet();
         const visit = async value => {
@@ -133,9 +150,9 @@ async function main() {
         return next(payload);
       }`,
     });
-    await cdp.send("Magic.addMiddleware", {
+    await cdp.Magic.addMiddleware({
       name: "*",
-      phase: "event",
+      phase: cdp.EVENT,
       expression: `async (payload, next) => {
         const seen = new WeakSet();
         const visit = async value => {
@@ -152,9 +169,16 @@ async function main() {
       }`,
     });
 
-    await cdp.send("Magic.addCustomEvent", { name: "Page.foregroundPageChanged" });
+    await cdp.Magic.addCustomEvent({
+      name: "Page.foregroundPageChanged",
+      eventSchema: {
+        targetId: protocol.types.zod.Target.TargetID.nullable(),
+        url: z.string().nullable(),
+        tabId: z.number().nullable().optional(),
+      },
+    });
     cdp.on("Page.foregroundPageChanged", (event) => console.log("Page.foregroundPageChanged ->", event));
-    await cdp.send("Magic.evaluate", {
+    await cdp.Magic.evaluate({
       expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.type === "page" && target.tabId === tabId);
@@ -162,9 +186,20 @@ async function main() {
         })`,
     });
 
-    await cdp.send("Magic.addCustomEvent", { name: "Custom.demo" });
-    await cdp.send("Magic.addCustomCommand", {
+    await cdp.Magic.addCustomEvent({
+      name: "Custom.demo",
+      eventSchema: {
+        echo: z.string(),
+      },
+    });
+    await cdp.Magic.addCustomCommand({
       name: "Custom.echo",
+      paramsSchema: {
+        value: z.string(),
+      },
+      resultSchema: {
+        echoed: z.string(),
+      },
       expression:
         "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
     });
@@ -217,7 +252,8 @@ async function runRepl(cdp, mode) {
         if (!match) throw new Error("format: Domain.method({...})");
         const [, method, raw = ""] = match;
         const params = raw.trim() ? Function(`"use strict"; return (${raw});`)() : {};
-        const result = await cdp.send(method, params);
+        const [domain, command] = method.split(".");
+        const result = cdp[domain]?.[command] ? await cdp[domain][command](params) : await cdp.send(method, params);
         console.log(JSON.stringify(result, null, 2));
       } catch (e) {
         console.error("error:", e?.message || e);

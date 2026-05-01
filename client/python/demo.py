@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from MagicCDPClient import MagicCDPClient
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-EXTENSION_PATH = ROOT / "extension"
+EXTENSION_PATH = ROOT / "dist" / "extension"
 CHROME = os.environ.get("CHROME_PATH") or (
     "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
     if sys.platform == "darwin"
