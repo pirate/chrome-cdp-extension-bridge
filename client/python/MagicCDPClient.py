@@ -21,6 +21,7 @@ from websocket import create_connection
 
 from translate import (
     DEFAULT_CLIENT_ROUTES,
+    binding_name_for,
     wrap_command_if_needed,
     unwrap_event_if_needed,
     unwrap_response_if_needed,
@@ -50,6 +51,7 @@ class MagicCDPClient:
         self.extension_id = None
         self.ext_target_id = None
         self.ext_session_id = None
+        self.latency = None
 
         self._ws = None
         self._next_id = 0
@@ -75,6 +77,7 @@ class MagicCDPClient:
         self.ext_target_id = ext["targetId"]
         self.ext_session_id = ext["sessionId"]
         self._send_frame("Runtime.enable", {}, self.ext_session_id)
+        self._send_frame("Runtime.addBinding", {"name": binding_name_for("Magic.pong")}, self.ext_session_id)
 
         if self.server:
             self._send_raw(wrap_command_if_needed(
@@ -83,6 +86,7 @@ class MagicCDPClient:
                 routes=self.routes,
                 cdp_session_id=self.ext_session_id,
             ))
+        self._measure_ping_latency()
         return self
 
     def send(self, method, params=None):
@@ -125,6 +129,36 @@ class MagicCDPClient:
             result = self._send_frame(step["method"], step.get("params") or {}, self.ext_session_id)
             unwrap = step.get("unwrap")
         return unwrap_response_if_needed(result, unwrap)
+
+    def _measure_ping_latency(self):
+        sent_at = int(time.time() * 1000)
+        done = Queue()
+
+        def on_pong(payload):
+            done.put(payload or {})
+
+        self._handlers.setdefault("Magic.pong", []).append(on_pong)
+        try:
+            self.send("Magic.ping", {"sentAt": sent_at})
+            payload = done.get(timeout=10)
+        except Empty:
+            raise RuntimeError("Magic.pong timed out")
+        finally:
+            handlers = self._handlers.get("Magic.pong") or []
+            if on_pong in handlers:
+                handlers.remove(on_pong)
+
+        returned_at = int(time.time() * 1000)
+        received_at = payload.get("receivedAt")
+        self.latency = {
+            "sentAt": sent_at,
+            "receivedAt": received_at,
+            "returnedAt": returned_at,
+            "roundTripMs": returned_at - sent_at,
+            "serviceWorkerMs": received_at - sent_at if isinstance(received_at, (int, float)) else None,
+            "returnPathMs": returned_at - received_at if isinstance(received_at, (int, float)) else None,
+        }
+        return self.latency
 
     def _send_frame(self, method, params=None, session_id=None, timeout=10):
         with self._lock:

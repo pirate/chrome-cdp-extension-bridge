@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "outDir": "dist",
+    "rootDir": ".",
+    "types": ["node", "chrome"],
+    "allowSyntheticDefaultImports": true,
+    "declaration": false,
+    "esModuleInterop": true,
+    "inlineSources": true,
+    "noImplicitAny": false,
+    "strict": false,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "strictNullChecks": false,
+    "useUnknownInCatchVariables": false,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["bridge/**/*.ts", "client/js/**/*.ts", "extension/**/*.ts", "test/**/*.ts", "types/**/*.ts"],
+  "exclude": ["dist", "node_modules"]
+}

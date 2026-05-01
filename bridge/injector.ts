@@ -1,4 +1,4 @@
-// injector.mjs: inject the MagicCDP extension service worker when needed in a
+// injector.js: inject the MagicCDP extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //
 // The caller hands in a `send(method, params, sessionId?)` function bound to
@@ -15,10 +15,25 @@
 //      including the --load-extension fallback for Chrome builds where
 //      Extensions.loadUnpacked is unavailable.
 
+import type { ProtocolParams, ProtocolResult } from "../types/magic.js";
+import { commands } from "../types/zod.js";
+
 const SW_URL_RE = /^chrome-extension:\/\/[a-z]+\/service_worker\.js$/;
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
 
-export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs = 10_000, discoveryWaitMs = 2_000 } = {}) {
+type SendCDP = (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
+
+export async function injectExtensionIfNeeded({
+  send,
+  extensionPath,
+  timeoutMs = 10_000,
+  discoveryWaitMs = 2_000,
+}: {
+  send: SendCDP;
+  extensionPath?: string | null;
+  timeoutMs?: number;
+  discoveryWaitMs?: number;
+}) {
   if (typeof send !== "function") throw new Error("injectExtensionIfNeeded requires { send }");
   // extensionPath is only required as a fallback, when discovery does not turn
   // up an already-loaded MagicCDP service worker. Validate at the point of use
@@ -29,22 +44,30 @@ export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs =
   // --load-extension at browser launch take a moment to spin their SW *and*
   // for the SW's top-level module init to run, so we attach to each candidate
   // and re-probe its globalThis until either MagicCDP appears or we time out.
-  const attached = []; // [{ targetId, url, sessionId }]
+  const attached: { targetId: string; url: string; sessionId: string }[] = []; // [{ targetId, url, sessionId }]
   const discoveryDeadline = Date.now() + discoveryWaitMs;
   while (Date.now() <= discoveryDeadline) {
-    const { targetInfos } = await send("Target.getTargets");
+    const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
     for (const candidate of targetInfos) {
       if (candidate.type !== "service_worker") continue;
       if (!SW_URL_RE.test(candidate.url)) continue;
-      if (attached.some(a => a.targetId === candidate.targetId)) continue;
-      const { sessionId } = await send("Target.attachToTarget", { targetId: candidate.targetId, flatten: true });
+      if (attached.some((a) => a.targetId === candidate.targetId)) continue;
+      const { sessionId } = commands["Target.attachToTarget"].result.parse(
+        await send("Target.attachToTarget", { targetId: candidate.targetId, flatten: true }),
+      );
       attached.push({ targetId: candidate.targetId, url: candidate.url, sessionId });
     }
     for (const a of attached) {
-      const probe = await send("Runtime.evaluate", {
-        expression: "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
-        returnByValue: true,
-      }, a.sessionId);
+      const probe = commands["Runtime.evaluate"].result.parse(
+        await send(
+          "Runtime.evaluate",
+          {
+            expression: "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+            returnByValue: true,
+          },
+          a.sessionId,
+        ),
+      );
       if (probe.result?.value === true) {
         // detach every other speculative session before returning
         for (const other of attached) {
@@ -53,7 +76,7 @@ export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs =
         }
         return {
           source: "discovered",
-          extensionId: a.url.match(EXT_ID_FROM_URL)[1],
+          extensionId: a.url.match(EXT_ID_FROM_URL)?.[1],
           targetId: a.targetId,
           url: a.url,
           sessionId: a.sessionId,
@@ -61,7 +84,7 @@ export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs =
       }
     }
     if (Date.now() >= discoveryDeadline) break;
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
   for (const a of attached) await send("Target.detachFromTarget", { sessionId: a.sessionId }).catch(() => {});
 
@@ -69,7 +92,7 @@ export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs =
   if (!extensionPath) {
     throw new Error(
       `No existing MagicCDP service worker was found and no extensionPath was provided to install one.\n` +
-      `Either start the browser with --load-extension=<path> so the SW exists at connect time, or pass extensionPath to injectExtensionIfNeeded/MagicCDPClient.`,
+        `Either start the browser with --load-extension=<path> so the SW exists at connect time, or pass extensionPath to injectExtensionIfNeeded/MagicCDPClient.`,
     );
   }
   let loadResult;
@@ -79,17 +102,17 @@ export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs =
     if (/Method not available|Method.*not.*found|wasn't found/i.test(error.message)) {
       throw new Error(
         `Cannot install MagicCDP extension into the running browser.\n\n` +
-        `  - No existing service worker with globalThis.MagicCDP was found in the browser.\n` +
-        `  - Extensions.loadUnpacked is unavailable in this Chrome build (\"${error.message}\").\n\n` +
-        `Fixes (any one of these):\n` +
-        `  1. Relaunch the browser with --load-extension=${extensionPath} (Chromium / Playwright builds).\n` +
-        `  2. Use Chrome Canary, which exposes Extensions.loadUnpacked over CDP.\n` +
-        `  3. Manually install the extension at chrome://extensions and reuse the running browser.\n`,
+          `  - No existing service worker with globalThis.MagicCDP was found in the browser.\n` +
+          `  - Extensions.loadUnpacked is unavailable in this Chrome build ("${error.message}").\n\n` +
+          `Fixes (any one of these):\n` +
+          `  1. Relaunch the browser with --load-extension=${extensionPath} (Chromium / Playwright builds).\n` +
+          `  2. Use Chrome Canary, which exposes Extensions.loadUnpacked over CDP.\n` +
+          `  3. Manually install the extension at chrome://extensions and reuse the running browser.\n`,
       );
     }
     throw new Error(
       `Extensions.loadUnpacked failed for ${extensionPath}: ${error.message}\n` +
-      `If the path is correct and the manifest is valid, the browser may not be running with --enable-unsafe-extension-debugging.`,
+        `If the path is correct and the manifest is valid, the browser may not be running with --enable-unsafe-extension-debugging.`,
     );
   }
   const extensionId = loadResult?.id || loadResult?.extensionId;
@@ -101,16 +124,31 @@ export async function injectExtensionIfNeeded({ send, extensionPath, timeoutMs =
   const swUrl = `chrome-extension://${extensionId}/service_worker.js`;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const { targetInfos } = await send("Target.getTargets");
-    const target = targetInfos.find(t => t.type === "service_worker" && t.url === swUrl);
+    const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
+    const target = targetInfos.find((t) => t.type === "service_worker" && t.url === swUrl);
     if (target) {
-      const { sessionId } = await send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
-      return { source: "injected", extensionId, targetId: target.targetId, url: swUrl, sessionId };
+      const { sessionId } = commands["Target.attachToTarget"].result.parse(
+        await send("Target.attachToTarget", { targetId: target.targetId, flatten: true }),
+      );
+      const probe = commands["Runtime.evaluate"].result.parse(
+        await send(
+          "Runtime.evaluate",
+          {
+            expression: "Boolean(globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+            returnByValue: true,
+          },
+          sessionId,
+        ),
+      );
+      if (probe.result?.value === true) {
+        return { source: "injected", extensionId, targetId: target.targetId, url: swUrl, sessionId };
+      }
+      await send("Target.detachFromTarget", { sessionId }).catch(() => {});
     }
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(
     `Extensions.loadUnpacked installed extension ${extensionId} but its service worker target ` +
-    `at ${swUrl} did not appear within ${timeoutMs}ms.`,
+      `at ${swUrl} did not appear within ${timeoutMs}ms.`,
   );
 }

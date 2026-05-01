@@ -3,8 +3,9 @@ import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { launchChrome } from "../bridge/launcher.mjs";
-import { MagicCDPClient } from "../client/js/MagicCDPClient.mjs";
+import { launchChrome } from "../bridge/launcher.js";
+import { MagicCDPClient } from "../client/js/MagicCDPClient.js";
+import { commands, events } from "../types/zod.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH = path.resolve(HERE, "..", "extension");
@@ -58,22 +59,7 @@ async (params) => {
       }
 
       if (msg.method !== "Target.targetCreated") return;
-
-      let tabId = null;
-      try {
-        const targetUrl = msg.params?.targetInfo?.url;
-        const tabs = await chrome.tabs.query({});
-        const tab = tabs.find(tab => tab.url === targetUrl || tab.pendingUrl === targetUrl);
-        tabId = tab?.id ?? null;
-      } catch {}
-
-      await MagicCDP.emit("Target.targetCreated", {
-        ...(msg.params || {}),
-        targetInfo: {
-          ...(msg.params?.targetInfo || {}),
-          tabId,
-        },
-      });
+      await MagicCDP.emit("Target.targetCreated", msg.params || {});
     });
   }
 
@@ -89,6 +75,34 @@ async (params) => {
     state.ws = null;
   }
   return result;
+}
+`;
+
+const tabIdFromTargetIdCommand = String.raw`
+async ({ targetId }) => {
+  const targets = await chrome.debugger.getTargets();
+  const target = targets.find(target => target.id === targetId);
+  if (target?.tabId != null) return { tabId: target.tabId };
+  const tabs = await chrome.tabs.query({});
+  const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
+  return { tabId: tab?.id ?? null };
+}
+`;
+
+const addTabIdMiddleware = String.raw`
+async (payload, next) => {
+  const seen = new WeakSet();
+  const visit = async value => {
+    if (!value || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
+      const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+      if (tabId != null) value.tabId = tabId;
+    }
+    for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
+  };
+  await visit(payload);
+  return next(payload);
 }
 `;
 
@@ -111,13 +125,36 @@ test("service-worker routed standard CDP commands and events can be transformed"
     assert.equal(cdp.cdp_url, chrome.wsUrl);
     assert.equal(cdp.server.loopback_cdp_url, chrome.wsUrl);
 
-    const rawTargets = await cdp._sendFrame("Target.getTargets");
+    const rawTargets = commands["Target.getTargets"].result.parse(await cdp._sendFrame("Target.getTargets"));
     assert.ok(rawTargets.targetInfos?.length > 0, "expected raw Target.getTargets targetInfos");
     assert.equal(
-      rawTargets.targetInfos.some(targetInfo => Object.hasOwn(targetInfo, "tabId")),
+      rawTargets.targetInfos.some((targetInfo) => Object.hasOwn(targetInfo, "tabId")),
       false,
       "raw CDP TargetInfo should not already contain tabId",
     );
+
+    await cdp.send("Magic.addCustomCommand", {
+      name: "Custom.tabIdFromTargetId",
+      expression: tabIdFromTargetIdCommand,
+    });
+    await cdp.send("Magic.addMiddleware", {
+      name: "*",
+      phase: "response",
+      expression: addTabIdMiddleware,
+    });
+    const middlewareTargets = await cdp.send("Target.getTargets");
+    assert.ok(
+      middlewareTargets.targetInfos.some(
+        (targetInfo) => targetInfo.type === "page" && Number.isInteger(targetInfo.tabId),
+      ),
+      "wildcard response middleware should add tabId next to targetId inside TargetInfo",
+    );
+
+    await cdp.send("Magic.addMiddleware", {
+      name: "*",
+      phase: "event",
+      expression: addTabIdMiddleware,
+    });
 
     await cdp.send("Magic.addCustomCommand", {
       name: "Target.getTargets",
@@ -127,12 +164,14 @@ test("service-worker routed standard CDP commands and events can be transformed"
     const enrichedTargets = await cdp.send("Target.getTargets");
     assert.ok(enrichedTargets.targetInfos?.length > 0, "expected enriched Target.getTargets targetInfos");
     assert.equal(
-      enrichedTargets.targetInfos.every(targetInfo => Object.hasOwn(targetInfo, "tabId")),
+      enrichedTargets.targetInfos.every((targetInfo) => Object.hasOwn(targetInfo, "tabId")),
       true,
       "every routed TargetInfo should include a tabId property",
     );
     assert.ok(
-      enrichedTargets.targetInfos.some(targetInfo => targetInfo.type === "page" && Number.isInteger(targetInfo.tabId)),
+      enrichedTargets.targetInfos.some(
+        (targetInfo) => targetInfo.type === "page" && Number.isInteger(targetInfo.tabId),
+      ),
       "expected at least one page target to be matched to a chrome.tabs tab id",
     );
 
@@ -143,8 +182,11 @@ test("service-worker routed standard CDP commands and events can be transformed"
     });
 
     const forwardedEvent = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("timed out waiting for transformed Target.targetCreated")), 10_000);
-      cdp.on("Target.targetCreated", params => {
+      const timeout = setTimeout(
+        () => reject(new Error("timed out waiting for transformed Target.targetCreated")),
+        10_000,
+      );
+      cdp.on("Target.targetCreated", (params) => {
         if (!Object.hasOwn(params.targetInfo || {}, "tabId")) return;
         clearTimeout(timeout);
         resolve(params);
@@ -154,10 +196,12 @@ test("service-worker routed standard CDP commands and events can be transformed"
     await cdp.send("Target.setDiscoverTargets", { discover: true });
     await cdp._sendFrame("Target.createTarget", { url: "about:blank#magic-cdp-event-test" });
 
-    const event = await forwardedEvent;
+    const event = events["Target.targetCreated"].parse(await forwardedEvent);
     assert.ok(Object.hasOwn(event.targetInfo, "tabId"), "transformed event targetInfo should include tabId");
   } finally {
-    try { await cdp.send("Target.setDiscoverTargets", { discover: false }); } catch {}
+    try {
+      await cdp.send("Target.setDiscoverTargets", { discover: false });
+    } catch {}
     await cdp.close();
     await chrome.close();
   }

@@ -1,8 +1,8 @@
-// Go demo for MagicCDPClient. Mirrors client/js/demo.mjs and client/python/demo.py.
+// Go demo for MagicCDPClient. Mirrors client/js/demo.js and client/python/demo.py.
 //
 // Modes:
 //   --direct     *.* -> direct_cdp on the client.
-//   --loopback   *.* -> service_worker on client; *.* -> loopback_cdp on server.
+//   --loopback   *.* -> service_worker on client; *.* -> loopback_cdp on server. Default.
 //   --debugger   *.* -> service_worker on client; *.* -> chrome_debugger on server.
 
 package main
@@ -92,7 +92,7 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 }
 
 func main() {
-	mode := "direct"
+	mode := "loopback"
 	for _, a := range os.Args[1:] {
 		switch a {
 		case "--debugger":
@@ -107,7 +107,11 @@ func main() {
 
 	chromePath := os.Getenv("CHROME_PATH")
 	if chromePath == "" {
-		chromePath = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+		if runtime.GOOS == "darwin" {
+			chromePath = "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
+		} else {
+			chromePath = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+		}
 	}
 	// Resolve repo root from this source file so the demo runs correctly from
 	// any CWD (`go run ./client/go`, `go run .` from inside client/go, etc.).
@@ -118,15 +122,19 @@ func main() {
 	defer os.RemoveAll(profile)
 
 	chromePort := freePort()
-	chrome := exec.Command(chromePath,
-		"--headless=new", "--no-sandbox", "--disable-gpu",
+	chromeFlags := []string{
+		"--disable-gpu",
 		"--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
 		"--no-first-run", "--no-default-browser-check",
-		"--remote-debugging-port="+strconv.Itoa(chromePort),
-		"--user-data-dir="+profile,
-		"--load-extension="+extensionPath,
+		"--remote-debugging-port=" + strconv.Itoa(chromePort),
+		"--user-data-dir=" + profile,
+		"--load-extension=" + extensionPath,
 		"about:blank",
-	)
+	}
+	if runtime.GOOS == "linux" {
+		chromeFlags = append([]string{"--headless=new", "--no-sandbox"}, chromeFlags...)
+	}
+	chrome := exec.Command(chromePath, chromeFlags...)
 	if err := chrome.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -157,6 +165,9 @@ func main() {
 	}
 	defer cdp.Close()
 	fmt.Printf("connected; ext %s session %s\n", cdp.ExtensionID, cdp.ExtSessionID)
+	if b, err := json.Marshal(cdp.Latency); err == nil {
+		fmt.Println("ping latency      ->", string(b))
+	}
 
 	if r, err := cdp.Send("Browser.getVersion", nil); err != nil {
 		fmt.Println("Browser.getVersion -> (rejected by route:", err, ")")
@@ -166,12 +177,64 @@ func main() {
 	}
 
 	if r, err := cdp.Send("Magic.evaluate", map[string]any{
-		"expression": "async () => ({ extensionId: chrome.runtime.id })",
+		"expression": "({ extensionId: chrome.runtime.id })",
 	}); err != nil {
 		log.Fatalf("Magic.evaluate: %v", err)
 	} else {
 		b, _ := json.Marshal(r)
 		fmt.Println("Magic.evaluate     ->", string(b))
+	}
+
+	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
+		"name": "Custom.tabIdFromTargetId",
+		"expression": `async ({ targetId }) => {
+          const targets = await chrome.debugger.getTargets();
+          const target = targets.find(target => target.id === targetId);
+          if (target?.tabId != null) return { tabId: target.tabId };
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
+          return { tabId: tab?.id ?? null };
+        }`,
+	}); err != nil {
+		log.Fatal(err)
+	}
+	for _, phase := range []string{"response", "event"} {
+		if _, err := cdp.Send("Magic.addMiddleware", map[string]any{
+			"name":  "*",
+			"phase": phase,
+			"expression": `async (payload, next) => {
+              const seen = new WeakSet();
+              const visit = async value => {
+                if (!value || typeof value !== "object" || seen.has(value)) return;
+                seen.add(value);
+                if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
+                  const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+                  if (tabId != null) value.tabId = tabId;
+                }
+                for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
+              };
+              await visit(payload);
+              return next(payload);
+            }`,
+		}); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Page.foregroundPageChanged"}); err != nil {
+		log.Fatal(err)
+	}
+	cdp.On("Page.foregroundPageChanged", func(p any) {
+		fmt.Printf("Page.foregroundPageChanged -> %v\n", p)
+	})
+	if _, err := cdp.Send("Magic.evaluate", map[string]any{
+		"expression": `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+            const targets = await chrome.debugger.getTargets();
+            const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+            await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? null });
+          })`,
+	}); err != nil {
+		log.Fatal(err)
 	}
 
 	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Custom.demo"}); err != nil {
@@ -216,9 +279,9 @@ func main() {
 	// (CI / piped input / /dev/null) so the demo exits cleanly after
 	// assertions.
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		cdp.On("Target.attachedToTarget", func(p any) {
+		cdp.On("Magic.pong", func(p any) {
 			b, _ := json.Marshal(p)
-			fmt.Printf("\n[event] Target.attachedToTarget %s\n", string(b))
+			fmt.Printf("\n[event] Magic.pong %s\n", string(b))
 		})
 		runRepl(cdp, mode)
 	}

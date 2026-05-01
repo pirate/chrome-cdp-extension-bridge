@@ -1,9 +1,9 @@
-"""Python demo for MagicCDPClient. Mirrors client/js/demo.mjs.
+"""Python demo for MagicCDPClient. Mirrors client/js/demo.js.
 
 Modes (mirror the JS / Go demos):
     --direct      *.* -> direct_cdp on the client.
     --loopback    *.* -> service_worker on the client; *.* -> loopback_cdp on
-                  the server.
+                  the server. Default.
     --debugger    *.* -> service_worker on the client; *.* -> chrome_debugger
                   on the server.
 """
@@ -25,7 +25,11 @@ from MagicCDPClient import MagicCDPClient
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXTENSION_PATH = ROOT / "extension"
-CHROME = os.environ.get("CHROME_PATH", "/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
+CHROME = os.environ.get("CHROME_PATH") or (
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
+    if sys.platform == "darwin"
+    else "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+)
 
 
 def free_port():
@@ -71,7 +75,7 @@ def client_options_for(mode, cdp_url):
 
 def main():
     flags = {a[2:] for a in sys.argv[1:] if a.startswith("--")}
-    mode = "debugger" if "debugger" in flags else "loopback" if "loopback" in flags else "direct"
+    mode = "debugger" if "debugger" in flags else "direct" if "direct" in flags else "loopback"
     print(f"== mode: {mode} ==")
 
     # Allocate cleanup handles up front so an early failure (port allocation,
@@ -83,16 +87,20 @@ def main():
     try:
         chrome_port = free_port()
         profile_dir = tempfile.mkdtemp(prefix="magic-cdp-py.")
-        chrome_proc = subprocess.Popen([
+        chrome_args = [
             CHROME,
-            "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--disable-gpu",
             "--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
             "--no-first-run", "--no-default-browser-check",
             f"--remote-debugging-port={chrome_port}",
             f"--user-data-dir={profile_dir}",
             f"--load-extension={EXTENSION_PATH}",
             "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ]
+        if sys.platform.startswith("linux"):
+            chrome_args.insert(1, "--headless=new")
+            chrome_args.insert(2, "--no-sandbox")
+        chrome_proc = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         http_url = f"http://127.0.0.1:{chrome_port}"
         cdp_url = wait_for_url(f"{http_url}/json/version")["webSocketDebuggerUrl"]
         print(f"upstream cdp: {cdp_url}")
@@ -109,11 +117,51 @@ def main():
 
         cdp.connect()
         print(f"connected; ext {cdp.extension_id} session {cdp.ext_session_id}")
+        print(f"ping latency      -> {cdp.latency}")
 
         try: print(f"Browser.getVersion -> {cdp.send('Browser.getVersion')}")
         except Exception as e: print(f"Browser.getVersion -> (rejected by route: {str(e).splitlines()[0]} )")
 
-        print(f"Magic.evaluate     -> {cdp.send('Magic.evaluate', {'expression': 'async () => ({ extensionId: chrome.runtime.id })'})}")
+        print(f"Magic.evaluate     -> {cdp.send('Magic.evaluate', {'expression': '({ extensionId: chrome.runtime.id })'})}")
+
+        cdp.send("Magic.addCustomCommand", {
+            "name": "Custom.tabIdFromTargetId",
+            "expression": '''async ({ targetId }) => {
+              const targets = await chrome.debugger.getTargets();
+              const target = targets.find(target => target.id === targetId);
+              if (target?.tabId != null) return { tabId: target.tabId };
+              const tabs = await chrome.tabs.query({});
+              const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
+              return { tabId: tab?.id ?? null };
+            }''',
+        })
+        for phase in ("response", "event"):
+            cdp.send("Magic.addMiddleware", {
+                "name": "*",
+                "phase": phase,
+                "expression": '''async (payload, next) => {
+                  const seen = new WeakSet();
+                  const visit = async value => {
+                    if (!value || typeof value !== "object" || seen.has(value)) return;
+                    seen.add(value);
+                    if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
+                      const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+                      if (tabId != null) value.tabId = tabId;
+                    }
+                    for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
+                  };
+                  await visit(payload);
+                  return next(payload);
+                }''',
+            })
+
+        cdp.send("Magic.addCustomEvent", {"name": "Page.foregroundPageChanged"})
+        cdp.on("Page.foregroundPageChanged", lambda e: print(f"Page.foregroundPageChanged -> {e}"))
+        cdp.send("Magic.evaluate", {"expression": '''chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+            const targets = await chrome.debugger.getTargets();
+            const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+            await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? null });
+          })'''})
 
         cdp.send("Magic.addCustomEvent", {"name": "Custom.demo"})
         cdp.send("Magic.addCustomCommand", {
@@ -137,7 +185,7 @@ def main():
         # watch events as they print. Skip when run non-interactively so the
         # demo stays CI-friendly.
         if sys.stdin.isatty():
-            cdp.on("Target.attachedToTarget", lambda e: print(f"\n[event] Target.attachedToTarget {e}"))
+            cdp.on("Magic.pong", lambda e: print(f"\n[event] Magic.pong {e}"))
             run_repl(cdp, mode)
 
         return 0

@@ -2,11 +2,10 @@
 //
 // Modes select where non-Magic CDP commands ultimately get serviced:
 //   --direct      client sends standard CDP straight to the upstream WS.
-//                 (Default. *.* -> direct_cdp on the client.)
 //   --loopback    client routes *.* through the extension service worker,
 //                 which opens a verified WebSocket back to localhost:9222 and
 //                 forwards the command. (*.* -> service_worker on client,
-//                 *.* -> loopback_cdp on server.)
+//                 *.* -> loopback_cdp on server. Default mode.)
 //   --debugger    client routes *.* through the extension service worker,
 //                 which uses chrome.debugger.sendCommand against the active
 //                 tab. (*.* -> service_worker on client, *.* -> chrome_debugger
@@ -21,17 +20,21 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
 
-import { MagicCDPClient } from "./MagicCDPClient.mjs";
-import { launchChrome } from "../../bridge/launcher.mjs";
+import { MagicCDPClient } from "./MagicCDPClient.js";
+import { launchChrome } from "../../bridge/launcher.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH = path.resolve(HERE, "..", "..", "extension");
 
 function parseArgs(argv) {
-  const flags = new Set(argv.filter(a => a.startsWith("--")).map(a => a.slice(2)));
-  const mode = flags.has("debugger") ? "debugger"
-              : flags.has("loopback") ? "loopback"
-              : "direct";
+  const flags = new Set(argv.filter((a) => a.startsWith("--")).map((a) => a.slice(2)));
+  const mode = flags.has("debugger")
+    ? "debugger"
+    : flags.has("direct")
+      ? "direct"
+      : flags.has("loopback")
+        ? "loopback"
+        : "loopback";
   return { mode };
 }
 
@@ -64,33 +67,106 @@ async function main() {
   // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
   // can drop extraFlags entirely and the injector will install the extension
   // over CDP itself.
-  const chrome = await launchChrome({ extraFlags: [`--load-extension=${EXTENSION_PATH}`] });
+  const chrome = await launchChrome({
+    headless: process.platform === "linux",
+    noSandbox: process.platform === "linux",
+    extraFlags: [`--load-extension=${EXTENSION_PATH}`],
+  });
   console.log("upstream cdp:", chrome.wsUrl);
 
   const cdp = new MagicCDPClient(clientOptionsFor(mode, chrome.wsUrl));
   const events = [];
-  cdp.on("Custom.demo", payload => { console.log("event ->", payload); events.push(payload); });
+  cdp.on("Custom.demo", (payload) => {
+    console.log("event ->", payload);
+    events.push(payload);
+  });
 
   try {
     await cdp.connect();
     console.log("connected; ext", cdp.extension_id, "session", cdp.ext_session_id);
+    console.log("ping latency      ->", cdp.latency);
 
     // standard CDP route differs per mode. --direct goes straight to the
     // upstream WS. --loopback comes back into the browser via a verified
     // ws://localhost:9222. --debugger goes through chrome.debugger which is
     // tab-scoped and rejects browser-level methods like Browser.getVersion --
     // expected, just report.
-    try { console.log("Browser.getVersion ->", await cdp.send("Browser.getVersion")); }
-    catch (e) { console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")"); }
+    try {
+      console.log("Browser.getVersion ->", await cdp.send("Browser.getVersion"));
+    } catch (e) {
+      console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")");
+    }
 
-    console.log("Magic.evaluate     ->", await cdp.send("Magic.evaluate", {
-      expression: "async () => ({ extensionId: chrome.runtime.id })",
-    }));
+    console.log(
+      "Magic.evaluate     ->",
+      await cdp.send("Magic.evaluate", {
+        expression: "({ extensionId: chrome.runtime.id })",
+      }),
+    );
+
+    await cdp.send("Magic.addCustomCommand", {
+      name: "Custom.tabIdFromTargetId",
+      expression: `async ({ targetId }) => {
+        const targets = await chrome.debugger.getTargets();
+        const target = targets.find(target => target.id === targetId);
+        if (target?.tabId != null) return { tabId: target.tabId };
+        const tabs = await chrome.tabs.query({});
+        const tab = tabs.find(tab => target?.url && (tab.url === target.url || tab.pendingUrl === target.url));
+        return { tabId: tab?.id ?? null };
+      }`,
+    });
+    await cdp.send("Magic.addMiddleware", {
+      name: "*",
+      phase: "response",
+      expression: `async (payload, next) => {
+        const seen = new WeakSet();
+        const visit = async value => {
+          if (!value || typeof value !== "object" || seen.has(value)) return;
+          seen.add(value);
+          if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
+            const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+            if (tabId != null) value.tabId = tabId;
+          }
+          for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
+        };
+        await visit(payload);
+        return next(payload);
+      }`,
+    });
+    await cdp.send("Magic.addMiddleware", {
+      name: "*",
+      phase: "event",
+      expression: `async (payload, next) => {
+        const seen = new WeakSet();
+        const visit = async value => {
+          if (!value || typeof value !== "object" || seen.has(value)) return;
+          seen.add(value);
+          if (!Array.isArray(value) && typeof value.targetId === "string" && value.tabId == null) {
+            const { tabId } = await cdp.send("Custom.tabIdFromTargetId", { targetId: value.targetId });
+            if (tabId != null) value.tabId = tabId;
+          }
+          for (const child of Array.isArray(value) ? value : Object.values(value)) await visit(child);
+        };
+        await visit(payload);
+        return next(payload);
+      }`,
+    });
+
+    await cdp.send("Magic.addCustomEvent", { name: "Page.foregroundPageChanged" });
+    cdp.on("Page.foregroundPageChanged", (event) => console.log("Page.foregroundPageChanged ->", event));
+    await cdp.send("Magic.evaluate", {
+      expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+          const targets = await chrome.debugger.getTargets();
+          const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+          await cdp.emit("Page.foregroundPageChanged", { targetId: target?.id ?? null, url: target?.url ?? null });
+        })`,
+    });
 
     await cdp.send("Magic.addCustomEvent", { name: "Custom.demo" });
     await cdp.send("Magic.addCustomCommand", {
       name: "Custom.echo",
-      expression: "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
+      expression:
+        "async (params) => { await cdp.emit('Custom.demo', { echo: params.value }); return { echoed: params.value }; }",
     });
 
     console.log("Custom.echo        ->", await cdp.send("Custom.echo", { value: `hello-from-js-${mode}` }));
@@ -108,7 +184,7 @@ async function main() {
     // the prompt when run non-interactively (CI, piped stdin) so the demo
     // exits cleanly after assertions.
     if (process.stdin.isTTY) {
-      cdp.on("Target.attachedToTarget", e => console.log("\n[event] Target.attachedToTarget", e));
+      cdp.on("Magic.pong", (e) => console.log("\n[event] Magic.pong", e));
       await runRepl(cdp, mode);
     }
   } finally {
@@ -121,7 +197,7 @@ async function runRepl(cdp, mode) {
   console.log(`\nBrowser remains running. Mode: ${mode}.`);
   console.log("Enter commands as Domain.method({...}). Examples:");
   console.log("  Browser.getVersion({})");
-  console.log("  Magic.evaluate({expression: \"chrome.tabs.query({active: true})\"})");
+  console.log('  Magic.evaluate({expression: "chrome.tabs.query({active: true})"})');
   console.log("  Custom.echo({value: 'hi'})");
   console.log("Type exit or quit to disconnect (browser keeps running).");
 
@@ -129,8 +205,11 @@ async function runRepl(cdp, mode) {
   try {
     while (true) {
       let line;
-      try { line = (await rl.question("MagicCDP> ")).trim(); }
-      catch { break; }
+      try {
+        line = (await rl.question("MagicCDP> ")).trim();
+      } catch {
+        break;
+      }
       if (!line) continue;
       if (line === "exit" || line === "quit") break;
       try {
@@ -149,4 +228,7 @@ async function runRepl(cdp, mode) {
   }
 }
 
-main().catch(e => { console.error("DEMO FAILED:", e); process.exitCode = 1; });
+main().catch((e) => {
+  console.error("DEMO FAILED:", e);
+  process.exitCode = 1;
+});

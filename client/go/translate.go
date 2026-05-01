@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const bindingPrefix = "__MagicCDP_"
@@ -98,7 +99,7 @@ func wrapMagicAddCustomCommand(params map[string]any) map[string]any {
 	pSchema, _ := json.Marshal(params["paramsSchema"])
 	rSchema, _ := json.Marshal(params["resultSchema"])
 	return evalParams(fmt.Sprintf(
-		`(() => { return globalThis.MagicCDP.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, meta) => { const cdp = globalThis.MagicCDP.attachToSession(meta.cdpSessionId); const MagicCDP = globalThis.MagicCDP; const chrome = globalThis.chrome; const handler = (%s); return await handler(params || {}); }, }); })()`,
+		`(() => { return globalThis.MagicCDP.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, cdpSessionId) => { const cdp = globalThis.MagicCDP.attachToSession(cdpSessionId); const MagicCDP = globalThis.MagicCDP; const chrome = globalThis.chrome; const handler = (%s); return await handler(params || {}); }, }); })()`,
 		string(name), string(pSchema), string(rSchema), string(exprJSON), expr,
 	))
 }
@@ -107,21 +108,50 @@ func wrapMagicAddCustomEvent(params map[string]any) map[string]any {
 	rawName, _ := params["name"].(string)
 	name, _ := json.Marshal(rawName)
 	bn, _ := json.Marshal(bindingNameFor(rawName))
-	pSchema, _ := json.Marshal(params["payloadSchema"])
+	pSchema, _ := json.Marshal(params["eventSchema"])
 	return evalParams(fmt.Sprintf(
-		`globalThis.MagicCDP.addCustomEvent({ name: %s, bindingName: %s, payloadSchema: %s })`,
+		`globalThis.MagicCDP.addCustomEvent({ name: %s, bindingName: %s, eventSchema: %s })`,
 		string(name), string(bn), string(pSchema),
+	))
+}
+
+func wrapMagicAddMiddleware(params map[string]any) map[string]any {
+	name := params["name"]
+	if name == nil {
+		name = "*"
+	}
+	rawExpr, _ := params["expression"].(string)
+	nameJSON, _ := json.Marshal(name)
+	phaseJSON, _ := json.Marshal(params["phase"])
+	exprJSON, _ := json.Marshal(rawExpr)
+	return evalParams(fmt.Sprintf(
+		`(() => { return globalThis.MagicCDP.addMiddleware({ name: %s, phase: %s, expression: %s, handler: async (payload, next, context = {}) => { const cdp = globalThis.MagicCDP.attachToSession(context.cdpSessionId ?? null); const MagicCDP = globalThis.MagicCDP; const chrome = globalThis.chrome; const middleware = (%s); return await middleware(payload, next, context); }, }); })()`,
+		string(nameJSON), string(phaseJSON), string(exprJSON), rawExpr,
 	))
 }
 
 func wrapCustomCommand(method string, params map[string]any, sessionID string) map[string]any {
 	m, _ := json.Marshal(method)
 	p, _ := json.Marshal(params)
-	meta, _ := json.Marshal(map[string]any{"cdpSessionId": sessionID})
-	return evalParams(fmt.Sprintf(`globalThis.MagicCDP.handleCommand(%s, %s, %s)`, string(m), string(p), string(meta)))
+	sid, _ := json.Marshal(sessionID)
+	return evalParams(fmt.Sprintf(`globalThis.MagicCDP.handleCommand(%s, %s, %s)`, string(m), string(p), string(sid)))
 }
 
 func wrapServiceWorkerCommand(method string, params map[string]any, sessionID string) []rawStep {
+	if params == nil {
+		params = map[string]any{}
+	}
+	if method == "Magic.ping" {
+		if _, ok := params["sentAt"]; !ok {
+			next := map[string]any{}
+			for key, value := range params {
+				next[key] = value
+			}
+			next["sentAt"] = time.Now().UnixMilli()
+			params = next
+		}
+	}
+
 	if method == "Magic.addCustomEvent" {
 		name, _ := params["name"].(string)
 		return []rawStep{
@@ -135,6 +165,8 @@ func wrapServiceWorkerCommand(method string, params map[string]any, sessionID st
 		runtimeParams = wrapMagicEvaluate(params, sessionID)
 	case "Magic.addCustomCommand":
 		runtimeParams = wrapMagicAddCustomCommand(params)
+	case "Magic.addMiddleware":
+		runtimeParams = wrapMagicAddMiddleware(params)
 	default:
 		cdpSessionID, _ := params["cdpSessionId"].(string)
 		if cdpSessionID == "" {

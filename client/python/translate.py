@@ -1,6 +1,7 @@
 """Pure MagicCDP <-> CDP translation helpers for the Python client."""
 
 import json
+import time
 
 BINDING_PREFIX = "__MagicCDP_"
 
@@ -74,8 +75,8 @@ def _wrap_magic_add_custom_command(params: dict):
         f"    paramsSchema: {json.dumps(params.get('paramsSchema'))},\n"
         f"    resultSchema: {json.dumps(params.get('resultSchema'))},\n"
         f"    expression: {json.dumps(params['expression'])},\n"
-        "    handler: async (params, meta) => {\n"
-        "      const cdp = globalThis.MagicCDP.attachToSession(meta.cdpSessionId);\n"
+        "    handler: async (params, cdpSessionId) => {\n"
+        "      const cdp = globalThis.MagicCDP.attachToSession(cdpSessionId);\n"
         "      const MagicCDP = globalThis.MagicCDP;\n"
         "      const chrome = globalThis.chrome;\n"
         f"      const handler = ({params['expression']});\n"
@@ -91,8 +92,27 @@ def _wrap_magic_add_custom_event(params: dict):
         "globalThis.MagicCDP.addCustomEvent({\n"
         f"  name: {json.dumps(params['name'])},\n"
         f"  bindingName: {json.dumps(binding_name_for(params['name']))},\n"
-        f"  payloadSchema: {json.dumps(params.get('payloadSchema'))},\n"
+        f"  eventSchema: {json.dumps(params.get('eventSchema'))},\n"
         "})"
+    )
+
+
+def _wrap_magic_add_middleware(params: dict):
+    return _eval_params(
+        "(() => {\n"
+        "  return globalThis.MagicCDP.addMiddleware({\n"
+        f"    name: {json.dumps(params.get('name', '*'))},\n"
+        f"    phase: {json.dumps(params['phase'])},\n"
+        f"    expression: {json.dumps(params['expression'])},\n"
+        "    handler: async (payload, next, context = {}) => {\n"
+        "      const cdp = globalThis.MagicCDP.attachToSession(context.cdpSessionId ?? null);\n"
+        "      const MagicCDP = globalThis.MagicCDP;\n"
+        "      const chrome = globalThis.chrome;\n"
+        f"      const middleware = ({params['expression']});\n"
+        "      return await middleware(payload, next, context);\n"
+        "    },\n"
+        "  });\n"
+        "})()"
     )
 
 
@@ -100,11 +120,14 @@ def _wrap_custom_command(method: str, params: dict, session_id: str):
     return _eval_params(
         f"globalThis.MagicCDP.handleCommand("
         f"{json.dumps(method)}, {json.dumps(params)}, "
-        f"{json.dumps({'cdpSessionId': session_id})})"
+        f"{json.dumps(session_id)})"
     )
 
 
 def _wrap_service_worker_command(method: str, params: dict, session_id: str):
+    if method == "Magic.ping" and "sentAt" not in params:
+        params = {**params, "sentAt": int(time.time() * 1000)}
+
     if method == "Magic.addCustomEvent":
         return [
             {"method": "Runtime.addBinding", "params": {"name": binding_name_for(params["name"])}},
@@ -118,6 +141,8 @@ def _wrap_service_worker_command(method: str, params: dict, session_id: str):
         runtime_params = _wrap_magic_evaluate(params, session_id)
     elif method == "Magic.addCustomCommand":
         runtime_params = _wrap_magic_add_custom_command(params)
+    elif method == "Magic.addMiddleware":
+        runtime_params = _wrap_magic_add_middleware(params)
     else:
         runtime_params = _wrap_custom_command(method, params, params.get("cdpSessionId") or session_id)
     return [{"method": "Runtime.evaluate", "params": runtime_params, "unwrap": "evaluate"}]

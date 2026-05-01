@@ -95,6 +95,7 @@ type MagicCDPClient struct {
 	ExtensionID  string
 	ExtTargetID  string
 	ExtSessionID string
+	Latency      map[string]any
 }
 
 func New(opts Options) *MagicCDPClient {
@@ -147,6 +148,10 @@ func (c *MagicCDPClient) Connect() error {
 		c.Close()
 		return err
 	}
+	if _, err := c.sendFrame("Runtime.addBinding", map[string]any{"name": bindingNameFor("Magic.pong")}, c.ExtSessionID); err != nil {
+		c.Close()
+		return err
+	}
 
 	if c.opts.Server != nil {
 		command, err := wrapCommandIfNeeded("Magic.configure", map[string]any{
@@ -161,6 +166,10 @@ func (c *MagicCDPClient) Connect() error {
 			c.Close()
 			return fmt.Errorf("Magic.configure: %w", err)
 		}
+	}
+	if err := c.measurePingLatency(); err != nil {
+		c.Close()
+		return err
 	}
 	return nil
 }
@@ -216,6 +225,56 @@ func (c *MagicCDPClient) sendRaw(command rawCommand) (any, error) {
 		unwrap = step.Unwrap
 	}
 	return unwrapResponseIfNeeded(result, unwrap)
+}
+
+func (c *MagicCDPClient) measurePingLatency() error {
+	sentAt := time.Now().UnixMilli()
+	ch := make(chan any, 1)
+	c.On("Magic.pong", func(data any) {
+		select {
+		case ch <- data:
+		default:
+		}
+	})
+	if _, err := c.Send("Magic.ping", map[string]any{"sentAt": sentAt}); err != nil {
+		return err
+	}
+	select {
+	case payload := <-ch:
+		returnedAt := time.Now().UnixMilli()
+		latency := map[string]any{
+			"sentAt":          sentAt,
+			"receivedAt":      nil,
+			"returnedAt":      returnedAt,
+			"roundTripMs":     returnedAt - sentAt,
+			"serviceWorkerMs": nil,
+			"returnPathMs":    nil,
+		}
+		if data, ok := payload.(map[string]any); ok {
+			if receivedAt, ok := numberAsInt64(data["receivedAt"]); ok {
+				latency["receivedAt"] = receivedAt
+				latency["serviceWorkerMs"] = receivedAt - sentAt
+				latency["returnPathMs"] = returnedAt - receivedAt
+			}
+		}
+		c.Latency = latency
+		return nil
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("Magic.pong timed out")
+	}
+}
+
+func numberAsInt64(value any) (int64, bool) {
+	switch v := value.(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	default:
+		return 0, false
+	}
 }
 
 func (c *MagicCDPClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
