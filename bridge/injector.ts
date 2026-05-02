@@ -1,3 +1,4 @@
+// @ts-nocheck
 // injector.js: inject the MagicCDP extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //

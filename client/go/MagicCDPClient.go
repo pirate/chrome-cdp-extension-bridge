@@ -17,11 +17,7 @@
 // raw JSON []byte over the websocket -- no message types, no schema, no
 // dependency on chromedp/cdproto's static method enumeration.
 //
-// Package note: Go disallows two packages in one directory, so this file is
-// in `package main` alongside demo.go. To use as a library, copy this file
-// into your own package and rename `package main` to your package name.
-
-package main
+package magiccdp
 
 import (
 	"context"

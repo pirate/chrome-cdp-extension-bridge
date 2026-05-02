@@ -1,3 +1,5 @@
+/// <reference types="chrome" />
+
 import { z } from "zod";
 
 import { commands, events } from "./zod.js";
@@ -41,7 +43,7 @@ export function normalizeMagicName(value: MagicName) {
     (typeof meta?.id === "string" ? meta.id : undefined) ??
     (typeof meta?.name === "string" ? meta.name : undefined) ??
     value?.name;
-  if (typeof name !== "string" || !name) throw new Error("Expected a CDP name string or a named CDP schema/alias.");
+  if (typeof name !== "string" || !name) throw new Error("Expected a CDP name string or named CDP schema.");
   return name;
 }
 
@@ -58,15 +60,23 @@ export type MagicName = z.infer<typeof MagicNameSchema>;
 export const MagicZodTypeSchema = z.custom<z.ZodType>(isZodType);
 export type MagicZodType = z.infer<typeof MagicZodTypeSchema>;
 
+export const MagicPayloadJsonSchemaSchema = z.record(z.string(), z.unknown());
 export const MagicPayloadShapeSchema = z.record(z.string(), MagicZodTypeSchema);
 export type MagicPayloadShape = z.infer<typeof MagicPayloadShapeSchema>;
 
-export const MagicPayloadSchemaSpecSchema = z.union([MagicZodTypeSchema, MagicPayloadShapeSchema]);
+export const MagicPayloadSchemaSpecSchema = z.union([
+  MagicZodTypeSchema,
+  MagicPayloadShapeSchema,
+  MagicPayloadJsonSchemaSchema,
+]);
 export type MagicPayloadSchemaSpec = z.infer<typeof MagicPayloadSchemaSpecSchema>;
 
 export function normalizeMagicPayloadSchema(schema: MagicPayloadSchemaSpec | null | undefined) {
   if (!schema) return null;
-  return isZodType(schema) ? schema : z.object(schema).passthrough();
+  if (isZodType(schema)) return schema;
+  if (Object.values(schema).every(isZodType)) return z.object(schema as MagicPayloadShape).passthrough();
+  if (schema.type === "object") return z.object({}).passthrough();
+  return z.unknown();
 }
 
 export const MagicEvaluateParamsSchema = z.object({

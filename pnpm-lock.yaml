@@ -12,8 +12,8 @@ importers:
         specifier: ^8.18.0
         version: 8.20.0
       zod:
-        specifier: ^4.4.1
-        version: 4.4.1
+        specifier: 4.3.6
+        version: 4.3.6
     devDependencies:
       '@types/chrome':
         specifier: ^0.1.40
@@ -355,8 +355,8 @@ packages:
       utf-8-validate:
         optional: true
 
-  zod@4.4.1:
-    resolution: {integrity: sha512-a6ENMBBGZBsnlSebQ/eKCguSBeGKSf4O7BPnqVPmYGtpBYI7VSqoVqw+QcB7kPRjbqPwhYTpFbVj/RqNz/CT0Q==}
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
 
 snapshots:
 
@@ -560,4 +560,4 @@ snapshots:
 
   ws@8.20.0: {}
 
-  zod@4.4.1: {}
+  zod@4.3.6: {}

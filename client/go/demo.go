@@ -1,3 +1,5 @@
+//go:build magiccdp_demo
+
 // Go demo for MagicCDPClient. Mirrors client/js/demo.js and client/python/demo.py.
 //
 // Modes:

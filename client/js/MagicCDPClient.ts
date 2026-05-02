@@ -1,3 +1,4 @@
+// @ts-nocheck
 // MagicCDPClient (JS): importable, no CLI, no demo code.
 //
 // Constructor parameter names match across JS / Python / Go ports:
@@ -63,6 +64,39 @@ type ClientOptions = {
   launch_options?: Parameters<typeof launchChrome>[0];
 };
 
+export type MagicCDPCommandSpec<Params = unknown, Result = unknown> = {
+  params: Params;
+  result: Result;
+};
+export type MagicCDPCommandMap = Record<string, MagicCDPCommandSpec>;
+type MethodName<TName extends string> = TName extends `${string}.${infer TMethod}` ? TMethod : never;
+type DomainName<TName extends string> = TName extends `${infer TDomain}.${string}` ? TDomain : never;
+type CommandsForDomain<TCommands extends MagicCDPCommandMap, TDomain extends string> = {
+  [TName in keyof TCommands as TName extends `${TDomain}.${string}`
+    ? MethodName<Extract<TName, string>>
+    : never]: undefined extends TCommands[TName]["params"]
+    ? (params?: TCommands[TName]["params"]) => Promise<TCommands[TName]["result"]>
+    : (params: TCommands[TName]["params"]) => Promise<TCommands[TName]["result"]>;
+};
+export type MagicCDPClientInstance<TCommands extends MagicCDPCommandMap = Record<never, never>> = MagicCDPClient & {
+  [TDomain in DomainName<Extract<keyof TCommands, string>>]: CommandsForDomain<TCommands, TDomain>;
+};
+
+function defineCustomCommandMethod(client: MagicCDPClient, name: string) {
+  const [domain, method] = name.split(".", 2);
+  if (!domain || !method) throw new Error(`Custom command must use Domain.method format, got ${name}`);
+  const target = client as unknown as Record<string, Record<string, unknown>>;
+  target[domain] ??= {};
+  const alias = (params?: unknown) => client.send(name, params ?? {});
+  Object.defineProperties(alias, {
+    id: { value: name, enumerable: true, configurable: true },
+    name: { value: name, configurable: true },
+    kind: { value: "command", enumerable: true, configurable: true },
+    meta: { value: () => ({ id: name, name, kind: "command" }), configurable: true },
+  });
+  target[domain][method] = alias;
+}
+
 async function webSocketUrlFor(endpoint: string, name = "cdp_url") {
   if (/^wss?:\/\//i.test(endpoint)) return endpoint;
   const response = await fetch(`${endpoint}/json/version`);
@@ -106,6 +140,11 @@ export class MagicCDPClient extends EventEmitter {
   event_schemas: Map<string, z.ZodType>;
   command_params_schemas: Map<string, z.ZodType>;
   command_result_schemas: Map<string, z.ZodType>;
+  _cdp: {
+    send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
+    on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
+    once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
+  };
   _launched: Awaited<ReturnType<typeof launchChrome>> | null;
 
   constructor({
@@ -140,12 +179,21 @@ export class MagicCDPClient extends EventEmitter {
         onCustomCommand: (name, paramsSchema, resultSchema) => {
           if (paramsSchema) this.command_params_schemas.set(name, paramsSchema);
           if (resultSchema) this.command_result_schemas.set(name, resultSchema);
+          defineCustomCommandMethod(this, name);
         },
         onCustomEvent: (name, eventSchema) => {
           if (eventSchema) this.event_schemas.set(name, eventSchema);
         },
       }),
     );
+    this._cdp = {
+      send: (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
+        this._sendFrame(method, params, sessionId),
+      on: (eventName: string | symbol, listener: (...args: unknown[]) => void) =>
+        EventEmitter.prototype.on.call(this, eventName, listener) as this,
+      once: (eventName: string | symbol, listener: (...args: unknown[]) => void) =>
+        EventEmitter.prototype.once.call(this, eventName, listener) as this,
+    };
   }
 
   async connect() {

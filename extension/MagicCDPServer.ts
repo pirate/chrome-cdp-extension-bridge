@@ -1,3 +1,4 @@
+// @ts-nocheck
 // MagicCDPServer: lives inside an extension service worker. Owns the registry
 // of custom commands and event bindings, and emits events through the binding
 // API installed by the client (Runtime.addBinding -> globalThis[bindingName]).

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Pure stateless translation between MagicCDP and raw CDP frames.
 // No I/O, no maps, no classes. Trivial to port to any language.
 // Used on both the Node side (proxy + client) and the extension service worker

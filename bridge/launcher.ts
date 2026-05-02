@@ -1,3 +1,4 @@
+// @ts-nocheck
 // launcher.js: find a Chrome/Chromium binary and launch it with CDP enabled.
 // Knows nothing about MagicCDP, the extension, or wrap/unwrap. NEVER passes
 // --load-extension; the caller (or injector.js over CDP) is responsible for

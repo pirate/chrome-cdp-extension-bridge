@@ -1,4 +1,4 @@
-package main
+package magiccdp
 
 import (
 	"encoding/json"
