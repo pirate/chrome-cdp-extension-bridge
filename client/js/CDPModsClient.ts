@@ -359,14 +359,8 @@ export class CDPModsClient extends CDPModsEventEmitter {
 
     let ext;
     try {
-      const [{ injectExtensionIfNeeded }, { prepareExtensionPath }] = await Promise.all([
-        import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js")),
-        import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/extension-path.js")),
-      ]) as [
-        typeof import("../../bridge/injector.js"),
-        typeof import("../../bridge/extension-path.js"),
-      ];
-      this._prepared_extension = await prepareExtensionPath(this.extension_path);
+      const { injectExtensionIfNeeded } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js"))) as typeof import("../../bridge/injector.js");
+      this._prepared_extension = await this._prepareExtensionPath();
       ext = await injectExtensionIfNeeded({
         send: (method, params, session_id) => this._sendFrame(method, params, session_id),
         extension_path: this._prepared_extension.path,
@@ -516,6 +510,16 @@ export class CDPModsClient extends CDPModsEventEmitter {
         expression,
       })),
     };
+  }
+
+  async _prepareExtensionPath() {
+    if (typeof process === "object" && process?.versions?.node) {
+      const { prepareExtensionPath } = (await import(
+        /* @vite-ignore */ runtimeModuleUrl("../../bridge/extension-path.js")
+      )) as typeof import("../../bridge/extension-path.js");
+      return await prepareExtensionPath(this.extension_path);
+    }
+    return { path: this.extension_path, close: async () => {} };
   }
 
   async _installCustomEventBindings() {
