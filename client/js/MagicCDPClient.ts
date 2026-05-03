@@ -12,11 +12,9 @@
 //
 // Public methods: connect, send(method, params), on(event, handler), close.
 
-// oxlint-disable typescript-eslint/no-unsafe-declaration-merging -- alias members are assigned in the constructor.
+// oxlint-disable typescript-eslint/no-unsafe-declaration-merging -- alias members are assigned by connect().
 import type { z } from "zod";
 
-import { injectExtensionIfNeeded } from "../../bridge/injector.js";
-import { createCdpAliases } from "../../types/aliases.js";
 import type { CdpAliases } from "../../types/aliases.js";
 import {
   bindingNameFor,
@@ -46,7 +44,6 @@ import {
   normalizeMagicName,
   normalizeMagicPayloadSchema,
 } from "../../types/magic.js";
-import { events } from "../../types/zod.js";
 
 const DEFAULT_LIVE_CDP_URL = "http://127.0.0.1:9222";
 
@@ -63,6 +60,7 @@ type ClientOptions = {
   custom_commands?: Array<Record<string, unknown>>;
   custom_events?: Array<Record<string, unknown>>;
   custom_middlewares?: Array<Record<string, unknown>>;
+  hydrate_aliases?: boolean;
   service_worker_url_includes?: string[];
   service_worker_url_suffixes?: string[] | null;
   trust_service_worker_target?: boolean;
@@ -192,6 +190,14 @@ function defaultExtensionPath() {
   return "../../extension";
 }
 
+function runtimeModuleUrl(relativePath: string) {
+  const resolveUrl = new Function("relativePath", "baseUrl", "return new URL(relativePath, baseUrl).href") as (
+    relativePath: string,
+    baseUrl: string,
+  ) => string;
+  return resolveUrl(relativePath, import.meta.url);
+}
+
 export class MagicCDPClient extends MagicCDPEventEmitter {
   cdp_url: string | null;
   extension_path: string;
@@ -201,6 +207,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   custom_commands: Array<Record<string, unknown>>;
   custom_events: Array<Record<string, unknown>>;
   custom_middlewares: Array<Record<string, unknown>>;
+  hydrate_aliases: boolean;
   service_worker_url_includes: string[];
   service_worker_url_suffixes: string[] | null;
   trust_service_worker_target: boolean;
@@ -216,6 +223,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   command_params_schemas: Map<string, z.ZodType>;
   command_result_schemas: Map<string, z.ZodType>;
   self_event_listener_registered: boolean;
+  cdp_aliases_hydrated: boolean;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
     on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
@@ -231,6 +239,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     custom_commands = [],
     custom_events = [],
     custom_middlewares = [],
+    hydrate_aliases = true,
     service_worker_url_includes = [],
     service_worker_url_suffixes = null,
     trust_service_worker_target = false,
@@ -245,6 +254,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this.custom_commands = custom_commands;
     this.custom_events = custom_events;
     this.custom_middlewares = custom_middlewares;
+    this.hydrate_aliases = hydrate_aliases;
     this.service_worker_url_includes = service_worker_url_includes;
     this.service_worker_url_suffixes = service_worker_url_suffixes;
     this.trust_service_worker_target = trust_service_worker_target;
@@ -262,21 +272,9 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this.command_params_schemas = new Map();
     this.command_result_schemas = new Map();
     this.self_event_listener_registered = false;
+    this.cdp_aliases_hydrated = false;
     this._launched = null;
 
-    Object.assign(
-      this,
-      createCdpAliases((method, params) => this.send(method, params), {
-        onCustomCommand: (name, paramsSchema, resultSchema) => {
-          if (paramsSchema) this.command_params_schemas.set(name, paramsSchema);
-          if (resultSchema) this.command_result_schemas.set(name, resultSchema);
-          defineCustomCommandMethod(this, name);
-        },
-        onCustomEvent: (name, eventSchema) => {
-          if (eventSchema) this.event_schemas.set(name, eventSchema);
-        },
-      }),
-    );
     this._cdp = {
       send: (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
         this._sendFrame(method, params, sessionId),
@@ -287,6 +285,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   }
 
   async connect() {
+    await this._hydrateCdpAliases();
     if (this.self && !this.cdp_url) {
       this._ensureSelfEventListener();
       if (this.server !== null) await this.self.configure?.(this._serverConfigureParams());
@@ -298,7 +297,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
         if (typeof process !== "object" || !process?.versions?.node) {
           throw new Error("MagicCDPClient requires cdp_url when running outside Node.");
         }
-        const launcherSpecifier = new URL("../../bridge/launcher.js", import.meta.url).href;
+        const launcherSpecifier = runtimeModuleUrl("../../bridge/launcher.js");
         const importNodeOnly = new Function("specifier", "return import(specifier)") as (
           specifier: string,
         ) => Promise<{ launchChrome: (options: Record<string, unknown>) => Promise<{ wsUrl: string; close: () => Promise<void> | void }> }>;
@@ -343,6 +342,10 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
 
     let ext;
     try {
+      const importRuntime = new Function("specifier", "return import(specifier)") as (
+        specifier: string,
+      ) => Promise<typeof import("../../bridge/injector.js")>;
+      const { injectExtensionIfNeeded } = await importRuntime(runtimeModuleUrl("../../bridge/injector.js"));
       ext = await injectExtensionIfNeeded({
         send: (method, params, sessionId) => this._sendFrame(method, params, sessionId),
         extensionPath: this.extension_path,
@@ -406,6 +409,28 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       }),
     );
     return this.command_result_schemas.get(method)?.parse(result) ?? result;
+  }
+
+  async _hydrateCdpAliases() {
+    if (!this.hydrate_aliases || this.cdp_aliases_hydrated) return;
+    const importRuntime = new Function("specifier", "return import(specifier)") as (
+      specifier: string,
+    ) => Promise<typeof import("../../types/aliases.js")>;
+    const { createCdpAliases } = await importRuntime(runtimeModuleUrl("../../types/aliases.js"));
+    Object.assign(
+      this,
+      createCdpAliases((method, params) => this.send(method, params), {
+        onCustomCommand: (name, paramsSchema, resultSchema) => {
+          if (paramsSchema) this.command_params_schemas.set(name, paramsSchema);
+          if (resultSchema) this.command_result_schemas.set(name, resultSchema);
+          defineCustomCommandMethod(this, name);
+        },
+        onCustomEvent: (name, eventSchema) => {
+          if (eventSchema) this.event_schemas.set(name, eventSchema);
+        },
+      }),
+    );
+    this.cdp_aliases_hydrated = true;
   }
 
   _hydrateCustomSurface() {
@@ -603,7 +628,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       if (event.method !== "Runtime.bindingCalled") return;
       const u = unwrapEventIfNeeded(
         event.method,
-        events["Runtime.bindingCalled"].parse(event.params || {}),
+        event.params || {},
         event.sessionId || null,
         this.ext_session_id,
       );
@@ -611,8 +636,11 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       return;
     }
     if (event.method) {
-      const schema = (events as Record<string, z.ZodType | undefined>)[event.method];
-      this.emit(event.method, schema?.parse(event.params || {}) ?? event.params ?? {}, event.sessionId || null);
+      this.emit(
+        event.method,
+        this.event_schemas.get(event.method)?.parse(event.params || {}) ?? event.params ?? {},
+        event.sessionId || null,
+      );
     }
   }
 }

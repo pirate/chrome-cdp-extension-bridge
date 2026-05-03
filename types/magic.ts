@@ -2,25 +2,34 @@
 
 import { z } from "zod";
 
-import { commands, events } from "./zod.js";
-
-const zodUnion = (schemas: z.ZodType[]) => z.union(schemas as unknown as [z.ZodType, z.ZodType, ...z.ZodType[]]);
 const isZodType = (value: unknown): value is z.ZodType =>
   value != null && typeof value === "object" && typeof (value as z.ZodType).parse === "function";
 
-export const CdpCommandParamsSchema = z.lazy(() => zodUnion(Object.values(commands).map((command) => command.params)));
+export const CdpCommandParamsSchema = z.object({}).passthrough();
 export type CdpCommandParams = z.infer<typeof CdpCommandParamsSchema>;
 
-export const CdpCommandResultSchema = z.lazy(() => zodUnion(Object.values(commands).map((command) => command.result)));
+export const CdpCommandResultSchema = z.unknown();
 export type CdpCommandResult = z.infer<typeof CdpCommandResultSchema>;
 
-export const CdpEventParamsSchema = z.lazy(() => zodUnion(Object.values(events)));
+export const CdpEventParamsSchema = z.unknown();
 export type CdpEventParams = z.infer<typeof CdpEventParamsSchema>;
 
-export const RuntimeBindingCalledEventSchema = z.lazy(() => events["Runtime.bindingCalled"]);
+export const RuntimeBindingCalledEventSchema = z
+  .object({
+    name: z.string(),
+    payload: z.string(),
+    executionContextId: z.number().optional(),
+  })
+  .passthrough();
 export type RuntimeBindingCalledEvent = z.infer<typeof RuntimeBindingCalledEventSchema>;
 
-export const TargetAttachedToTargetEventSchema = z.lazy(() => events["Target.attachedToTarget"]);
+export const TargetAttachedToTargetEventSchema = z
+  .object({
+    sessionId: z.string(),
+    targetInfo: z.object({ targetId: z.string() }).passthrough(),
+    waitingForDebugger: z.boolean(),
+  })
+  .passthrough();
 export type TargetAttachedToTargetEvent = z.infer<typeof TargetAttachedToTargetEventSchema>;
 
 export const MagicRoutesSchema = z.object({}).catchall(z.string());
@@ -294,7 +303,7 @@ export type CdpCommandFrame = z.infer<typeof CdpCommandFrameSchema>;
 export const CdpResponseFrameSchema = z
   .object({
     id: z.number(),
-    result: z.lazy(() => z.union([ProtocolResultSchema, commands["Runtime.evaluate"].result])).optional(),
+    result: ProtocolResultSchema.optional(),
     error: CdpErrorSchema.optional(),
     sessionId: z.string().optional(),
   })
@@ -304,11 +313,7 @@ export type CdpResponseFrame = z.infer<typeof CdpResponseFrameSchema>;
 export const CdpEventFrameSchema = z
   .object({
     method: z.string(),
-    params: z
-      .lazy(() =>
-        z.union([ProtocolEventParamsSchema, events["Runtime.bindingCalled"], events["Target.attachedToTarget"]]),
-      )
-      .optional(),
+    params: ProtocolEventParamsSchema.optional(),
     sessionId: z.string().optional(),
   })
   .passthrough();
@@ -320,11 +325,7 @@ export type CdpFrame = z.infer<typeof CdpFrameSchema>;
 export const TranslatedStepSchema = z
   .object({
     method: z.string(),
-    params: z
-      .lazy(() =>
-        z.union([ProtocolParamsSchema, commands["Runtime.evaluate"].params, commands["Runtime.addBinding"].params]),
-      )
-      .optional(),
+    params: ProtocolParamsSchema.optional(),
     unwrap: z.literal("evaluate").optional(),
   })
   .passthrough();

@@ -81,34 +81,13 @@ export async function injectExtensionIfNeeded({
         const { sessionId } = commands["Target.attachToTarget"].result.parse(
           await sendWithTimeout("Target.attachToTarget", { targetId: trustedTarget.targetId, flatten: true }),
         );
-        const readyDeadline = Date.now() + 2_000;
-        while (Date.now() <= readyDeadline) {
-          try {
-            const probe = commands["Runtime.evaluate"].result.parse(
-              await sendWithTimeout(
-                "Runtime.evaluate",
-                {
-                  expression:
-                    "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
-                  returnByValue: true,
-                },
-                sessionId,
-                2_000,
-              ),
-            );
-            if (probe.result?.value === true) {
-              return {
-                source: "trusted",
-                extensionId: trustedTarget.url.match(EXT_ID_FROM_URL)?.[1],
-                targetId: trustedTarget.targetId,
-                url: trustedTarget.url,
-                sessionId,
-              };
-            }
-          } catch {}
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-        await send("Target.detachFromTarget", { sessionId }).catch(() => {});
+        return {
+          source: "trusted",
+          extensionId: trustedTarget.url.match(EXT_ID_FROM_URL)?.[1],
+          targetId: trustedTarget.targetId,
+          url: trustedTarget.url,
+          sessionId,
+        };
       }
     }
     for (const candidate of targetInfos) {
@@ -195,6 +174,9 @@ export async function injectExtensionIfNeeded({
           const { sessionId } = commands["Target.attachToTarget"].result.parse(
             await send("Target.attachToTarget", { targetId: target.targetId, flatten: true }),
           );
+          if (trustMatchedServiceWorker && serviceWorkerTargetMatches(target)) {
+            return { source: "injected", extensionId, targetId: target.targetId, url: target.url, sessionId };
+          }
           const probe = commands["Runtime.evaluate"].result.parse(
             await send(
               "Runtime.evaluate",
