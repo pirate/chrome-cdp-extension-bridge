@@ -2,6 +2,10 @@
   "name": "magiccdp",
   "version": "0.0.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pirate/magic-cdp.git"
+  },
   "type": "module",
   "exports": {
     ".": {

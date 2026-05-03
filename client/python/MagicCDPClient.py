@@ -36,6 +36,22 @@ MAGIC_READY_EXPRESSION = (
 DEFAULT_SERVER = object()
 
 
+class _DomainMethods:
+    def __init__(self, client, domain):
+        self._client = client
+        self._domain = domain
+
+    def __getattr__(self, method):
+        async def call(*args, **kwargs):
+            if len(args) > 1:
+                raise TypeError(f"{self._domain}.{method} accepts at most one positional params object")
+            params = dict(args[0]) if args else {}
+            params.update(kwargs)
+            return self._client.send(f"{self._domain}.{method}", params)
+
+        return call
+
+
 def websocket_url_for(endpoint: str) -> str:
     if re.match(r"^wss?://", endpoint, re.I):
         return endpoint
@@ -124,9 +140,17 @@ class MagicCDPClient:
             cdp_session_id=self.ext_session_id,
         ))
 
+    async def raw_send(self, method, params=None):
+        return self._send_frame(method, params or {})
+
     def on(self, event, handler):
         self._handlers.setdefault(event, []).append(handler)
         return self
+
+    def __getattr__(self, domain):
+        if domain.startswith("_"):
+            raise AttributeError(domain)
+        return _DomainMethods(self, domain)
 
     def close(self):
         self._closed = True
@@ -235,8 +259,9 @@ class MagicCDPClient:
                     continue
                 method = msg.get("method")
                 if method:
+                    event = {"method": method, "params": msg.get("params") or {}, "cdp_session_id": msg.get("sessionId")}
                     for h in self._handlers.get(method, []):
-                        try: h(msg.get("params") or {}, msg.get("sessionId"))
+                        try: h(event)
                         except Exception as e: print(f"[MagicCDPClient] handler error for {method}: {e}")
         except Exception as e:
             if not self._closed:

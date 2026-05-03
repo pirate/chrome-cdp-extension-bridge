@@ -33,7 +33,8 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     return globalScope.MagicCDP;
 
   const BINDING_PREFIX = "__MagicCDP_";
-  const bindingNameFor = (eventName: string) => BINDING_PREFIX + eventName.replaceAll(".", "_");
+  const bindingNameFor = (eventName: string) =>
+    BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
   const encodeBindingPayload = ({
     event,
     data,
@@ -46,6 +47,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
 
   const commandHandlers = new Map<string, MagicCustomCommandRegistration>();
   const eventBindings = new Map<string, MagicCustomEventRegistration>();
+  const eventListeners = new Set<(event: string, data: ProtocolPayload, cdpSessionId: string | null) => void>();
   const middlewares = {
     request: [],
     response: [],
@@ -68,17 +70,51 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
   const browserLevelDomains = new Set(["Browser", "Target", "SystemInfo"]);
 
   let nextLoopbackId = 1;
+  const loopbackSockets = new Map<string, WebSocket>();
+  const loopbackSocketPromises = new Map<string, Promise<WebSocket>>();
+  const initializedLoopbackSockets = new WeakSet<WebSocket>();
+  const loopbackPending = new Map<
+    number,
+    { resolve: (value: ProtocolResult) => void; reject: (error: Error) => void }
+  >();
   const offscreenKeepAlivePortName = "MagicCDPOffscreenKeepAlive";
   const offscreenKeepAlivePath = "offscreen/keepalive.html";
   let creatingOffscreenKeepAlive: Promise<void> | null = null;
   let offscreenKeepAlivePort: chrome.runtime.Port | null = null;
 
+  function registryMatch<T>(registry: Map<string, T>, name: string): T | null {
+    const exact = registry.get(name);
+    if (exact) return exact;
+    let match: T | null = null;
+    let matchPrefixLength = -1;
+    for (const [pattern, value] of registry) {
+      if (!pattern.endsWith(".*")) continue;
+      const prefix = pattern.slice(0, -1);
+      if (!name.startsWith(prefix) || prefix.length <= matchPrefixLength) continue;
+      match = value;
+      matchPrefixLength = prefix.length;
+    }
+    return match;
+  }
+
   function normalizeMagicName(
-    value: { id?: string; name?: string; meta?: () => { id?: unknown; name?: unknown } } | string,
+    value:
+      | {
+          cdp_command_name?: string;
+          cdp_event_name?: string;
+          id?: string;
+          name?: string;
+          meta?: () => { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown };
+        }
+      | string,
   ) {
     if (typeof value === "string") return value;
     const meta = typeof value?.meta === "function" ? value.meta() : undefined;
     const name =
+      value?.cdp_command_name ??
+      value?.cdp_event_name ??
+      (typeof meta?.cdp_command_name === "string" ? meta.cdp_command_name : undefined) ??
+      (typeof meta?.cdp_event_name === "string" ? meta.cdp_event_name : undefined) ??
       value?.id ??
       (typeof meta?.id === "string" ? meta.id : undefined) ??
       (typeof meta?.name === "string" ? meta.name : undefined) ??
@@ -89,6 +125,9 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
 
   async function resolveCDPEndpoint(endpoint: string | null) {
     if (!endpoint || /^wss?:\/\//i.test(endpoint)) return endpoint;
+    if (!/^https?:\/\//i.test(endpoint)) {
+      throw new Error(`loopback_cdp_url must be a ws://, wss://, http://, or https:// CDP endpoint, got ${endpoint}.`);
+    }
     const { webSocketDebuggerUrl } = await fetch(`${endpoint}/json/version`).then((r) => r.json());
     if (!webSocketDebuggerUrl) throw new Error(`loopback_cdp_url HTTP discovery returned no webSocketDebuggerUrl.`);
     return webSocketDebuggerUrl;
@@ -100,13 +139,142 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     }
     return new Promise<WebSocket>((resolve, reject) => {
       const w = new WebSocket(endpoint);
-      w.addEventListener("open", () => resolve(w), { once: true });
-      w.addEventListener("error", reject, { once: true });
+      let settled = false;
+      let errorEvent: Event | null = null;
+      const describe = (prefix: string, closeEvent?: CloseEvent) => {
+        const parts = [`${prefix} ${endpoint}`, `readyState=${w.readyState}`];
+        if (errorEvent) parts.push(`error.type=${errorEvent.type}`);
+        if (closeEvent) {
+          parts.push(`close.code=${closeEvent.code}`);
+          parts.push(`close.reason=${closeEvent.reason || ""}`);
+          parts.push(`close.wasClean=${closeEvent.wasClean}`);
+        }
+        return parts.join(" ");
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      w.addEventListener(
+        "open",
+        () => {
+          if (settled) return;
+          settled = true;
+          resolve(w);
+        },
+        { once: true },
+      );
+      w.addEventListener(
+        "error",
+        (event) => {
+          errorEvent = event;
+          setTimeout(() => fail(new Error(describe("CDP socket error"))), 250);
+        },
+        { once: true },
+      );
+      w.addEventListener("close", (event) => fail(new Error(describe("CDP socket closed", event))), { once: true });
     });
   }
 
   function startOffscreenKeepAlive() {
     void ensureOffscreenKeepAlive().catch(() => {});
+  }
+
+  function rejectLoopbackPending(error: Error) {
+    for (const pending of loopbackPending.values()) pending.reject(error);
+    loopbackPending.clear();
+  }
+
+  async function loopbackWS(endpoint: string): Promise<WebSocket> {
+    const existing = loopbackSockets.get(endpoint);
+    if (existing?.readyState === WebSocket.OPEN) return existing;
+    const pending = loopbackSocketPromises.get(endpoint);
+    if (pending) return pending;
+
+    const nextSocket = openCDPSocket(endpoint).then((ws) => {
+      loopbackSockets.set(endpoint, ws);
+      loopbackSocketPromises.delete(endpoint);
+      ws.addEventListener("message", (event) => {
+        const msg = JSON.parse(event.data);
+        const id = typeof msg.id === "number" ? msg.id : null;
+        if (id == null) {
+          const method = typeof msg.method === "string" ? msg.method : null;
+          if (!method) return;
+          const payload =
+            msg.params && typeof msg.params === "object" && !Array.isArray(msg.params)
+              ? (msg.params as ProtocolPayload)
+              : {};
+          const cdpSessionId = typeof msg.sessionId === "string" ? msg.sessionId : null;
+          void MagicCDPServer.runMiddleware("event", method, payload, {
+            cdpSessionId,
+            event: { name: method, payload },
+          })
+            .then((nextPayload) => {
+              if (nextPayload === undefined) return;
+              for (const listener of eventListeners) {
+                try {
+                  listener(method, nextPayload, cdpSessionId);
+                } catch (error) {
+                  console.error("[MagicCDPServer] event listener failed", error);
+                }
+              }
+            })
+            .catch((error) => console.error("[MagicCDPServer] loopback event listener failed", error));
+          return;
+        }
+        const pending = loopbackPending.get(id);
+        if (!pending) return;
+        loopbackPending.delete(id);
+        if (msg.error) pending.reject(new Error(msg.error.message));
+        else pending.resolve(msg.result || {});
+      });
+      ws.addEventListener("error", () => {
+        if (loopbackSockets.get(endpoint) === ws) loopbackSockets.delete(endpoint);
+        rejectLoopbackPending(new Error(`CDP socket error ${endpoint}`));
+      });
+      ws.addEventListener("close", (event) => {
+        if (loopbackSockets.get(endpoint) === ws) loopbackSockets.delete(endpoint);
+        rejectLoopbackPending(
+          new Error(
+            `CDP socket closed ${endpoint} close.code=${event.code} close.reason=${event.reason || ""} close.wasClean=${
+              event.wasClean
+            }`,
+          ),
+        );
+      });
+      return ws;
+    });
+    loopbackSocketPromises.set(endpoint, nextSocket);
+    return nextSocket;
+  }
+
+  async function callLoopbackWS(method: string, params: ProtocolParams = {}, sessionId: string | null = null) {
+    if (!MagicCDPServer.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
+    const ws = await loopbackWS(MagicCDPServer.loopback_cdp_url);
+    const id = nextLoopbackId++;
+    const message: { id: number; method: string; params: ProtocolParams; sessionId?: string } = {
+      id,
+      method,
+      params,
+    };
+    if (sessionId) message.sessionId = sessionId;
+    ws.send(JSON.stringify(message));
+    return new Promise<ProtocolResult>((resolve, reject) => {
+      loopbackPending.set(id, { resolve, reject });
+      ws.addEventListener("error", () => reject(new Error(`CDP socket error ${MagicCDPServer.loopback_cdp_url}`)), {
+        once: true,
+      });
+    });
+  }
+
+  async function initializeLoopbackCDP() {
+    if (!MagicCDPServer.loopback_cdp_url) return;
+    const ws = await loopbackWS(MagicCDPServer.loopback_cdp_url);
+    if (initializedLoopbackSockets.has(ws)) return;
+    await callLoopbackWS("Target.setAutoAttach", targetAutoAttachParams);
+    await callLoopbackWS("Target.setDiscoverTargets", { discover: true });
+    initializedLoopbackSockets.add(ws);
   }
 
   async function ensureOffscreenKeepAlive() {
@@ -149,18 +317,25 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     ensureOffscreenKeepAlive,
 
     async configure(params: MagicConfigureParams = {}) {
-      const { loopback_cdp_url = this.loopback_cdp_url, routes, browserToken = this.browserToken } = params;
+      const {
+        loopback_cdp_url = this.loopback_cdp_url,
+        routes,
+        browserToken = this.browserToken,
+        custom_commands = [],
+        custom_events = [],
+        custom_middlewares = [],
+      } = params;
       this.loopback_cdp_url = await resolveCDPEndpoint(loopback_cdp_url);
       this.browserToken = browserToken;
-      if (routes) {
-        this.routes = { ...defaultRoutes, ...routes };
-        if (!this.loopback_cdp_url && Object.values(this.routes).includes("loopback_cdp")) {
-          await this.discoverLoopbackCDP();
-        }
-      } else {
+      if (routes) this.routes = { ...defaultRoutes, ...routes };
+      else {
         this.routes = { ...defaultRoutes };
         await this.discoverLoopbackCDP();
       }
+      for (const command of custom_commands) this.addCustomCommand(command as MagicCustomCommandRegistration);
+      for (const event of custom_events) this.addCustomEvent(event as MagicCustomEventRegistration);
+      for (const middleware of custom_middlewares) this.addMiddleware(middleware as MagicMiddlewareRegistration);
+      await initializeLoopbackCDP();
       return { loopback_cdp_url: this.loopback_cdp_url, routes: this.routes };
     },
 
@@ -173,6 +348,25 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     }: MagicCustomCommandRegistration) {
       name = normalizeMagicName(name);
       if (!name || !name.includes(".")) throw new Error("name must be in Domain.method form.");
+      if (typeof handler !== "function" && typeof expression === "string") {
+        handler = async (params: ProtocolParams = {}, cdpSessionId: string | null = null, method: string = name) => {
+          const cdp = MagicCDPServer.attachToSession(cdpSessionId);
+          const MagicCDP = MagicCDPServer;
+          const chrome = globalScope.chrome;
+          const value = new Function(
+            "params",
+            "method",
+            "cdp",
+            "MagicCDP",
+            "chrome",
+            `return (async () => {
+              const handler = (${expression});
+              return typeof handler === "function" ? await handler(params || {}, method) : handler;
+            })()`,
+          );
+          return await value(params, method, cdp, MagicCDP, chrome);
+        };
+      }
       if (typeof handler !== "function") throw new Error(`Custom command ${name} was registered without a handler.`);
       commandHandlers.set(name, { name, handler, paramsSchema, resultSchema, expression });
       return { name, registered: true };
@@ -181,9 +375,14 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     addCustomEvent({ name, bindingName, eventSchema = null }: MagicCustomEventRegistration) {
       name = normalizeMagicName(name);
       if (!name || !name.includes(".")) throw new Error("name must be in Domain.event form.");
-      if (!bindingName) throw new Error(`Custom event ${name} is missing a Runtime binding name.`);
+      bindingName ??= bindingNameFor(name);
       eventBindings.set(name, { name, bindingName, eventSchema });
       return { name, bindingName, registered: true };
+    },
+
+    addEventListener(listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void) {
+      eventListeners.add(listener);
+      return { remove: () => eventListeners.delete(listener) };
     },
 
     addMiddleware({ name = "*", phase, expression = null, handler }: MagicMiddlewareRegistration) {
@@ -222,10 +421,10 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       const request = { method, params, cdpSessionId };
       params = await this.runMiddleware("request", method, params, { cdpSessionId, request });
 
-      const command = commandHandlers.get(method);
+      const command = registryMatch(commandHandlers, method);
       let result;
       if (command) {
-        result = await command.handler(params, cdpSessionId);
+        result = await command.handler(params, cdpSessionId, method);
         return this.runMiddleware("response", method, result, {
           cdpSessionId,
           request: { ...request, params },
@@ -279,7 +478,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     },
 
     async emit(eventName: string, payload: ProtocolPayload = {}, cdpSessionId: string | null = null) {
-      const event = eventBindings.get(eventName);
+      const event = registryMatch(eventBindings, eventName);
       if (!event) return { event: eventName, emitted: false, reason: "event_not_registered" };
       const binding = globalScope[event.bindingName];
       if (typeof binding !== "function") return { event: eventName, emitted: false, reason: "binding_not_installed" };
@@ -290,7 +489,14 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       });
       if (payload === undefined) return { event: eventName, emitted: false, reason: "middleware_dropped" };
 
-      binding(encodeBindingPayload({ event: eventName, data: payload, cdpSessionId }));
+      for (const listener of eventListeners) {
+        try {
+          listener(eventName, payload, cdpSessionId);
+        } catch (error) {
+          console.error("[MagicCDPServer] event listener failed", error);
+        }
+      }
+      if (typeof binding === "function") binding(encodeBindingPayload({ event: eventName, data: payload, cdpSessionId }));
       return { event: eventName, emitted: true };
     },
 
@@ -298,163 +504,109 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       if (!this.browserToken) return { loopback_cdp_url: null, verified: false };
 
       const url = "http://127.0.0.1:9222";
+      const previousLoopbackUrl = this.loopback_cdp_url;
+      const fail = (version?: unknown) => {
+        this.loopback_cdp_url = previousLoopbackUrl ?? null;
+        return { loopback_cdp_url: null, verified: false, ...(version ? { version } : {}) };
+      };
       try {
         const version = await fetch(`${url}/json/version`).then((response) => response.ok && response.json());
-        if (!version?.webSocketDebuggerUrl) return { loopback_cdp_url: null, verified: false };
+        if (!version?.webSocketDebuggerUrl) return fail();
 
-        const ws = await new Promise<WebSocket>((resolve, reject) => {
-          const w = new WebSocket(version.webSocketDebuggerUrl);
-          w.addEventListener("open", () => resolve(w), { once: true });
-          w.addEventListener("error", reject, { once: true });
-        });
-        try {
-          const callOnWs = (
-            method: string,
-            params: ProtocolParams = {},
-            sessionId: string | null = null,
-          ): Promise<ProtocolResult> => {
-            const id = nextLoopbackId++;
-            const message: { id: number; method: string; params: ProtocolParams; sessionId?: string } = {
-              id,
-              method,
-              params,
-            };
-            if (sessionId) message.sessionId = sessionId;
-            ws.send(JSON.stringify(message));
-            return new Promise((resolve, reject) => {
-              ws.addEventListener("message", (event) => {
-                const msg = JSON.parse(event.data);
-                if (msg.id !== id) return;
-                if (msg.error) reject(new Error(msg.error.message));
-                else resolve(msg.result || {});
-              });
-              ws.addEventListener("error", reject, { once: true });
-            });
-          };
+        this.loopback_cdp_url = version.webSocketDebuggerUrl;
+        const { targetInfos } = (await callLoopbackWS("Target.getTargets")) as cdp.types.ts.Target.GetTargetsResult;
+        const chromeApi = globalScope.chrome;
+        const worker = targetInfos.find(
+          (target) =>
+            target.type === "service_worker" &&
+            target.url === `chrome-extension://${chromeApi.runtime.id}/service_worker.js`,
+        );
+        if (!worker) return fail(version);
 
-          await callOnWs("Target.setAutoAttach", targetAutoAttachParams);
-          const { targetInfos } = (await callOnWs("Target.getTargets")) as cdp.types.ts.Target.GetTargetsResult;
-          const chromeApi = globalScope.chrome;
-          const worker = targetInfos.find(
-            (target) =>
-              target.type === "service_worker" &&
-              target.url === `chrome-extension://${chromeApi.runtime.id}/service_worker.js`,
-          );
-          if (!worker) return { loopback_cdp_url: null, verified: false };
+        const { sessionId } = (await callLoopbackWS("Target.attachToTarget", {
+          targetId: worker.targetId,
+          flatten: true,
+        })) as cdp.types.ts.Target.AttachToTargetResult;
+        const result = (await callLoopbackWS(
+          "Runtime.evaluate",
+          {
+            expression: `globalThis.MagicCDP?.browserToken === ${JSON.stringify(this.browserToken)}`,
+            returnByValue: true,
+          },
+          sessionId,
+        )) as cdp.types.ts.Runtime.EvaluateResult;
+        await callLoopbackWS("Target.detachFromTarget", { sessionId }).catch(() => {});
+        if (result.result?.value !== true) return fail(version);
 
-          const { sessionId } = (await callOnWs("Target.attachToTarget", {
-            targetId: worker.targetId,
-            flatten: true,
-          })) as cdp.types.ts.Target.AttachToTargetResult;
-          const result = (await callOnWs(
-            "Runtime.evaluate",
-            {
-              expression: `globalThis.MagicCDP?.browserToken === ${JSON.stringify(this.browserToken)}`,
-              returnByValue: true,
-            },
-            sessionId,
-          )) as cdp.types.ts.Runtime.EvaluateResult;
-          if (result.result?.value !== true) return { loopback_cdp_url: null, verified: false };
-
-          this.loopback_cdp_url = version.webSocketDebuggerUrl;
-          return { loopback_cdp_url: this.loopback_cdp_url, verified: true, version };
-        } finally {
-          ws.close();
-        }
+        await initializeLoopbackCDP();
+        return { loopback_cdp_url: this.loopback_cdp_url, verified: true, version };
       } catch {
-        return { loopback_cdp_url: null, verified: false };
+        return fail();
       }
     },
 
     async sendLoopback(method: string, params: ProtocolParams = {}) {
       if (!this.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
 
-      const ws = await openCDPSocket(this.loopback_cdp_url);
-      try {
-        const callOnWs = (m: string, p: ProtocolParams = {}, sid: string | null = null): Promise<ProtocolResult> => {
-          const id = nextLoopbackId++;
-          const message: { id: number; method: string; params: ProtocolParams; sessionId?: string } = {
-            id,
-            method: m,
-            params: p,
-          };
-          if (sid) message.sessionId = sid;
-          ws.send(JSON.stringify(message));
-          return new Promise((resolve, reject) => {
-            ws.addEventListener("message", (event) => {
-              const msg = JSON.parse(event.data);
-              if (msg.id !== id) return;
-              if (msg.error) reject(new Error(msg.error.message));
-              else resolve(msg.result || {});
-            });
-            ws.addEventListener("error", reject, { once: true });
-          });
-        };
-        await callOnWs("Target.setAutoAttach", targetAutoAttachParams);
+      await initializeLoopbackCDP();
 
-        const domain = method.split(".")[0] ?? "";
-        if (browserLevelDomains.has(domain)) return await callOnWs(method, params);
+      const domain = method.split(".")[0] ?? "";
+      if (browserLevelDomains.has(domain)) return await callLoopbackWS(method, params);
 
-        const {
-          debuggee = null,
-          tabId = null,
-          targetId = null,
-          extensionId = null,
-          ...commandParams
-        } = params as CdpDebuggeeCommandParams;
-        const resolvedDebuggee = debuggee || { tabId, targetId, extensionId };
-        for (const key of Object.keys(resolvedDebuggee)) {
-          if (resolvedDebuggee[key] === null || resolvedDebuggee[key] === undefined) delete resolvedDebuggee[key];
+      const {
+        debuggee = null,
+        tabId = null,
+        targetId = null,
+        extensionId = null,
+        ...commandParams
+      } = params as CdpDebuggeeCommandParams;
+      const resolvedDebuggee = debuggee || { tabId, targetId, extensionId };
+      for (const key of Object.keys(resolvedDebuggee)) {
+        if (resolvedDebuggee[key] === null || resolvedDebuggee[key] === undefined) delete resolvedDebuggee[key];
+      }
+
+      const chromeApi = globalScope.chrome;
+      let resolvedTargetId = resolvedDebuggee.targetId || null;
+      if (!resolvedTargetId) {
+        let resolvedTabId = resolvedDebuggee.tabId || null;
+        let resolvedTabUrl: string | null = null;
+        if (!resolvedTabId) {
+          const [tab] = chromeApi.tabs?.query ? await chromeApi.tabs.query({ active: true, lastFocusedWindow: true }) : [];
+          resolvedTabId = tab?.id || null;
+          resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
+        } else if (chromeApi.tabs?.get) {
+          const tab = await chromeApi.tabs.get(resolvedTabId).catch(() => null);
+          resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
         }
-
-        const chromeApi = globalScope.chrome;
-        let resolvedTargetId = resolvedDebuggee.targetId || null;
+        if (resolvedTabId && chromeApi.debugger?.getTargets) {
+          const targets = await chromeApi.debugger.getTargets();
+          resolvedTargetId = targets.find((target) => target.tabId === resolvedTabId && target.type === "page")?.id || null;
+        }
         if (!resolvedTargetId) {
-          let resolvedTabId = resolvedDebuggee.tabId || null;
-          let resolvedTabUrl: string | null = null;
-          if (!resolvedTabId) {
-            const [tab] = chromeApi.tabs?.query
-              ? await chromeApi.tabs.query({ active: true, lastFocusedWindow: true })
-              : [];
-            resolvedTabId = tab?.id || null;
-            resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
-          } else if (chromeApi.tabs?.get) {
-            const tab = await chromeApi.tabs.get(resolvedTabId).catch(() => null);
-            resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
-          }
-          if (resolvedTabId && chromeApi.debugger?.getTargets) {
-            const targets = await chromeApi.debugger.getTargets();
-            resolvedTargetId =
-              targets.find((target) => target.tabId === resolvedTabId && target.type === "page")?.id || null;
-          }
-          if (!resolvedTargetId) {
-            const { targetInfos } = (await callOnWs("Target.getTargets")) as cdp.types.ts.Target.GetTargetsResult;
-            const pageTargets = targetInfos.filter((target) => target.type === "page");
-            resolvedTargetId =
-              pageTargets.find((target) => resolvedTabUrl && target.url === resolvedTabUrl)?.targetId ||
-              pageTargets[0]?.targetId ||
-              null;
-          }
-          if (!resolvedTargetId) {
-            const created = (await callOnWs("Target.createTarget", {
-              url: "about:blank#magic-cdp",
-            })) as cdp.types.ts.Target.CreateTargetResult;
-            resolvedTargetId = created.targetId || null;
-          }
+          const { targetInfos } = (await callLoopbackWS("Target.getTargets")) as cdp.types.ts.Target.GetTargetsResult;
+          const pageTargets = targetInfos.filter((target) => target.type === "page");
+          resolvedTargetId =
+            pageTargets.find((target) => resolvedTabUrl && target.url === resolvedTabUrl)?.targetId ||
+            pageTargets[0]?.targetId ||
+            null;
         }
-        if (!resolvedTargetId) throw new Error(`loopback_cdp route for ${method} could not resolve a page target.`);
+        if (!resolvedTargetId) {
+          const created = (await callLoopbackWS("Target.createTarget", {
+            url: "about:blank#magic-cdp",
+          })) as cdp.types.ts.Target.CreateTargetResult;
+          resolvedTargetId = created.targetId || null;
+        }
+      }
+      if (!resolvedTargetId) throw new Error(`loopback_cdp route for ${method} could not resolve a page target.`);
 
-        const { sessionId } = (await callOnWs("Target.attachToTarget", {
-          targetId: resolvedTargetId,
-          flatten: true,
-        })) as cdp.types.ts.Target.AttachToTargetResult;
-        try {
-          return await callOnWs(method, commandParams, sessionId);
-        } finally {
-          await callOnWs("Target.detachFromTarget", { sessionId }).catch(() => {});
-        }
+      const { sessionId } = (await callLoopbackWS("Target.attachToTarget", {
+        targetId: resolvedTargetId,
+        flatten: true,
+      })) as cdp.types.ts.Target.AttachToTargetResult;
+      try {
+        return await callLoopbackWS(method, commandParams, sessionId);
       } finally {
-        ws.close();
+        await callLoopbackWS("Target.detachFromTarget", { sessionId }).catch(() => {});
       }
     },
 
@@ -548,6 +700,38 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
   MagicCDPServer.addCustomCommand({
     name: "Magic.configure",
     handler: async (params: MagicConfigureParams = {}) => MagicCDPServer.configure(params),
+  });
+
+  MagicCDPServer.addCustomCommand({
+    name: "Magic.evaluate",
+    handler: async ({ expression, params = {}, cdpSessionId = null }: ProtocolParams = {}) => {
+      const cdp = MagicCDPServer.attachToSession(typeof cdpSessionId === "string" ? cdpSessionId : null);
+      const MagicCDP = MagicCDPServer;
+      const chrome = globalScope.chrome;
+      const value = new Function(
+        "params",
+        "cdp",
+        "MagicCDP",
+        "chrome",
+        `return (async () => {
+          const value = (${expression});
+          return typeof value === "function" ? await value(params || {}) : value;
+        })()`,
+      );
+      return await value(params, cdp, MagicCDP, chrome);
+    },
+  });
+
+  MagicCDPServer.addCustomCommand({
+    name: "Magic.addCustomCommand",
+    handler: async (params: ProtocolParams = {}) =>
+      MagicCDPServer.addCustomCommand(params as MagicCustomCommandRegistration),
+  });
+
+  MagicCDPServer.addCustomCommand({
+    name: "Magic.addCustomEvent",
+    handler: async (params: ProtocolParams = {}) =>
+      MagicCDPServer.addCustomEvent(params as MagicCustomEventRegistration),
   });
 
   MagicCDPServer.addCustomCommand({

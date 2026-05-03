@@ -8,13 +8,14 @@
 //   routes            client-side routing dict (default { "Magic.*": "service_worker",
 //                       "Custom.*": "service_worker", "*.*": "direct_cdp" })
 //   server            { loopback_cdp_url?, routes? } passed to MagicCDPServer.configure
-//   launch_options    forwarded to launcher.launchChrome when autolaunching
+//   launch_options    forwarded to launcher.launchChrome when running in Node and autolaunching
 //
 // Public methods: connect, send(method, params), on(event, handler), close.
 
 // oxlint-disable typescript-eslint/no-unsafe-declaration-merging -- alias members are assigned in the constructor.
 import type { z } from "zod";
 
+import { injectExtensionIfNeeded } from "../../bridge/injector.js";
 import { createCdpAliases } from "../../types/aliases.js";
 import type { CdpAliases } from "../../types/aliases.js";
 import {
@@ -33,93 +34,21 @@ import type {
   MagicPingLatency,
   MagicPongEvent,
   MagicRoutes,
+  ProtocolPayload,
   ProtocolParams,
   ProtocolResult,
   TranslatedCommand,
 } from "../../types/magic.js";
-import { CdpEventFrameSchema, CdpResponseFrameSchema, Magic, normalizeMagicName } from "../../types/magic.js";
+import {
+  CdpEventFrameSchema,
+  CdpResponseFrameSchema,
+  Magic,
+  normalizeMagicName,
+  normalizeMagicPayloadSchema,
+} from "../../types/magic.js";
 import { events } from "../../types/zod.js";
 
 const DEFAULT_LIVE_CDP_URL = "http://127.0.0.1:9222";
-const LOCAL_CDP_URL_RE = /^(https?|wss?):\/\/(127\.0\.0\.1|localhost)(?::|\/|$)/iu;
-const DEFAULT_EXTENSION_PATH = import.meta.url.startsWith("file:")
-  ? decodeURIComponent(new URL("../../extension", import.meta.url).pathname)
-  : null;
-
-type Listener = (...args: unknown[]) => void;
-class MagicCDPEventEmitter {
-  _listeners = new Map<string | symbol, Set<Listener>>();
-
-  on(eventName: string | symbol, listener: Listener) {
-    let listeners = this._listeners.get(eventName);
-    if (!listeners) {
-      listeners = new Set();
-      this._listeners.set(eventName, listeners);
-    }
-    listeners.add(listener);
-    return this;
-  }
-
-  once(eventName: string | symbol, listener: Listener) {
-    const wrapped = (...args: unknown[]) => {
-      this.off(eventName, wrapped);
-      listener(...args);
-    };
-    return this.on(eventName, wrapped);
-  }
-
-  off(eventName: string | symbol, listener: Listener) {
-    this._listeners.get(eventName)?.delete(listener);
-    return this;
-  }
-
-  emit(eventName: string | symbol, ...args: unknown[]) {
-    const listeners = this._listeners.get(eventName);
-    if (!listeners) return false;
-    for (const listener of [...listeners]) listener(...args);
-    return true;
-  }
-}
-
-type LaunchOptions = Record<string, unknown>;
-type LaunchedChrome = { wsUrl: string; close: () => unknown | Promise<unknown> };
-
-async function loadNodeLauncher() {
-  const launcherUrl = new URL("../../bridge/launcher.js", import.meta.url).href;
-  return import(launcherUrl) as Promise<{
-    launchChrome: (options?: LaunchOptions) => Promise<LaunchedChrome>;
-  }>;
-}
-
-async function loadInjector() {
-  const injectorUrl = new URL("../../bridge/injector.js", import.meta.url).href;
-  return import(injectorUrl) as Promise<{
-    injectExtensionIfNeeded: (options: {
-      send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
-      extensionPath?: string | null;
-      timeoutMs?: number;
-      discoveryWaitMs?: number;
-    }) => Promise<{
-      source: string;
-      extensionId?: string | null;
-      targetId: string;
-      url: string;
-      sessionId: string;
-    }>;
-  }>;
-}
-
-function makeBrowserToken() {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
-async function messageText(data: unknown) {
-  if (typeof data === "string") return data;
-  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
-  if (ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
-  if (data && typeof (data as Blob).text === "function") return (data as Blob).text();
-  return String(data);
-}
 
 type PendingCommand = {
   method: string;
@@ -128,10 +57,21 @@ type PendingCommand = {
 };
 type ClientOptions = {
   cdp_url?: string | null;
-  extension_path?: string | null;
+  extension_path?: string;
   routes?: MagicRoutes;
   server?: MagicConfigureParams | null;
-  launch_options?: LaunchOptions;
+  custom_commands?: Array<Record<string, unknown>>;
+  custom_events?: Array<Record<string, unknown>>;
+  custom_middlewares?: Array<Record<string, unknown>>;
+  service_worker_url_includes?: string[];
+  service_worker_url_suffixes?: string[] | null;
+  trust_service_worker_target?: boolean;
+  launch_options?: Record<string, unknown>;
+  self?: {
+    addEventListener?: (listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void) => unknown;
+    configure?: (params: MagicConfigureParams) => Promise<ProtocolResult>;
+    handleCommand: (method: string, params?: ProtocolParams, cdpSessionId?: string | null) => Promise<ProtocolResult>;
+  } | null;
 };
 
 export type MagicCDPCommandSpec<Params = unknown, Result = unknown> = {
@@ -152,17 +92,68 @@ export type MagicCDPClientInstance<TCommands extends MagicCDPCommandMap = Record
   [TDomain in DomainName<Extract<keyof TCommands, string>>]: CommandsForDomain<TCommands, TDomain>;
 };
 
+class MagicCDPEventEmitter {
+  private listeners = new Map<string | symbol, Set<(...args: unknown[]) => void>>();
+
+  on(eventName: string | symbol, listener: (...args: unknown[]) => void) {
+    this.listeners.get(eventName)?.add(listener) ?? this.listeners.set(eventName, new Set([listener]));
+    return this;
+  }
+
+  once(eventName: string | symbol, listener: (...args: unknown[]) => void) {
+    const wrapped = (...args: unknown[]) => {
+      this.listeners.get(eventName)?.delete(wrapped);
+      listener(...args);
+    };
+    return this.on(eventName, wrapped);
+  }
+
+  emit(eventName: string | symbol, ...args: unknown[]) {
+    for (const listener of this.listeners.get(eventName) ?? []) listener(...args);
+    return true;
+  }
+}
+
 function defineCustomCommandMethod(client: MagicCDPClient, name: string) {
   const [domain, method] = name.split(".", 2);
   if (!domain || !method) throw new Error(`Custom command must use Domain.method format, got ${name}`);
   const target = client as unknown as Record<string, Record<string, unknown>>;
+  if (method === "*") {
+    target[domain] = new Proxy(target[domain] ?? {}, {
+      get(existing, property, receiver) {
+        if (typeof property !== "string") return Reflect.get(existing, property, receiver);
+        if (property in existing) return Reflect.get(existing, property, receiver);
+        const commandName = `${domain}.${property}`;
+        const alias = (params?: unknown) => client.send(commandName, params ?? {});
+        Object.defineProperties(alias, {
+          cdp_command_name: { value: commandName, enumerable: true, configurable: true },
+          id: { value: commandName, enumerable: true, configurable: true },
+          name: { value: commandName, configurable: true },
+          kind: { value: "command", enumerable: true, configurable: true },
+          meta: {
+            value: () => ({
+              cdp_command_name: commandName,
+              id: commandName,
+              name: commandName,
+              kind: "command",
+            }),
+            configurable: true,
+          },
+        });
+        existing[property] = alias;
+        return alias;
+      },
+    });
+    return;
+  }
   target[domain] ??= {};
   const alias = (params?: unknown) => client.send(name, params ?? {});
   Object.defineProperties(alias, {
+    cdp_command_name: { value: name, enumerable: true, configurable: true },
     id: { value: name, enumerable: true, configurable: true },
     name: { value: name, configurable: true },
     kind: { value: "command", enumerable: true, configurable: true },
-    meta: { value: () => ({ id: name, name, kind: "command" }), configurable: true },
+    meta: { value: () => ({ cdp_command_name: name, id: name, name, kind: "command" }), configurable: true },
   });
   target[domain][method] = alias;
 }
@@ -194,13 +185,27 @@ async function liveWebSocketUrlFor(endpoint = DEFAULT_LIVE_CDP_URL) {
   }
 }
 
+function defaultExtensionPath() {
+  if (typeof process === "object" && process?.versions?.node && import.meta.url.startsWith("file:")) {
+    return decodeURIComponent(new URL("../../extension", import.meta.url).pathname);
+  }
+  return "../../extension";
+}
+
 export class MagicCDPClient extends MagicCDPEventEmitter {
   cdp_url: string | null;
-  extension_path: string | null;
+  extension_path: string;
   routes: MagicRoutes;
   server: MagicConfigureParams | null;
-  launch_options: LaunchOptions;
+  launch_options: Record<string, unknown>;
+  custom_commands: Array<Record<string, unknown>>;
+  custom_events: Array<Record<string, unknown>>;
+  custom_middlewares: Array<Record<string, unknown>>;
+  service_worker_url_includes: string[];
+  service_worker_url_suffixes: string[] | null;
+  trust_service_worker_target: boolean;
   ws: WebSocket | null;
+  self: ClientOptions["self"];
   next_id: number;
   pending: Map<number, PendingCommand>;
   ext_session_id: string | null;
@@ -210,26 +215,41 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   event_schemas: Map<string, z.ZodType>;
   command_params_schemas: Map<string, z.ZodType>;
   command_result_schemas: Map<string, z.ZodType>;
+  self_event_listener_registered: boolean;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
     on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
     once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
   };
-  _launched: LaunchedChrome | null;
+  _launched: { close: () => Promise<void> | void } | null;
 
   constructor({
     cdp_url = null,
-    extension_path = DEFAULT_EXTENSION_PATH,
+    extension_path = defaultExtensionPath(),
     routes = DEFAULT_CLIENT_ROUTES,
     server = {},
+    custom_commands = [],
+    custom_events = [],
+    custom_middlewares = [],
+    service_worker_url_includes = [],
+    service_worker_url_suffixes = null,
+    trust_service_worker_target = false,
     launch_options = {},
+    self = null,
   }: ClientOptions = {}) {
     super();
     this.cdp_url = cdp_url;
     this.extension_path = extension_path;
     this.routes = { ...DEFAULT_CLIENT_ROUTES, ...routes };
     this.server = server;
+    this.custom_commands = custom_commands;
+    this.custom_events = custom_events;
+    this.custom_middlewares = custom_middlewares;
+    this.service_worker_url_includes = service_worker_url_includes;
+    this.service_worker_url_suffixes = service_worker_url_suffixes;
+    this.trust_service_worker_target = trust_service_worker_target;
     this.launch_options = launch_options;
+    this.self = self;
 
     this.ws = null;
     this.next_id = 1;
@@ -241,6 +261,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this.event_schemas = new Map();
     this.command_params_schemas = new Map();
     this.command_result_schemas = new Map();
+    this.self_event_listener_registered = false;
     this._launched = null;
 
     Object.assign(
@@ -259,53 +280,75 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this._cdp = {
       send: (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
         this._sendFrame(method, params, sessionId),
-      on: (eventName: string | symbol, listener: (...args: unknown[]) => void) =>
-        MagicCDPEventEmitter.prototype.on.call(this, eventName, listener) as this,
-      once: (eventName: string | symbol, listener: (...args: unknown[]) => void) =>
-        MagicCDPEventEmitter.prototype.once.call(this, eventName, listener) as this,
+      on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => this.on(eventName, listener),
+      once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => this.once(eventName, listener),
     };
+    this._hydrateCustomSurface();
   }
 
   async connect() {
+    if (this.self && !this.cdp_url) {
+      this._ensureSelfEventListener();
+      if (this.server !== null) await this.self.configure?.(this._serverConfigureParams());
+      return this;
+    }
     if (!this.cdp_url) {
       this.cdp_url = await liveWebSocketUrlFor();
       if (!this.cdp_url) {
-        if (!import.meta.url.startsWith("file:")) {
-          throw new Error("MagicCDPClient requires cdp_url when running in a browser; autolaunch is Node-only.");
+        if (typeof process !== "object" || !process?.versions?.node) {
+          throw new Error("MagicCDPClient requires cdp_url when running outside Node.");
         }
-        const { launchChrome } = await loadNodeLauncher();
+        const launcherSpecifier = new URL("../../bridge/launcher.js", import.meta.url).href;
+        const importNodeOnly = new Function("specifier", "return import(specifier)") as (
+          specifier: string,
+        ) => Promise<{ launchChrome: (options: Record<string, unknown>) => Promise<{ wsUrl: string; close: () => Promise<void> | void }> }>;
+        const { launchChrome } = await importNodeOnly(launcherSpecifier);
         this._launched = await launchChrome(this.launch_options);
         this.cdp_url = this._launched.wsUrl;
       }
     }
     const inputCdpUrl = this.cdp_url;
     this.cdp_url = await webSocketUrlFor(this.cdp_url);
-    if (this.server !== null && Object.hasOwn(this.server, "loopback_cdp_url") && this.server?.loopback_cdp_url) {
+    if (this.server !== null && !Object.hasOwn(this.server, "loopback_cdp_url")) {
+      this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
+    } else if (this.server?.loopback_cdp_url) {
       const loopbackUrl = this.server.loopback_cdp_url;
       if (loopbackUrl === inputCdpUrl || loopbackUrl === this.cdp_url) {
         this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
       }
-    } else if (this.server !== null && LOCAL_CDP_URL_RE.test(this.cdp_url)) {
-      this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
     }
-    if (this.server !== null && !this.server.browserToken) this.server = { ...this.server, browserToken: makeBrowserToken() };
 
     this.ws = new WebSocket(this.cdp_url);
-    this.ws.addEventListener("message", (event) => {
-      void this._onMessage(event.data);
-    });
+    this.ws.addEventListener("message", (event) => this._onMessage(event.data));
     this.ws.addEventListener("close", () => this._rejectAll(new Error("CDP websocket closed")));
     this.ws.addEventListener("error", () => this._rejectAll(new Error(`CDP websocket error`)));
     await new Promise<void>((resolve, reject) => {
-      this.ws?.addEventListener("open", () => resolve(), { once: true });
-      this.ws?.addEventListener("error", reject, { once: true });
+      this.ws.addEventListener("open", () => resolve(), { once: true });
+      this.ws.addEventListener("error", reject, { once: true });
     });
+    await Promise.all([
+      this._sendFrame("Target.setAutoAttach", {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      }),
+      this._sendFrame("Target.setDiscoverTargets", { discover: true }),
+    ]);
+
+    const serviceWorkerUrlSuffixes = await this._serviceWorkerUrlSuffixes();
+    const trustServiceWorkerTarget =
+      this.trust_service_worker_target ||
+      this.service_worker_url_includes.length > 0 ||
+      serviceWorkerUrlSuffixes.some((suffix) => suffix.split("/").filter(Boolean).length > 1);
+
     let ext;
     try {
-      const { injectExtensionIfNeeded } = await loadInjector();
       ext = await injectExtensionIfNeeded({
         send: (method, params, sessionId) => this._sendFrame(method, params, sessionId),
         extensionPath: this.extension_path,
+        serviceWorkerUrlIncludes: this.service_worker_url_includes,
+        serviceWorkerUrlSuffixes,
+        trustMatchedServiceWorker: trustServiceWorkerTarget,
       });
     } catch (error) {
       const html = `<!doctype html><title>Enable MagicCDP</title><main style="font:16px system-ui;margin:40px;max-width:820px"><h1>Enable MagicCDP</h1><p>A MagicCDP client has connected, but was unable to set up the extra Magic.* commands because extension installation over CDP is only allowed in Chrome Canary or Chromium. Google Chrome users must install the extension manually and use chrome://inspect/#remote-debugging to open CDP.</p><ol><li>Download Chrome Canary or Chromium instead. MagicCDP can auto-launch these for you.</li><li>Connect to any remote Chrome launched with:<pre>--remote-debugging-address=127.0.0.1
@@ -334,20 +377,23 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this.extension_id = ext.extensionId;
     this.ext_target_id = ext.targetId;
     this.ext_session_id = ext.sessionId;
-    await this._sendFrame("Runtime.enable", {}, this.ext_session_id);
-    await this._sendFrame("Runtime.addBinding", { name: bindingNameFor("Magic.pong") }, this.ext_session_id);
     this.event_schemas.set("Magic.pong", Magic.PongEvent);
 
-    if (this.server !== null) {
-      await this._sendRaw(
-        wrapCommandIfNeeded("Magic.configure", this.server, {
-          routes: this.routes,
-          cdpSessionId: this.ext_session_id,
-        }),
-      );
-    }
+    await Promise.all([
+      this._sendFrame("Runtime.enable", {}, this.ext_session_id),
+      this._sendFrame("Runtime.addBinding", { name: bindingNameFor("Magic.pong") }, this.ext_session_id),
+      this._installCustomEventBindings(),
+      this.server === null
+        ? Promise.resolve()
+        : this._sendRaw(
+            wrapCommandIfNeeded("Magic.configure", this._serverConfigureParams(), {
+              routes: this.routes,
+              cdpSessionId: this.ext_session_id,
+            }),
+          ),
+    ]);
 
-    await this._measurePingLatency();
+    void this._measurePingLatency().catch(() => {});
     return this;
   }
 
@@ -362,6 +408,74 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     return this.command_result_schemas.get(method)?.parse(result) ?? result;
   }
 
+  _hydrateCustomSurface() {
+    for (const command of this.custom_commands) {
+      const name = normalizeMagicName(command.name);
+      const paramsSchema = command.paramsSchema ? Magic.PayloadSchemaSpec.parse(command.paramsSchema) : null;
+      const resultSchema = command.resultSchema ? Magic.PayloadSchemaSpec.parse(command.resultSchema) : null;
+      const normalizedParamsSchema = paramsSchema == null ? null : this._normalizePayloadSchema(paramsSchema);
+      const normalizedResultSchema = resultSchema == null ? null : this._normalizePayloadSchema(resultSchema);
+      if (normalizedParamsSchema) this.command_params_schemas.set(name, normalizedParamsSchema);
+      if (normalizedResultSchema) this.command_result_schemas.set(name, normalizedResultSchema);
+      defineCustomCommandMethod(this, name);
+    }
+    for (const event of this.custom_events) {
+      const name = normalizeMagicName(event.name);
+      const eventSchema = event.eventSchema ? this._normalizePayloadSchema(event.eventSchema) : null;
+      if (eventSchema) this.event_schemas.set(name, eventSchema);
+    }
+  }
+
+  _normalizePayloadSchema(schema) {
+    return normalizeMagicPayloadSchema(Magic.PayloadSchemaSpec.parse(schema));
+  }
+
+  async _serviceWorkerUrlSuffixes() {
+    if (this.service_worker_url_suffixes != null) return this.service_worker_url_suffixes;
+    if (typeof process !== "object" || !process?.versions?.node || !this.extension_path) return [];
+    try {
+      const importNodeOnly = new Function("specifier", "return import(specifier)") as (
+        specifier: string,
+      ) => Promise<{ readFile: (path: string, encoding: string) => Promise<string> }>;
+      const { readFile } = await importNodeOnly("node:fs/promises");
+      const manifest = JSON.parse(await readFile(`${this.extension_path.replace(/\/$/u, "")}/manifest.json`, "utf8"));
+      const serviceWorker = manifest?.background?.service_worker;
+      return typeof serviceWorker === "string" && serviceWorker.length > 0 ? [`/${serviceWorker}`] : [];
+    } catch {
+      return [];
+    }
+  }
+
+  _serverConfigureParams() {
+    return {
+      ...(this.server ?? {}),
+      custom_commands: this.custom_commands.map(({ name, expression, paramsSchema, resultSchema }) => ({
+        name: normalizeMagicName(name),
+        expression,
+        paramsSchema: null,
+        resultSchema: null,
+      })),
+      custom_events: this.custom_events.map(({ name, eventSchema }) => ({
+        name: normalizeMagicName(name),
+        bindingName: bindingNameFor(normalizeMagicName(name)),
+        eventSchema: null,
+      })),
+      custom_middlewares: this.custom_middlewares.map(({ name, phase, expression }) => ({
+        ...(name == null ? {} : { name: normalizeMagicName(name) }),
+        phase,
+        expression,
+      })),
+    };
+  }
+
+  async _installCustomEventBindings() {
+    await Promise.all(
+      this.custom_events.map((event) =>
+        this._sendFrame("Runtime.addBinding", { name: bindingNameFor(normalizeMagicName(event.name)) }, this.ext_session_id),
+      ),
+    );
+  }
+
   async close() {
     try {
       await this._sendFrame("Target.detachFromTarget", { sessionId: this.ext_session_id });
@@ -373,10 +487,20 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   }
 
   on(eventName, listener) {
+    if (typeof eventName !== "string" && typeof eventName !== "symbol" && eventName?.parse) {
+      const name = normalizeMagicName(eventName);
+      this.event_schemas.set(name, eventName);
+      return super.on(name, listener);
+    }
     return super.on(typeof eventName === "symbol" ? eventName : normalizeMagicName(eventName), listener);
   }
 
   once(eventName, listener) {
+    if (typeof eventName !== "string" && typeof eventName !== "symbol" && eventName?.parse) {
+      const name = normalizeMagicName(eventName);
+      this.event_schemas.set(name, eventName);
+      return super.once(name, listener);
+    }
     return super.once(typeof eventName === "symbol" ? eventName : normalizeMagicName(eventName), listener);
   }
 
@@ -408,6 +532,13 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       const [step] = command.steps;
       return this._sendFrame(step.method, step.params ?? {});
     }
+    if (command.target === "self") {
+      if (!this.self) throw new Error(`MagicCDPClient self route requires a self server.`);
+      this._ensureSelfEventListener();
+      const [step] = command.steps;
+      const cdpSessionId = ((step.params as MagicCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
+      return await this.self.handleCommand(step.method, step.params ?? {}, cdpSessionId ?? null);
+    }
     if (command.target !== "service_worker") {
       throw new Error(`Unsupported command target "${command.target}"`);
     }
@@ -421,18 +552,22 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     return unwrapResponseIfNeeded(result, unwrap);
   }
 
+  _ensureSelfEventListener() {
+    if (!this.self || this.self_event_listener_registered) return;
+    this.self.addEventListener?.((event, data, cdpSessionId) => {
+      this.emit(event, this.event_schemas.get(event)?.parse(data) ?? data, cdpSessionId);
+    });
+    this.self_event_listener_registered = true;
+  }
+
   _sendFrame(method: string, params: ProtocolParams = {}, sessionId: string | null = null) {
+    if (!this.ws) return Promise.reject(new Error("CDP websocket is not connected."));
     const id = this.next_id++;
     const message: CdpCommandFrame = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { method, resolve, reject });
-      if (!this.ws) {
-        this.pending.delete(id);
-        reject(new Error("CDP websocket is not connected"));
-        return;
-      }
-      this.ws.send(JSON.stringify(message));
+      this.ws?.send(JSON.stringify(message));
     });
   }
 
@@ -441,10 +576,10 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this.pending.clear();
   }
 
-  async _onMessage(buf: unknown) {
+  _onMessage(buf: unknown) {
     let msg: CdpResponseFrame | CdpEventFrame;
     try {
-      const parsed = JSON.parse(await messageText(buf));
+      const parsed = JSON.parse(typeof buf === "string" ? buf : String(buf));
       msg = "id" in parsed ? CdpResponseFrameSchema.parse(parsed) : CdpEventFrameSchema.parse(parsed);
     } catch {
       return;

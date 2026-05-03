@@ -30,17 +30,30 @@ export const DEFAULT_CLIENT_ROUTES = {
 
 type TranslateOptions = { routes?: MagicRoutes; cdpSessionId?: string | null };
 
-export const bindingNameFor = (eventName: string) => BINDING_PREFIX + eventName.replaceAll(".", "_");
+export const bindingNameFor = (eventName: string) =>
+  BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
 
 export const eventNameFor = (bindingName: string) =>
   bindingName.startsWith(BINDING_PREFIX) ? bindingName.slice(BINDING_PREFIX.length).replaceAll("_", ".") : null;
 
 function normalizeMagicName(
-  value: { id?: string; name?: string; meta?: () => { id?: unknown; name?: unknown } } | string,
+  value:
+    | {
+        cdp_command_name?: string;
+        cdp_event_name?: string;
+        id?: string;
+        name?: string;
+        meta?: () => { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown };
+      }
+    | string,
 ) {
   if (typeof value === "string") return value;
   const meta = typeof value?.meta === "function" ? value.meta() : undefined;
   const name =
+    value?.cdp_command_name ??
+    value?.cdp_event_name ??
+    (typeof meta?.cdp_command_name === "string" ? meta.cdp_command_name : undefined) ??
+    (typeof meta?.cdp_event_name === "string" ? meta.cdp_event_name : undefined) ??
     value?.id ??
     (typeof meta?.id === "string" ? meta.id : undefined) ??
     (typeof meta?.name === "string" ? meta.name : undefined) ??
@@ -103,12 +116,12 @@ export function wrapMagicAddCustomCommand({
           paramsSchema: null,
           resultSchema: null,
           expression: ${JSON.stringify(expression)},
-          handler: async (params, cdpSessionId) => {
+          handler: async (params, cdpSessionId, method) => {
             const cdp = globalThis.MagicCDP.attachToSession(cdpSessionId);
             const MagicCDP = globalThis.MagicCDP;
             const chrome = globalThis.chrome;
             const handler = (${expression});
-            return await handler(params || {});
+            return await handler(params || {}, method);
           },
         });
       })()
@@ -237,6 +250,13 @@ export function wrapCommandIfNeeded(
       steps: [{ method, params }],
     };
   }
+  if (route === "self") {
+    return {
+      route,
+      target: "self",
+      steps: [{ method, params }],
+    };
+  }
   if (route === "service_worker") {
     return {
       route,
@@ -274,8 +294,6 @@ export function unwrapEventIfNeeded(
   ourSessionId: string | null = null,
 ): UnwrappedMagicEvent | null {
   if (method !== "Runtime.bindingCalled") return null;
-  const event = eventNameFor(params?.name || "");
-  if (!event) return null;
   let payload: MagicBindingPayload;
   try {
     payload = JSON.parse(params.payload || "{}");
@@ -283,6 +301,9 @@ export function unwrapEventIfNeeded(
     return null;
   }
   if (payload == null || typeof payload !== "object") return null;
+  const event =
+    typeof payload.event === "string" && payload.event.length > 0 ? payload.event : eventNameFor(params?.name || "");
+  if (!event) return null;
   if (ourSessionId != null && payload.cdpSessionId && payload.cdpSessionId !== ourSessionId) return null;
   const data = Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
   return { event, data, sessionId };

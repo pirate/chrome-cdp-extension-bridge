@@ -1,10 +1,11 @@
 // MagicCDPClient (Go): importable, no CLI, no demo code.
 //
 // Field/option names mirror the JS / Python ports:
-//   CDPURL          upstream CDP URL.
-//   ExtensionPath   extension directory.
-//   Routes          client-side routing map.
-//   Server          { LoopbackCDPURL?, Routes? } passed to MagicCDPServer.configure.
+//
+//	CDPURL          upstream CDP URL.
+//	ExtensionPath   extension directory.
+//	Routes          client-side routing map.
+//	Server          { LoopbackCDPURL?, Routes? } passed to MagicCDPServer.configure.
 //
 // Public methods: Connect, Send(method, params), On(event, handler), Close.
 // Synchronous; one background goroutine reads frames off the WS.
@@ -16,7 +17,6 @@
 // net.Conn ourselves and use wsutil.ReadServerText / WriteClientText to push
 // raw JSON []byte over the websocket -- no message types, no schema, no
 // dependency on chromedp/cdproto's static method enumeration.
-//
 package magiccdp
 
 import (
@@ -80,22 +80,33 @@ type Options struct {
 }
 
 type Handler func(data any)
+type CDPHandler func(event CDPEvent)
+
+type CDPEvent struct {
+	Method       string
+	Params       map[string]any
+	CDPSessionID string
+	TargetID     string
+}
 
 type MagicCDPClient struct {
-	opts         Options
-	conn         net.Conn
-	writeMu      sync.Mutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.Mutex
-	nextID       int64
-	pending      map[int64]chan map[string]any
-	handlers     map[string][]Handler
-	handlersMu   sync.Mutex
-	ExtensionID  string
-	ExtTargetID  string
-	ExtSessionID string
-	Latency      map[string]any
+	opts          Options
+	CDPURL        string
+	conn          net.Conn
+	writeMu       sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	nextID        int64
+	pending       map[int64]chan map[string]any
+	handlers      map[string][]Handler
+	handlersMu    sync.Mutex
+	cdpHandlers   map[string][]CDPHandler
+	cdpHandlersMu sync.Mutex
+	ExtensionID   string
+	ExtTargetID   string
+	ExtSessionID  string
+	Latency       map[string]any
 }
 
 func New(opts Options) *MagicCDPClient {
@@ -112,9 +123,10 @@ func New(opts Options) *MagicCDPClient {
 		opts.Server = &ServerConfig{}
 	}
 	return &MagicCDPClient{
-		opts:     opts,
-		pending:  map[int64]chan map[string]any{},
-		handlers: map[string][]Handler{},
+		opts:        opts,
+		pending:     map[int64]chan map[string]any{},
+		handlers:    map[string][]Handler{},
+		cdpHandlers: map[string][]CDPHandler{},
 	}
 }
 
@@ -125,6 +137,7 @@ func (c *MagicCDPClient) Connect() error {
 		return err
 	}
 	c.opts.CDPURL = wsURL
+	c.CDPURL = wsURL
 	if c.opts.Server != nil && c.opts.Server.LoopbackCDPURL == "" {
 		c.opts.Server.LoopbackCDPURL = wsURL
 	} else if c.opts.Server != nil && (c.opts.Server.LoopbackCDPURL == inputCDPURL || c.opts.Server.LoopbackCDPURL == wsURL) {
@@ -138,6 +151,18 @@ func (c *MagicCDPClient) Connect() error {
 	}
 	c.conn = conn
 	go c.reader()
+	if _, err := c.sendFrame("Target.setAutoAttach", map[string]any{
+		"autoAttach":             true,
+		"waitForDebuggerOnStart": false,
+		"flatten":                true,
+	}, ""); err != nil {
+		c.Close()
+		return err
+	}
+	if _, err := c.sendFrame("Target.setDiscoverTargets", map[string]any{"discover": true}, ""); err != nil {
+		c.Close()
+		return err
+	}
 
 	// once the reader goroutine is running, any further error must call Close
 	// to tear it down; otherwise the goroutine + ws connection leak.
@@ -194,6 +219,12 @@ func (c *MagicCDPClient) On(event string, handler Handler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
 	c.handlers[event] = append(c.handlers[event], handler)
+}
+
+func (c *MagicCDPClient) OnCDP(event string, handler CDPHandler) {
+	c.cdpHandlersMu.Lock()
+	defer c.cdpHandlersMu.Unlock()
+	c.cdpHandlers[event] = append(c.cdpHandlers[event], handler)
 }
 
 func (c *MagicCDPClient) Close() {
@@ -358,7 +389,7 @@ func (c *MagicCDPClient) reader() {
 			c.pending = map[int64]chan map[string]any{}
 			c.mu.Unlock()
 			for _, ch := range pending {
-				ch <- map[string]any{"error": map[string]any{"message": "connection closed"}}
+				ch <- map[string]any{"error": map[string]any{"message": fmt.Sprintf("connection closed: %v", err)}}
 			}
 			return
 		}
@@ -395,15 +426,39 @@ func (c *MagicCDPClient) reader() {
 			continue
 		}
 		if method != "" {
+			params, _ := msg["params"].(map[string]any)
 			c.handlersMu.Lock()
 			hs := append([]Handler(nil), c.handlers[method]...)
 			c.handlersMu.Unlock()
-			params, _ := msg["params"].(map[string]any)
 			for _, h := range hs {
 				go h(params)
 			}
+			cdpEvent := CDPEvent{
+				Method:       method,
+				Params:       params,
+				CDPSessionID: sessionID,
+				TargetID:     targetIDFromEventParams(params),
+			}
+			c.cdpHandlersMu.Lock()
+			cdpHandlers := append([]CDPHandler(nil), c.cdpHandlers["*"]...)
+			cdpHandlers = append(cdpHandlers, c.cdpHandlers[method]...)
+			c.cdpHandlersMu.Unlock()
+			for _, h := range cdpHandlers {
+				go h(cdpEvent)
+			}
 		}
 	}
+}
+
+func targetIDFromEventParams(params map[string]any) string {
+	if targetID, _ := params["targetId"].(string); targetID != "" {
+		return targetID
+	}
+	if targetInfo, _ := params["targetInfo"].(map[string]any); targetInfo != nil {
+		targetID, _ := targetInfo["targetId"].(string)
+		return targetID
+	}
+	return ""
 }
 
 func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
@@ -488,7 +543,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 		return nil, fmt.Errorf("Extensions.loadUnpacked returned no id")
 	}
 
-	swURL := fmt.Sprintf("chrome-extension://%s/service_worker.js", extID)
+	swURLPrefix := fmt.Sprintf("chrome-extension://%s/", extID)
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
@@ -498,7 +553,8 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 		targetsRaw, _ := targetsResp["targetInfos"].([]any)
 		for _, t := range targetsRaw {
 			ti, _ := t.(map[string]any)
-			if ti["type"] == "service_worker" && ti["url"] == swURL {
+			turl, _ := ti["url"].(string)
+			if ti["type"] == "service_worker" && strings.HasPrefix(turl, swURLPrefix) {
 				tid, _ := ti["targetId"].(string)
 				a, err := c.sendFrame("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
 				if err != nil {
@@ -517,7 +573,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 				if v, _ := result["value"].(bool); v {
 					return map[string]any{
 						"source": "injected", "extensionId": extID,
-						"targetId": tid, "url": swURL, "sessionId": sid,
+						"targetId": tid, "url": turl, "sessionId": sid,
 					}, nil
 				}
 				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")

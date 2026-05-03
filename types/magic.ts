@@ -30,15 +30,23 @@ export const MagicCustomPayloadSchema = z.object({}).passthrough();
 export type MagicCustomPayload = z.infer<typeof MagicCustomPayloadSchema>;
 
 export type MagicNamedValue = {
+  cdp_command_name?: string;
+  cdp_event_name?: string;
   id?: string;
   name?: string;
-  meta?: () => { id?: unknown; name?: unknown } | undefined;
+  meta?: () =>
+    | { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown }
+    | undefined;
 };
 
 export function normalizeMagicName(value: MagicName) {
   if (typeof value === "string") return value;
   const meta = typeof value?.meta === "function" ? value.meta() : undefined;
   const name =
+    value?.cdp_command_name ??
+    value?.cdp_event_name ??
+    (typeof meta?.cdp_command_name === "string" ? meta.cdp_command_name : undefined) ??
+    (typeof meta?.cdp_event_name === "string" ? meta.cdp_event_name : undefined) ??
     value?.id ??
     (typeof meta?.id === "string" ? meta.id : undefined) ??
     (typeof meta?.name === "string" ? meta.name : undefined) ??
@@ -112,6 +120,9 @@ export const MagicConfigureParamsSchema = z.object({
   loopback_cdp_url: z.string().nullable().optional(),
   routes: MagicRoutesSchema.optional(),
   browserToken: z.string().nullable().optional(),
+  custom_commands: z.array(MagicAddCustomCommandParamsSchema).optional(),
+  custom_events: z.array(MagicAddCustomEventObjectParamsSchema).optional(),
+  custom_middlewares: z.array(MagicAddMiddlewareParamsSchema).optional(),
 });
 export type MagicConfigureParams = z.infer<typeof MagicConfigureParamsSchema>;
 
@@ -238,7 +249,9 @@ export type ProtocolPayload = z.infer<typeof ProtocolPayloadSchema>;
 export const MagicCustomCommandRegistrationSchema = MagicAddCustomCommandParamsSchema.extend({
   expression: z.string().nullable().optional(),
   handler:
-    z.custom<(params: ProtocolParams, cdpSessionId: string | null) => ProtocolResult | Promise<ProtocolResult>>(),
+    z.custom<
+      (params: ProtocolParams, cdpSessionId: string | null, method?: string) => ProtocolResult | Promise<ProtocolResult>
+    >(),
 });
 export type MagicCustomCommandRegistration = z.infer<typeof MagicCustomCommandRegistrationSchema>;
 
@@ -320,7 +333,7 @@ export type TranslatedStep = z.infer<typeof TranslatedStepSchema>;
 export const TranslatedCommandSchema = z
   .object({
     route: z.string(),
-    target: z.enum(["direct_cdp", "service_worker"]),
+    target: z.enum(["direct_cdp", "service_worker", "self"]),
     steps: z.array(TranslatedStepSchema),
   })
   .passthrough();

@@ -27,6 +27,7 @@ type SendCDP = (method: string, params?: ProtocolParams, sessionId?: string | nu
 
 const bootstrapMagicCDPServerExpression = `
   (() => {
+    const __name = (fn) => fn;
     const installMagicCDPServer = ${installMagicCDPServer.toString()};
     const MagicCDP = installMagicCDPServer(globalThis);
     return {
@@ -41,11 +42,17 @@ const bootstrapMagicCDPServerExpression = `
 export async function injectExtensionIfNeeded({
   send,
   extensionPath,
+  serviceWorkerUrlIncludes = [],
+  serviceWorkerUrlSuffixes = [],
+  trustMatchedServiceWorker = false,
   timeoutMs = 10_000,
   discoveryWaitMs = 10_000,
 }: {
   send: SendCDP;
   extensionPath?: string | null;
+  serviceWorkerUrlIncludes?: string[];
+  serviceWorkerUrlSuffixes?: string[];
+  trustMatchedServiceWorker?: boolean;
   timeoutMs?: number;
   discoveryWaitMs?: number;
 }) {
@@ -68,6 +75,42 @@ export async function injectExtensionIfNeeded({
   const discoveryDeadline = Date.now() + discoveryWaitMs;
   while (Date.now() <= discoveryDeadline) {
     const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
+    if (trustMatchedServiceWorker) {
+      const trustedTarget = targetInfos.find((candidate) => serviceWorkerTargetMatches(candidate));
+      if (trustedTarget) {
+        const { sessionId } = commands["Target.attachToTarget"].result.parse(
+          await sendWithTimeout("Target.attachToTarget", { targetId: trustedTarget.targetId, flatten: true }),
+        );
+        const readyDeadline = Date.now() + 2_000;
+        while (Date.now() <= readyDeadline) {
+          try {
+            const probe = commands["Runtime.evaluate"].result.parse(
+              await sendWithTimeout(
+                "Runtime.evaluate",
+                {
+                  expression:
+                    "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+                  returnByValue: true,
+                },
+                sessionId,
+                2_000,
+              ),
+            );
+            if (probe.result?.value === true) {
+              return {
+                source: "trusted",
+                extensionId: trustedTarget.url.match(EXT_ID_FROM_URL)?.[1],
+                targetId: trustedTarget.targetId,
+                url: trustedTarget.url,
+                sessionId,
+              };
+            }
+          } catch {}
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      }
+    }
     for (const candidate of targetInfos) {
       if (candidate.type !== "service_worker") continue;
       if (!candidate.url.startsWith("chrome-extension://")) continue;
@@ -141,12 +184,13 @@ export async function injectExtensionIfNeeded({
         throw new Error(`Extensions.loadUnpacked returned no extension id (got ${JSON.stringify(loadResult)})`);
       }
 
-      // 3. Wait for the loaded extension's service worker target.
-      const swUrl = `chrome-extension://${extensionId}/service_worker.js`;
+      // 3. Wait for the loaded extension's service worker target. Custom extensions
+      // can name the worker bundle anything; WXT uses background.js.
+      const swUrlPrefix = `chrome-extension://${extensionId}/`;
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
-        const target = targetInfos.find((t) => t.type === "service_worker" && t.url === swUrl);
+        const target = targetInfos.find((t) => t.type === "service_worker" && t.url.startsWith(swUrlPrefix));
         if (target) {
           const { sessionId } = commands["Target.attachToTarget"].result.parse(
             await send("Target.attachToTarget", { targetId: target.targetId, flatten: true }),
@@ -163,7 +207,7 @@ export async function injectExtensionIfNeeded({
             ),
           );
           if (probe.result?.value === true) {
-            return { source: "injected", extensionId, targetId: target.targetId, url: swUrl, sessionId };
+            return { source: "injected", extensionId, targetId: target.targetId, url: target.url, sessionId };
           }
           await send("Target.detachFromTarget", { sessionId }).catch(() => {});
         }
@@ -171,7 +215,7 @@ export async function injectExtensionIfNeeded({
       }
       throw new Error(
         `Extensions.loadUnpacked installed extension ${extensionId} but its service worker target ` +
-          `at ${swUrl} did not appear within ${timeoutMs}ms.`,
+          `under ${swUrlPrefix} did not appear within ${timeoutMs}ms.`,
       );
     }
   }
@@ -253,4 +297,17 @@ export async function injectExtensionIfNeeded({
       `  2. Load the MagicCDP extension once at chrome://extensions and reconnect.\n` +
       (extensionPath ? `  3. For automated/test browsers, relaunch with --load-extension=${extensionPath}.\n` : ""),
   );
+
+  function serviceWorkerTargetMatches(candidate: { type?: string; url?: string }) {
+    const url = candidate.url ?? "";
+    if (candidate.type !== "service_worker") return false;
+    if (!url.startsWith("chrome-extension://")) return false;
+    if (serviceWorkerUrlIncludes.length > 0 && !serviceWorkerUrlIncludes.every((part) => url.includes(part))) {
+      return false;
+    }
+    if (serviceWorkerUrlSuffixes.length > 0 && !serviceWorkerUrlSuffixes.some((suffix) => url.endsWith(suffix))) {
+      return false;
+    }
+    return serviceWorkerUrlIncludes.length > 0 || serviceWorkerUrlSuffixes.length > 0;
+  }
 }
