@@ -152,8 +152,12 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       const { loopback_cdp_url = this.loopback_cdp_url, routes, browserToken = this.browserToken } = params;
       this.loopback_cdp_url = await resolveCDPEndpoint(loopback_cdp_url);
       this.browserToken = browserToken;
-      if (routes) this.routes = { ...defaultRoutes, ...routes };
-      else {
+      if (routes) {
+        this.routes = { ...defaultRoutes, ...routes };
+        if (!this.loopback_cdp_url && Object.values(this.routes).includes("loopback_cdp")) {
+          await this.discoverLoopbackCDP();
+        }
+      } else {
         this.routes = { ...defaultRoutes };
         await this.discoverLoopbackCDP();
       }
