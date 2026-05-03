@@ -72,11 +72,32 @@ type ServerConfig struct {
 	Routes         map[string]string `json:"routes,omitempty"`
 }
 
+type CustomEvent struct {
+	Name        string         `json:"name"`
+	EventSchema map[string]any `json:"eventSchema,omitempty"`
+}
+
+type CustomCommand struct {
+	Name         string         `json:"name"`
+	Expression   string         `json:"expression"`
+	ParamsSchema map[string]any `json:"paramsSchema,omitempty"`
+	ResultSchema map[string]any `json:"resultSchema,omitempty"`
+}
+
+type CustomMiddleware struct {
+	Name       string `json:"name,omitempty"`
+	Phase      string `json:"phase"`
+	Expression string `json:"expression"`
+}
+
 type Options struct {
-	CDPURL        string
-	ExtensionPath string
-	Routes        map[string]string
-	Server        *ServerConfig
+	CDPURL            string
+	ExtensionPath     string
+	Routes            map[string]string
+	Server            *ServerConfig
+	CustomCommands    []CustomCommand
+	CustomEvents      []CustomEvent
+	CustomMiddlewares []CustomMiddleware
 }
 
 type Handler func(data any)
@@ -90,23 +111,26 @@ type CDPEvent struct {
 }
 
 type CDPModsClient struct {
-	opts          Options
-	CDPURL        string
-	conn          net.Conn
-	writeMu       sync.Mutex
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.Mutex
-	nextID        int64
-	pending       map[int64]chan map[string]any
-	handlers      map[string][]Handler
-	handlersMu    sync.Mutex
-	cdpHandlers   map[string][]CDPHandler
-	cdpHandlersMu sync.Mutex
-	ExtensionID   string
-	ExtTargetID   string
-	ExtSessionID  string
-	Latency       map[string]any
+	opts              Options
+	CDPURL            string
+	conn              net.Conn
+	writeMu           sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	mu                sync.Mutex
+	nextID            int64
+	pending           map[int64]chan map[string]any
+	handlers          map[string][]Handler
+	handlersMu        sync.Mutex
+	cdpHandlers       map[string][]CDPHandler
+	cdpHandlersMu     sync.Mutex
+	ExtensionID       string
+	ExtTargetID       string
+	ExtSessionID      string
+	Latency           map[string]any
+	ConnectTiming     map[string]any
+	LastCommandTiming map[string]any
+	LastRawTiming     map[string]any
 }
 
 func New(opts Options) *CDPModsClient {
@@ -131,6 +155,7 @@ func New(opts Options) *CDPModsClient {
 }
 
 func (c *CDPModsClient) Connect() error {
+	connectStartedAt := time.Now().UnixMilli()
 	inputCDPURL := c.opts.CDPURL
 	wsURL, err := websocketURLFor(c.opts.CDPURL)
 	if err != nil {
@@ -171,9 +196,9 @@ func (c *CDPModsClient) Connect() error {
 		c.Close()
 		return err
 	}
-	c.ExtensionID = ext["extensionId"].(string)
-	c.ExtTargetID = ext["targetId"].(string)
-	c.ExtSessionID = ext["sessionId"].(string)
+	c.ExtensionID = ext["extension_id"].(string)
+	c.ExtTargetID = ext["target_id"].(string)
+	c.ExtSessionID = ext["session_id"].(string)
 	if _, err := c.sendFrame("Runtime.enable", map[string]any{}, c.ExtSessionID); err != nil {
 		c.Close()
 		return err
@@ -182,11 +207,53 @@ func (c *CDPModsClient) Connect() error {
 		c.Close()
 		return err
 	}
+	for _, event := range c.opts.CustomEvents {
+		if event.Name == "" {
+			continue
+		}
+		if _, err := c.sendFrame("Runtime.addBinding", map[string]any{"name": bindingNameFor(event.Name)}, c.ExtSessionID); err != nil {
+			c.Close()
+			return err
+		}
+	}
 
 	if c.opts.Server != nil {
+		customCommands := make([]map[string]any, 0, len(c.opts.CustomCommands))
+		for _, command := range c.opts.CustomCommands {
+			if command.Expression == "" {
+				continue
+			}
+			customCommands = append(customCommands, map[string]any{
+				"name":         command.Name,
+				"expression":   command.Expression,
+				"paramsSchema": command.ParamsSchema,
+				"resultSchema": command.ResultSchema,
+			})
+		}
+		customEvents := make([]map[string]any, 0, len(c.opts.CustomEvents))
+		for _, event := range c.opts.CustomEvents {
+			customEvents = append(customEvents, map[string]any{
+				"name":        event.Name,
+				"eventSchema": event.EventSchema,
+			})
+		}
+		customMiddlewares := make([]map[string]any, 0, len(c.opts.CustomMiddlewares))
+		for _, middleware := range c.opts.CustomMiddlewares {
+			item := map[string]any{
+				"phase":      middleware.Phase,
+				"expression": middleware.Expression,
+			}
+			if middleware.Name != "" {
+				item["name"] = middleware.Name
+			}
+			customMiddlewares = append(customMiddlewares, item)
+		}
 		command, err := wrapCommandIfNeeded("Mods.configure", map[string]any{
-			"loopback_cdp_url": c.opts.Server.LoopbackCDPURL,
-			"routes":           c.opts.Server.Routes,
+			"loopback_cdp_url":   c.opts.Server.LoopbackCDPURL,
+			"routes":             c.opts.Server.Routes,
+			"custom_commands":    customCommands,
+			"custom_events":      customEvents,
+			"custom_middlewares": customMiddlewares,
 		}, c.opts.Routes, c.ExtSessionID)
 		if err != nil {
 			c.Close()
@@ -201,10 +268,17 @@ func (c *CDPModsClient) Connect() error {
 		c.Close()
 		return err
 	}
+	connectedAt := time.Now().UnixMilli()
+	c.ConnectTiming = map[string]any{
+		"started_at":   connectStartedAt,
+		"connected_at": connectedAt,
+		"duration_ms":  connectedAt - connectStartedAt,
+	}
 	return nil
 }
 
 func (c *CDPModsClient) Send(method string, params map[string]any) (any, error) {
+	startedAt := time.Now().UnixMilli()
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -212,7 +286,29 @@ func (c *CDPModsClient) Send(method string, params map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	return c.sendRaw(command)
+	result, err := c.sendRaw(command)
+	completedAt := time.Now().UnixMilli()
+	c.LastCommandTiming = map[string]any{
+		"method":       method,
+		"target":       command.Target,
+		"started_at":   startedAt,
+		"completed_at": completedAt,
+		"duration_ms":  completedAt - startedAt,
+	}
+	return result, err
+}
+
+func (c *CDPModsClient) RawSend(method string, params map[string]any) (map[string]any, error) {
+	startedAt := time.Now().UnixMilli()
+	result, err := c.sendFrame(method, params, "")
+	completedAt := time.Now().UnixMilli()
+	c.LastRawTiming = map[string]any{
+		"method":       method,
+		"started_at":   startedAt,
+		"completed_at": completedAt,
+		"duration_ms":  completedAt - startedAt,
+	}
+	return result, err
 }
 
 func (c *CDPModsClient) On(event string, handler Handler) {
@@ -373,9 +469,9 @@ func (c *CDPModsClient) cdpmodsServerBootstrapExpression() (string, error) {
 const CDPMods = installCDPModsServer(globalThis);
 return {
   ok: Boolean(CDPMods?.__CDPModsServerVersion === 1 && CDPMods?.handleCommand && CDPMods?.addCustomEvent),
-  extensionId: globalThis.chrome?.runtime?.id ?? null,
-  hasTabs: Boolean(globalThis.chrome?.tabs?.query),
-  hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
+  extension_id: globalThis.chrome?.runtime?.id ?? null,
+  has_tabs: Boolean(globalThis.chrome?.tabs?.query),
+  has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
 };
 })()`, installer), nil
 }
@@ -514,8 +610,8 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 				}
 				m := extIDFromURL.FindStringSubmatch(a.URL)
 				return map[string]any{
-					"source": "discovered", "extensionId": m[1],
-					"targetId": a.TargetID, "url": a.URL, "sessionId": a.SessionID,
+					"source": "discovered", "extension_id": m[1],
+					"target_id": a.TargetID, "url": a.URL, "session_id": a.SessionID,
 				}, nil
 			}
 		}
@@ -572,8 +668,8 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 				result, _ := probe["result"].(map[string]any)
 				if v, _ := result["value"].(bool); v {
 					return map[string]any{
-						"source": "injected", "extensionId": extID,
-						"targetId": tid, "url": turl, "sessionId": sid,
+						"source": "injected", "extension_id": extID,
+						"target_id": tid, "url": turl, "session_id": sid,
 					}, nil
 				}
 				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
@@ -626,40 +722,40 @@ func (c *CDPModsClient) borrowExtensionWorker(loadError string) (map[string]any,
 			_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sessionID}, "")
 			continue
 		}
-		extensionID, _ := value["extensionId"].(string)
+		extensionID, _ := value["extension_id"].(string)
 		if extensionID == "" {
 			if m := extIDFromURL.FindStringSubmatch(turl); len(m) > 1 {
 				extensionID = m[1]
 			}
 		}
 		borrowed = append(borrowed, map[string]any{
-			"source":      "borrowed",
-			"extensionId": extensionID,
-			"targetId":    tid,
-			"url":         turl,
-			"sessionId":   sessionID,
-			"hasTabs":     value["hasTabs"],
-			"hasDebugger": value["hasDebugger"],
+			"source":       "borrowed",
+			"extension_id": extensionID,
+			"target_id":    tid,
+			"url":          turl,
+			"session_id":   sessionID,
+			"has_tabs":     value["has_tabs"],
+			"has_debugger": value["has_debugger"],
 		})
 	}
 	sort.SliceStable(borrowed, func(i, j int) bool {
-		iDebugger, _ := borrowed[i]["hasDebugger"].(bool)
-		jDebugger, _ := borrowed[j]["hasDebugger"].(bool)
+		iDebugger, _ := borrowed[i]["has_debugger"].(bool)
+		jDebugger, _ := borrowed[j]["has_debugger"].(bool)
 		if iDebugger != jDebugger {
 			return iDebugger
 		}
-		iTabs, _ := borrowed[i]["hasTabs"].(bool)
-		jTabs, _ := borrowed[j]["hasTabs"].(bool)
+		iTabs, _ := borrowed[i]["has_tabs"].(bool)
+		jTabs, _ := borrowed[j]["has_tabs"].(bool)
 		return iTabs && !jTabs
 	})
 	if len(borrowed) > 0 {
 		for _, other := range borrowed[1:] {
-			if sid, _ := other["sessionId"].(string); sid != "" {
+			if sid, _ := other["session_id"].(string); sid != "" {
 				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
 			}
 		}
-		delete(borrowed[0], "hasTabs")
-		delete(borrowed[0], "hasDebugger")
+		delete(borrowed[0], "has_tabs")
+		delete(borrowed[0], "has_debugger")
 		return borrowed[0], nil
 	}
 	return nil, fmt.Errorf(

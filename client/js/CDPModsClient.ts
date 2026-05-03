@@ -93,21 +93,26 @@ export type CDPModsClientInstance<TCommands extends CDPModsCommandMap = Record<n
 class CDPModsEventEmitter {
   private listeners = new Map<string | symbol, Set<(...args: unknown[]) => void>>();
 
-  on(eventName: string | symbol, listener: (...args: unknown[]) => void) {
-    this.listeners.get(eventName)?.add(listener) ?? this.listeners.set(eventName, new Set([listener]));
+  on(event_name: string | symbol, listener: (...args: unknown[]) => void) {
+    this.listeners.get(event_name)?.add(listener) ?? this.listeners.set(event_name, new Set([listener]));
     return this;
   }
 
-  once(eventName: string | symbol, listener: (...args: unknown[]) => void) {
+  once(event_name: string | symbol, listener: (...args: unknown[]) => void) {
     const wrapped = (...args: unknown[]) => {
-      this.listeners.get(eventName)?.delete(wrapped);
+      this.listeners.get(event_name)?.delete(wrapped);
       listener(...args);
     };
-    return this.on(eventName, wrapped);
+    return this.on(event_name, wrapped);
   }
 
-  emit(eventName: string | symbol, ...args: unknown[]) {
-    for (const listener of this.listeners.get(eventName) ?? []) listener(...args);
+  off(event_name: string | symbol, listener: (...args: unknown[]) => void) {
+    this.listeners.get(event_name)?.delete(listener);
+    return this;
+  }
+
+  emit(event_name: string | symbol, ...args: unknown[]) {
+    for (const listener of this.listeners.get(event_name) ?? []) listener(...args);
     return true;
   }
 }
@@ -121,18 +126,18 @@ function defineCustomCommandMethod(client: CDPModsClient, name: string) {
       get(existing, property, receiver) {
         if (typeof property !== "string") return Reflect.get(existing, property, receiver);
         if (property in existing) return Reflect.get(existing, property, receiver);
-        const commandName = `${domain}.${property}`;
-        const alias = (params?: unknown) => client.send(commandName, params ?? {});
+        const command_name = `${domain}.${property}`;
+        const alias = (params?: unknown) => client.send(command_name, params ?? {});
         Object.defineProperties(alias, {
-          cdp_command_name: { value: commandName, enumerable: true, configurable: true },
-          id: { value: commandName, enumerable: true, configurable: true },
-          name: { value: commandName, configurable: true },
+          cdp_command_name: { value: command_name, enumerable: true, configurable: true },
+          id: { value: command_name, enumerable: true, configurable: true },
+          name: { value: command_name, configurable: true },
           kind: { value: "command", enumerable: true, configurable: true },
           meta: {
             value: () => ({
-              cdp_command_name: commandName,
-              id: commandName,
-              name: commandName,
+              cdp_command_name: command_name,
+              id: command_name,
+              name: command_name,
               kind: "command",
             }),
             configurable: true,
@@ -158,17 +163,18 @@ function defineCustomCommandMethod(client: CDPModsClient, name: string) {
 
 async function webSocketUrlFor(endpoint: string, name = "cdp_url") {
   if (/^wss?:\/\//i.test(endpoint)) return endpoint;
-  const response = await fetch(`${endpoint}/json/version`);
+  const http_endpoint = /^[a-z][a-z\d+\-.]*:\/\//i.test(endpoint) ? endpoint : `http://${endpoint}`;
+  const response = await fetch(`${http_endpoint}/json/version`);
   if (!response.ok) {
     if (response.status === 404) {
-      const url = new URL(endpoint);
+      const url = new URL(http_endpoint);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.pathname = "/devtools/browser";
       url.search = "";
       url.hash = "";
       return url.toString();
     }
-    throw new Error(`GET ${endpoint}/json/version -> ${response.status}`);
+    throw new Error(`GET ${http_endpoint}/json/version -> ${response.status}`);
   }
   const { webSocketDebuggerUrl } = await response.json();
   if (!webSocketDebuggerUrl) throw new Error(`${name} HTTP discovery returned no webSocketDebuggerUrl`);
@@ -190,12 +196,8 @@ function defaultExtensionPath() {
   return "../../extension";
 }
 
-function runtimeModuleUrl(relativePath: string) {
-  const resolveUrl = new Function("relativePath", "baseUrl", "return new URL(relativePath, baseUrl).href") as (
-    relativePath: string,
-    baseUrl: string,
-  ) => string;
-  return resolveUrl(relativePath, import.meta.url);
+function runtimeModuleUrl(relative_path: string) {
+  return new URL(relative_path, import.meta.url).href;
 }
 
 export class CDPModsClient extends CDPModsEventEmitter {
@@ -219,11 +221,16 @@ export class CDPModsClient extends CDPModsEventEmitter {
   ext_target_id: string | null;
   extension_id: string | null;
   latency: CDPModsPingLatency | null;
+  connect_timing: Record<string, unknown> | null;
+  last_command_timing: Record<string, unknown> | null;
+  last_raw_timing: Record<string, unknown> | null;
   event_schemas: Map<string, z.ZodType>;
   command_params_schemas: Map<string, z.ZodType>;
   command_result_schemas: Map<string, z.ZodType>;
   self_event_listener_registered: boolean;
   cdp_aliases_hydrated: boolean;
+  event_wait_cleanups: Set<() => void>;
+  _prepared_extension: { path: string; close: () => Promise<void> } | null;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
     on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModsClient;
@@ -268,27 +275,39 @@ export class CDPModsClient extends CDPModsEventEmitter {
     this.ext_target_id = null;
     this.extension_id = null;
     this.latency = null;
+    this.connect_timing = null;
+    this.last_command_timing = null;
+    this.last_raw_timing = null;
     this.event_schemas = new Map();
     this.command_params_schemas = new Map();
     this.command_result_schemas = new Map();
     this.self_event_listener_registered = false;
     this.cdp_aliases_hydrated = false;
+    this.event_wait_cleanups = new Set();
+    this._prepared_extension = null;
     this._launched = null;
 
     this._cdp = {
-      send: (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
-        this._sendFrame(method, params, sessionId),
-      on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => this.on(eventName, listener),
-      once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => this.once(eventName, listener),
+      send: (method: string, params: ProtocolParams = {}, session_id: string | null = null) =>
+        this._sendFrame(method, params, session_id, { record_raw_timing: true }),
+      on: (event_name: string | symbol, listener: (...args: unknown[]) => void) => this.on(event_name, listener),
+      once: (event_name: string | symbol, listener: (...args: unknown[]) => void) => this.once(event_name, listener),
     };
     this._hydrateCustomSurface();
   }
 
   async connect() {
+    const connect_started_at = Date.now();
     await this._hydrateCdpAliases();
     if (this.self && !this.cdp_url) {
       this._ensureSelfEventListener();
       if (this.server !== null) await this.self.configure?.(this._serverConfigureParams());
+      const connected_at = Date.now();
+      this.connect_timing = {
+        started_at: connect_started_at,
+        connected_at,
+        duration_ms: connected_at - connect_started_at,
+      };
       return this;
     }
     if (!this.cdp_url) {
@@ -297,22 +316,20 @@ export class CDPModsClient extends CDPModsEventEmitter {
         if (typeof process !== "object" || !process?.versions?.node) {
           throw new Error("CDPModsClient requires cdp_url when running outside Node.");
         }
-        const launcherSpecifier = runtimeModuleUrl("../../bridge/launcher.js");
-        const importNodeOnly = new Function("specifier", "return import(specifier)") as (
-          specifier: string,
-        ) => Promise<{ launchChrome: (options: Record<string, unknown>) => Promise<{ wsUrl: string; close: () => Promise<void> | void }> }>;
-        const { launchChrome } = await importNodeOnly(launcherSpecifier);
+        const { launchChrome } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/launcher.js"))) as {
+          launchChrome: (options: Record<string, unknown>) => Promise<{ wsUrl: string; close: () => Promise<void> | void }>;
+        };
         this._launched = await launchChrome(this.launch_options);
         this.cdp_url = this._launched.wsUrl;
       }
     }
-    const inputCdpUrl = this.cdp_url;
+    const input_cdp_url = this.cdp_url;
     this.cdp_url = await webSocketUrlFor(this.cdp_url);
     if (this.server !== null && !Object.hasOwn(this.server, "loopback_cdp_url")) {
       this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
     } else if (this.server?.loopback_cdp_url) {
-      const loopbackUrl = this.server.loopback_cdp_url;
-      if (loopbackUrl === inputCdpUrl || loopbackUrl === this.cdp_url) {
+      const loopback_url = this.server.loopback_cdp_url;
+      if (loopback_url === input_cdp_url || loopback_url === this.cdp_url) {
         this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
       }
     }
@@ -334,34 +351,38 @@ export class CDPModsClient extends CDPModsEventEmitter {
       this._sendFrame("Target.setDiscoverTargets", { discover: true }),
     ]);
 
-    const serviceWorkerUrlSuffixes = await this._serviceWorkerUrlSuffixes();
-    const trustServiceWorkerTarget =
+    const service_worker_url_suffixes = await this._serviceWorkerUrlSuffixes();
+    const trust_service_worker_target =
       this.trust_service_worker_target ||
       this.service_worker_url_includes.length > 0 ||
-      serviceWorkerUrlSuffixes.some((suffix) => suffix.split("/").filter(Boolean).length > 1);
+      service_worker_url_suffixes.some((suffix) => suffix.split("/").filter(Boolean).length > 1);
 
     let ext;
     try {
-      const importRuntime = new Function("specifier", "return import(specifier)") as (
-        specifier: string,
-      ) => Promise<typeof import("../../bridge/injector.js")>;
-      const { injectExtensionIfNeeded } = await importRuntime(runtimeModuleUrl("../../bridge/injector.js"));
+      const [{ injectExtensionIfNeeded }, { prepareExtensionPath }] = await Promise.all([
+        import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js")),
+        import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/extension-path.js")),
+      ]) as [
+        typeof import("../../bridge/injector.js"),
+        typeof import("../../bridge/extension-path.js"),
+      ];
+      this._prepared_extension = await prepareExtensionPath(this.extension_path);
       ext = await injectExtensionIfNeeded({
-        send: (method, params, sessionId) => this._sendFrame(method, params, sessionId),
-        extensionPath: this.extension_path,
-        serviceWorkerUrlIncludes: this.service_worker_url_includes,
-        serviceWorkerUrlSuffixes,
-        trustMatchedServiceWorker: trustServiceWorkerTarget,
+        send: (method, params, session_id) => this._sendFrame(method, params, session_id),
+        extension_path: this._prepared_extension.path,
+        service_worker_url_includes: this.service_worker_url_includes,
+        service_worker_url_suffixes,
+        trust_matched_service_worker: trust_service_worker_target,
       });
     } catch (error) {
       const html = `<!doctype html><title>Enable CDPMods</title><main style="font:16px system-ui;margin:40px;max-width:820px"><h1>Enable CDPMods</h1><p>A CDPMods client has connected, but was unable to set up the extra Mods.* commands because extension installation over CDP is only allowed in Chrome Canary or Chromium. Google Chrome users must install the extension manually and use chrome://inspect/#remote-debugging to open CDP.</p><ol><li>Download Chrome Canary or Chromium instead. CDPMods can auto-launch these for you.</li><li>Connect to any remote Chrome launched with:<pre>--remote-debugging-address=127.0.0.1
 --remote-debugging-port=9222
 --enable-unsafe-extension-debugging
---remote-allow-origins=*</pre></li><li>Install the extension manually via chrome://extensions/ &gt; Developer mode &gt; Load unpacked &gt; cdpmods.zip<br><code>${this.extension_path}</code></li></ol></main>`;
+--remote-allow-origins=*</pre></li><li>Install the extension manually via chrome://extensions &gt; Developer mode &gt; Load unpacked &gt; cdpmods.zip<br><code>${this.extension_path}</code></li></ol></main>`;
       try {
-        const { targetId } = (await this._sendFrame("Target.createTarget", { url: "about:blank" })) as any;
-        const { sessionId } = (await this._sendFrame("Target.attachToTarget", {
-          targetId,
+        const { targetId: target_id } = (await this._sendFrame("Target.createTarget", { url: "about:blank" })) as any;
+        const { sessionId: session_id } = (await this._sendFrame("Target.attachToTarget", {
+          targetId: target_id,
           flatten: true,
         })) as any;
         await this._sendFrame(
@@ -370,16 +391,16 @@ export class CDPModsClient extends CDPModsEventEmitter {
             expression: `document.open();document.write(${JSON.stringify(html)});document.close();`,
             returnByValue: true,
           },
-          sessionId as string,
+          session_id as string,
         );
-        await this._sendFrame("Page.bringToFront", {}, sessionId as string);
-        await this._sendFrame("Target.detachFromTarget", { sessionId });
+        await this._sendFrame("Page.bringToFront", {}, session_id as string);
+        await this._sendFrame("Target.detachFromTarget", { sessionId: session_id });
       } catch {}
       throw error;
     }
-    this.extension_id = ext.extensionId;
-    this.ext_target_id = ext.targetId;
-    this.ext_session_id = ext.sessionId;
+    this.extension_id = ext.extension_id;
+    this.ext_target_id = ext.target_id;
+    this.ext_session_id = ext.session_id;
     this.event_schemas.set("Mods.pong", Mods.PongEvent);
 
     await Promise.all([
@@ -397,26 +418,39 @@ export class CDPModsClient extends CDPModsEventEmitter {
     ]);
 
     void this._measurePingLatency().catch(() => {});
+    const connected_at = Date.now();
+    this.connect_timing = {
+      started_at: connect_started_at,
+      connected_at,
+      duration_ms: connected_at - connect_started_at,
+    };
     return this;
   }
 
   async send(method: string, params: unknown = {}) {
-    const commandParams = this.command_params_schemas.get(method)?.parse(params ?? {}) ?? params ?? {};
-    const result = await this._sendRaw(
-      wrapCommandIfNeeded(method, commandParams as ProtocolParams, {
-        routes: this.routes,
-        cdpSessionId: this.ext_session_id,
-      }),
-    );
+    const started_at = Date.now();
+    const command_params = this.command_params_schemas.get(method)?.parse(params ?? {}) ?? params ?? {};
+    const command = wrapCommandIfNeeded(method, command_params as ProtocolParams, {
+      routes: this.routes,
+      cdpSessionId: this.ext_session_id,
+    });
+    const result = await this._sendRaw(command);
+    const completed_at = Date.now();
+    this.last_command_timing = {
+      method,
+      target: command.target,
+      started_at,
+      completed_at,
+      duration_ms: completed_at - started_at,
+    };
     return this.command_result_schemas.get(method)?.parse(result) ?? result;
   }
 
   async _hydrateCdpAliases() {
     if (!this.hydrate_aliases || this.cdp_aliases_hydrated) return;
-    const importRuntime = new Function("specifier", "return import(specifier)") as (
-      specifier: string,
-    ) => Promise<typeof import("../../types/aliases.js")>;
-    const { createCdpAliases } = await importRuntime(runtimeModuleUrl("../../types/aliases.js"));
+    const { createCdpAliases } = (await import(
+      /* @vite-ignore */ runtimeModuleUrl("../../types/aliases.js")
+    )) as typeof import("../../types/aliases.js");
     Object.assign(
       this,
       createCdpAliases((method, params) => this.send(method, params), {
@@ -438,10 +472,10 @@ export class CDPModsClient extends CDPModsEventEmitter {
       const name = normalizeCDPModsName(command.name);
       const paramsSchema = command.paramsSchema ? Mods.PayloadSchemaSpec.parse(command.paramsSchema) : null;
       const resultSchema = command.resultSchema ? Mods.PayloadSchemaSpec.parse(command.resultSchema) : null;
-      const normalizedParamsSchema = paramsSchema == null ? null : this._normalizePayloadSchema(paramsSchema);
-      const normalizedResultSchema = resultSchema == null ? null : this._normalizePayloadSchema(resultSchema);
-      if (normalizedParamsSchema) this.command_params_schemas.set(name, normalizedParamsSchema);
-      if (normalizedResultSchema) this.command_result_schemas.set(name, normalizedResultSchema);
+      const normalized_params_schema = paramsSchema == null ? null : this._normalizePayloadSchema(paramsSchema);
+      const normalized_result_schema = resultSchema == null ? null : this._normalizePayloadSchema(resultSchema);
+      if (normalized_params_schema) this.command_params_schemas.set(name, normalized_params_schema);
+      if (normalized_result_schema) this.command_result_schemas.set(name, normalized_result_schema);
       defineCustomCommandMethod(this, name);
     }
     for (const event of this.custom_events) {
@@ -457,29 +491,20 @@ export class CDPModsClient extends CDPModsEventEmitter {
 
   async _serviceWorkerUrlSuffixes() {
     if (this.service_worker_url_suffixes != null) return this.service_worker_url_suffixes;
-    if (typeof process !== "object" || !process?.versions?.node || !this.extension_path) return [];
-    try {
-      const importNodeOnly = new Function("specifier", "return import(specifier)") as (
-        specifier: string,
-      ) => Promise<{ readFile: (path: string, encoding: string) => Promise<string> }>;
-      const { readFile } = await importNodeOnly("node:fs/promises");
-      const manifest = JSON.parse(await readFile(`${this.extension_path.replace(/\/$/u, "")}/manifest.json`, "utf8"));
-      const serviceWorker = manifest?.background?.service_worker;
-      return typeof serviceWorker === "string" && serviceWorker.length > 0 ? [`/${serviceWorker}`] : [];
-    } catch {
-      return [];
-    }
+    return ["/service_worker.js", "/background.js"];
   }
 
   _serverConfigureParams() {
     return {
       ...(this.server ?? {}),
-      custom_commands: this.custom_commands.map(({ name, expression, paramsSchema, resultSchema }) => ({
-        name: normalizeCDPModsName(name),
-        expression,
-        paramsSchema: null,
-        resultSchema: null,
-      })),
+      custom_commands: this.custom_commands
+        .filter((command) => typeof command.expression === "string" && command.expression.length > 0)
+        .map(({ name, expression, paramsSchema, resultSchema }) => ({
+          name: normalizeCDPModsName(name),
+          expression,
+          paramsSchema: null,
+          resultSchema: null,
+        })),
       custom_events: this.custom_events.map(({ name, eventSchema }) => ({
         name: normalizeCDPModsName(name),
         bindingName: bindingNameFor(normalizeCDPModsName(name)),
@@ -502,54 +527,91 @@ export class CDPModsClient extends CDPModsEventEmitter {
   }
 
   async close() {
+    for (const cleanup of this.event_wait_cleanups) cleanup();
+    this.event_wait_cleanups.clear();
     try {
       await this._sendFrame("Target.detachFromTarget", { sessionId: this.ext_session_id });
     } catch {}
     try {
       this.ws?.close();
     } catch {}
+    if (this._prepared_extension) await this._prepared_extension.close();
+    this._prepared_extension = null;
     if (this._launched) await this._launched.close();
   }
 
-  on(eventName, listener) {
-    if (typeof eventName !== "string" && typeof eventName !== "symbol" && eventName?.parse) {
-      const name = normalizeCDPModsName(eventName);
-      this.event_schemas.set(name, eventName);
+  on(event_name, listener) {
+    if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
+      const name = normalizeCDPModsName(event_name);
+      this.event_schemas.set(name, event_name);
       return super.on(name, listener);
     }
-    return super.on(typeof eventName === "symbol" ? eventName : normalizeCDPModsName(eventName), listener);
+    return super.on(typeof event_name === "symbol" ? event_name : normalizeCDPModsName(event_name), listener);
   }
 
-  once(eventName, listener) {
-    if (typeof eventName !== "string" && typeof eventName !== "symbol" && eventName?.parse) {
-      const name = normalizeCDPModsName(eventName);
-      this.event_schemas.set(name, eventName);
+  once(event_name, listener) {
+    if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
+      const name = normalizeCDPModsName(event_name);
+      this.event_schemas.set(name, event_name);
       return super.once(name, listener);
     }
-    return super.once(typeof eventName === "symbol" ? eventName : normalizeCDPModsName(eventName), listener);
+    return super.once(typeof event_name === "symbol" ? event_name : normalizeCDPModsName(event_name), listener);
+  }
+
+  off(event_name, listener) {
+    if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
+      return super.off(normalizeCDPModsName(event_name), listener);
+    }
+    return super.off(typeof event_name === "symbol" ? event_name : normalizeCDPModsName(event_name), listener);
+  }
+
+  _waitForEvent(event_name, { timeout_ms = 10_000 } = {}) {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let cancel: () => void = () => {};
+    let listener: (...args: unknown[]) => void = () => {};
+    const promise = new Promise((resolve) => {
+      const cleanup = () => {
+        if (timeout != null) clearTimeout(timeout);
+        timeout = null;
+        this.off(event_name, listener);
+        this.event_wait_cleanups.delete(cancel);
+      };
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      cancel = () => finish(null);
+      listener = (payload) => finish(payload || {});
+      this.event_wait_cleanups.add(cancel);
+      this.on(event_name, listener);
+      timeout = setTimeout(() => finish(null), timeout_ms);
+    });
+    return { promise, cancel };
   }
 
   async _measurePingLatency() {
     const sentAt = Date.now();
-    const pong = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Mods.pong timed out")), 10_000);
-      this.once("Mods.pong", (payload) => {
-        clearTimeout(timeout);
-        resolve(payload || {});
-      });
-    });
-    await this.send("Mods.ping", { sentAt });
-    const payload = (await pong) as CDPModsPongEvent;
-    const returnedAt = Date.now();
-    this.latency = {
-      sentAt,
-      receivedAt: payload.receivedAt ?? null,
-      returnedAt,
-      roundTripMs: returnedAt - sentAt,
-      serviceWorkerMs: typeof payload.receivedAt === "number" ? payload.receivedAt - sentAt : null,
-      returnPathMs: typeof payload.receivedAt === "number" ? returnedAt - payload.receivedAt : null,
-    };
-    return this.latency;
+    const pong = this._waitForEvent("Mods.pong");
+    try {
+      await this.send("Mods.ping", { sentAt });
+      const payload = (await pong.promise) as CDPModsPongEvent | null;
+      if (payload == null) return this.latency;
+      const returnedAt = Date.now();
+      this.latency = {
+        sentAt,
+        receivedAt: payload.receivedAt ?? null,
+        returnedAt,
+        roundTripMs: returnedAt - sentAt,
+        serviceWorkerMs: typeof payload.receivedAt === "number" ? payload.receivedAt - sentAt : null,
+        returnPathMs: typeof payload.receivedAt === "number" ? returnedAt - payload.receivedAt : null,
+      };
+      return this.latency;
+    } finally {
+      pong.cancel();
+    }
   }
 
   async _sendRaw(command: TranslatedCommand) {
@@ -561,8 +623,8 @@ export class CDPModsClient extends CDPModsEventEmitter {
       if (!this.self) throw new Error(`CDPModsClient self route requires a self server.`);
       this._ensureSelfEventListener();
       const [step] = command.steps;
-      const cdpSessionId = ((step.params as CDPModsCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
-      return await this.self.handleCommand(step.method, step.params ?? {}, cdpSessionId ?? null);
+      const cdp_session_id = ((step.params as CDPModsCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
+      return await this.self.handleCommand(step.method, step.params ?? {}, cdp_session_id ?? null);
     }
     if (command.target !== "service_worker") {
       throw new Error(`Unsupported command target "${command.target}"`);
@@ -579,19 +641,40 @@ export class CDPModsClient extends CDPModsEventEmitter {
 
   _ensureSelfEventListener() {
     if (!this.self || this.self_event_listener_registered) return;
-    this.self.addEventListener?.((event, data, cdpSessionId) => {
-      this.emit(event, this.event_schemas.get(event)?.parse(data) ?? data, cdpSessionId);
+    this.self.addEventListener?.((event, data, cdp_session_id) => {
+      this.emit(event, this.event_schemas.get(event)?.parse(data) ?? data, cdp_session_id);
     });
     this.self_event_listener_registered = true;
   }
 
-  _sendFrame(method: string, params: ProtocolParams = {}, sessionId: string | null = null) {
+  _sendFrame(
+    method: string,
+    params: ProtocolParams = {},
+    session_id: string | null = null,
+    options: { record_raw_timing?: boolean } = {},
+  ) {
     if (!this.ws) return Promise.reject(new Error("CDP websocket is not connected."));
     const id = this.next_id++;
+    const started_at = Date.now();
     const message: CdpCommandFrame = { id, method, params };
-    if (sessionId) message.sessionId = sessionId;
+    if (session_id) message.sessionId = session_id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
+      this.pending.set(id, {
+        method,
+        resolve: (value: ProtocolResult) => {
+          if (options.record_raw_timing) {
+            const completed_at = Date.now();
+            this.last_raw_timing = {
+              method,
+              started_at,
+              completed_at,
+              duration_ms: completed_at - started_at,
+            };
+          }
+          resolve(value);
+        },
+        reject,
+      });
       this.ws?.send(JSON.stringify(message));
     });
   }

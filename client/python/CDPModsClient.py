@@ -74,25 +74,40 @@ def cdpmods_server_bootstrap_expression(extension_path: str) -> str:
         "const CDPMods = installCDPModsServer(globalThis);\n"
         "return {\n"
         "  ok: Boolean(CDPMods?.__CDPModsServerVersion === 1 && CDPMods?.handleCommand && CDPMods?.addCustomEvent),\n"
-        "  extensionId: globalThis.chrome?.runtime?.id ?? null,\n"
-        "  hasTabs: Boolean(globalThis.chrome?.tabs?.query),\n"
-        "  hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),\n"
+        "  extension_id: globalThis.chrome?.runtime?.id ?? null,\n"
+        "  has_tabs: Boolean(globalThis.chrome?.tabs?.query),\n"
+        "  has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),\n"
         "};\n"
         "})()"
     )
 
 
 class CDPModsClient:
-    def __init__(self, cdp_url, extension_path, routes=None, server=DEFAULT_SERVER):
+    def __init__(
+        self,
+        cdp_url,
+        extension_path,
+        routes=None,
+        server=DEFAULT_SERVER,
+        custom_commands=None,
+        custom_events=None,
+        custom_middlewares=None,
+    ):
         self.cdp_url = cdp_url
         self.extension_path = extension_path
         self.routes = {**DEFAULT_CLIENT_ROUTES, **(routes or {})}
         self.server = {} if server is DEFAULT_SERVER else server
+        self.custom_commands = list(custom_commands or [])
+        self.custom_events = list(custom_events or [])
+        self.custom_middlewares = list(custom_middlewares or [])
 
         self.extension_id = None
         self.ext_target_id = None
         self.ext_session_id = None
         self.latency = None
+        self.connect_timing = None
+        self.last_command_timing = None
+        self.last_raw_timing = None
 
         self._ws = None
         self._next_id = 0
@@ -103,6 +118,7 @@ class CDPModsClient:
         self._closed = False
 
     def connect(self):
+        connect_started_at = int(time.time() * 1000)
         input_cdp_url = self.cdp_url
         self.cdp_url = websocket_url_for(self.cdp_url)
         if self.server is not None and "loopback_cdp_url" not in self.server:
@@ -115,33 +131,88 @@ class CDPModsClient:
         self._reader_thread = threading.Thread(target=self._reader, daemon=True)
         self._reader_thread.start()
 
+        self._send_frame("Target.setAutoAttach", {
+            "autoAttach": True,
+            "waitForDebuggerOnStart": False,
+            "flatten": True,
+        })
+        self._send_frame("Target.setDiscoverTargets", {"discover": True})
+
         ext = self._ensure_extension()
-        self.extension_id = ext["extensionId"]
-        self.ext_target_id = ext["targetId"]
-        self.ext_session_id = ext["sessionId"]
+        self.extension_id = ext["extension_id"]
+        self.ext_target_id = ext["target_id"]
+        self.ext_session_id = ext["session_id"]
         self._send_frame("Runtime.enable", {}, self.ext_session_id)
         self._send_frame("Runtime.addBinding", {"name": binding_name_for("Mods.pong")}, self.ext_session_id)
+        for event in self.custom_events:
+            name = event.get("name") if isinstance(event, dict) else event
+            if isinstance(name, str) and name:
+                self._send_frame("Runtime.addBinding", {"name": binding_name_for(name)}, self.ext_session_id)
 
         if self.server is not None:
             self._send_raw(wrap_command_if_needed(
                 "Mods.configure",
-                self.server,
+                {
+                    **self.server,
+                    "custom_events": [
+                        {
+                            "name": event["name"] if isinstance(event, dict) else event,
+                            "eventSchema": (event.get("eventSchema") if isinstance(event, dict) else None),
+                        }
+                        for event in self.custom_events
+                    ],
+                    "custom_commands": [
+                        {
+                            "name": command["name"],
+                            "expression": command["expression"],
+                            "paramsSchema": command.get("paramsSchema"),
+                            "resultSchema": command.get("resultSchema"),
+                        }
+                        for command in self.custom_commands
+                        if isinstance(command.get("expression"), str) and command.get("expression")
+                    ],
+                    "custom_middlewares": [
+                        {
+                            **({"name": middleware["name"]} if middleware.get("name") else {}),
+                            "phase": middleware["phase"],
+                            "expression": middleware["expression"],
+                        }
+                        for middleware in self.custom_middlewares
+                    ],
+                },
                 routes=self.routes,
                 cdp_session_id=self.ext_session_id,
             ))
         self._measure_ping_latency()
+        connected_at = int(time.time() * 1000)
+        self.connect_timing = {
+            "started_at": connect_started_at,
+            "connected_at": connected_at,
+            "duration_ms": connected_at - connect_started_at,
+        }
         return self
 
     def send(self, method, params=None):
-        return self._send_raw(wrap_command_if_needed(
+        started_at = int(time.time() * 1000)
+        command = wrap_command_if_needed(
             method,
             params or {},
             routes=self.routes,
             cdp_session_id=self.ext_session_id,
-        ))
+        )
+        result = self._send_raw(command)
+        completed_at = int(time.time() * 1000)
+        self.last_command_timing = {
+            "method": method,
+            "target": command["target"],
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": completed_at - started_at,
+        }
+        return result
 
     async def raw_send(self, method, params=None):
-        return self._send_frame(method, params or {})
+        return self._send_frame(method, params or {}, record_raw_timing=True)
 
     def on(self, event, handler):
         self._handlers.setdefault(event, []).append(handler)
@@ -211,12 +282,13 @@ class CDPModsClient:
         }
         return self.latency
 
-    def _send_frame(self, method, params=None, session_id=None, timeout=10):
+    def _send_frame(self, method, params=None, session_id=None, timeout=10, record_raw_timing=False):
         with self._lock:
             self._next_id += 1
             msg_id = self._next_id
             done = Queue()
             self._pending[msg_id] = (method, done)
+        started_at = int(time.time() * 1000)
         msg = {"id": msg_id, "method": method, "params": params or {}}
         if session_id:
             msg["sessionId"] = session_id
@@ -235,6 +307,14 @@ class CDPModsClient:
         if response.get("error"):
             err = response["error"]
             raise RuntimeError(f"{method} failed: {err.get('message', err)}")
+        if record_raw_timing:
+            completed_at = int(time.time() * 1000)
+            self.last_raw_timing = {
+                "method": method,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": completed_at - started_at,
+            }
         return response.get("result") or {}
 
     def _reader(self):
@@ -282,34 +362,34 @@ class CDPModsClient:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] != "service_worker": continue
                 if not t["url"].startswith("chrome-extension://"): continue
-                if any(a["targetId"] == t["targetId"] for a in attached): continue
+                if any(a["target_id"] == t["targetId"] for a in attached): continue
                 try:
                     a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True}, timeout=2)
                 except Exception:
                     continue
-                attached.append({"targetId": t["targetId"], "url": t["url"], "sessionId": a["sessionId"]})
+                attached.append({"target_id": t["targetId"], "url": t["url"], "session_id": a["sessionId"]})
             for a in attached:
                 try:
                     probe = self._send_frame("Runtime.evaluate", {
                         "expression": MAGIC_READY_EXPRESSION,
                         "returnByValue": True,
-                    }, a["sessionId"], timeout=2)
+                    }, a["session_id"], timeout=2)
                 except Exception:
                     continue
                 if (probe.get("result") or {}).get("value") is True:
                     for o in attached:
-                        if o["sessionId"] != a["sessionId"]:
-                            try: self._send_frame("Target.detachFromTarget", {"sessionId": o["sessionId"]})
+                        if o["session_id"] != a["session_id"]:
+                            try: self._send_frame("Target.detachFromTarget", {"sessionId": o["session_id"]})
                             except Exception: pass
                     return {
                         "source": "discovered",
-                        "extensionId": EXT_ID_FROM_URL_RE.match(a["url"]).group(1),
-                        "targetId": a["targetId"], "url": a["url"], "sessionId": a["sessionId"],
+                        "extension_id": EXT_ID_FROM_URL_RE.match(a["url"]).group(1),
+                        "target_id": a["target_id"], "url": a["url"], "session_id": a["session_id"],
                     }
             if time.time() >= deadline: break
             time.sleep(0.1)
         for a in attached:
-            try: self._send_frame("Target.detachFromTarget", {"sessionId": a["sessionId"]})
+            try: self._send_frame("Target.detachFromTarget", {"sessionId": a["session_id"]})
             except Exception: pass
 
         # 2. Try Extensions.loadUnpacked.
@@ -324,11 +404,11 @@ class CDPModsClient:
             raise RuntimeError(f"Extensions.loadUnpacked returned no id: {r}")
 
         # 3. Wait for the loaded extension's SW.
-        sw_url = f"chrome-extension://{extension_id}/service_worker.js"
+        sw_url_prefix = f"chrome-extension://{extension_id}/"
         deadline = time.time() + 10.0
         while time.time() < deadline:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
-                if t["type"] == "service_worker" and t["url"] == sw_url:
+                if t["type"] == "service_worker" and t["url"].startswith(sw_url_prefix):
                     a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
                     probe = self._send_frame("Runtime.evaluate", {
                         "expression": MAGIC_READY_EXPRESSION,
@@ -336,8 +416,8 @@ class CDPModsClient:
                     }, a["sessionId"])
                     if (probe.get("result") or {}).get("value") is True:
                         return {
-                            "source": "injected", "extensionId": extension_id,
-                            "targetId": t["targetId"], "url": sw_url, "sessionId": a["sessionId"],
+                            "source": "injected", "extension_id": extension_id,
+                            "target_id": t["targetId"], "url": t["url"], "session_id": a["sessionId"],
                         }
                     self._send_frame("Target.detachFromTarget", {"sessionId": a["sessionId"]})
             time.sleep(0.1)
@@ -366,12 +446,12 @@ class CDPModsClient:
                     m = EXT_ID_FROM_URL_RE.match(t["url"])
                     borrowed.append({
                         "source": "borrowed",
-                        "extensionId": value.get("extensionId") or (m.group(1) if m else None),
-                        "targetId": t["targetId"],
+                        "extension_id": value.get("extension_id") or (m.group(1) if m else None),
+                        "target_id": t["targetId"],
                         "url": t["url"],
-                        "sessionId": session_id,
-                        "hasTabs": bool(value.get("hasTabs")),
-                        "hasDebugger": bool(value.get("hasDebugger")),
+                        "session_id": session_id,
+                        "has_tabs": bool(value.get("has_tabs")),
+                        "has_debugger": bool(value.get("has_debugger")),
                     })
                 else:
                     self._send_frame("Target.detachFromTarget", {"sessionId": session_id})
@@ -379,14 +459,14 @@ class CDPModsClient:
                 if session_id:
                     try: self._send_frame("Target.detachFromTarget", {"sessionId": session_id})
                     except Exception: pass
-        borrowed.sort(key=lambda item: (item.get("hasDebugger", False), item.get("hasTabs", False)), reverse=True)
+        borrowed.sort(key=lambda item: (item.get("has_debugger", False), item.get("has_tabs", False)), reverse=True)
         if borrowed:
             for other in borrowed[1:]:
-                try: self._send_frame("Target.detachFromTarget", {"sessionId": other["sessionId"]})
+                try: self._send_frame("Target.detachFromTarget", {"sessionId": other["session_id"]})
                 except Exception: pass
             selected = borrowed[0]
-            selected.pop("hasTabs", None)
-            selected.pop("hasDebugger", None)
+            selected.pop("has_tabs", None)
+            selected.pop("has_debugger", None)
             return selected
         raise RuntimeError(
             "Cannot install or borrow CDPMods in the running browser.\n"
