@@ -1,13 +1,13 @@
 // @ts-nocheck
-// MagicCDPClient (JS): importable, no CLI, no demo code.
+// CDPModsClient (JS): importable, no CLI, no demo code.
 //
 // Constructor parameter names match across JS / Python / Go ports:
 //   cdp_url           upstream CDP URL (string, default null -> try localhost:9222,
 //                       then autolaunch)
 //   extension_path    extension directory (string, default ../../extension)
-//   routes            client-side routing dict (default { "Magic.*": "service_worker",
+//   routes            client-side routing dict (default { "Mods.*": "service_worker",
 //                       "Custom.*": "service_worker", "*.*": "direct_cdp" })
-//   server            { loopback_cdp_url?, routes? } passed to MagicCDPServer.configure
+//   server            { loopback_cdp_url?, routes? } passed to CDPModsServer.configure
 //   launch_options    forwarded to launcher.launchChrome when running in Node and autolaunching
 //
 // Public methods: connect, send(method, params), on(event, handler), close.
@@ -28,22 +28,22 @@ import type {
   CdpError,
   CdpEventFrame,
   CdpResponseFrame,
-  MagicConfigureParams,
-  MagicPingLatency,
-  MagicPongEvent,
-  MagicRoutes,
+  CDPModsConfigureParams,
+  CDPModsPingLatency,
+  CDPModsPongEvent,
+  CDPModsRoutes,
   ProtocolPayload,
   ProtocolParams,
   ProtocolResult,
   TranslatedCommand,
-} from "../../types/magic.js";
+} from "../../types/cdpmods.js";
 import {
   CdpEventFrameSchema,
   CdpResponseFrameSchema,
-  Magic,
-  normalizeMagicName,
-  normalizeMagicPayloadSchema,
-} from "../../types/magic.js";
+  Mods,
+  normalizeCDPModsName,
+  normalizeCDPModsPayloadSchema,
+} from "../../types/cdpmods.js";
 
 const DEFAULT_LIVE_CDP_URL = "http://127.0.0.1:9222";
 
@@ -55,8 +55,8 @@ type PendingCommand = {
 type ClientOptions = {
   cdp_url?: string | null;
   extension_path?: string;
-  routes?: MagicRoutes;
-  server?: MagicConfigureParams | null;
+  routes?: CDPModsRoutes;
+  server?: CDPModsConfigureParams | null;
   custom_commands?: Array<Record<string, unknown>>;
   custom_events?: Array<Record<string, unknown>>;
   custom_middlewares?: Array<Record<string, unknown>>;
@@ -67,30 +67,30 @@ type ClientOptions = {
   launch_options?: Record<string, unknown>;
   self?: {
     addEventListener?: (listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void) => unknown;
-    configure?: (params: MagicConfigureParams) => Promise<ProtocolResult>;
+    configure?: (params: CDPModsConfigureParams) => Promise<ProtocolResult>;
     handleCommand: (method: string, params?: ProtocolParams, cdpSessionId?: string | null) => Promise<ProtocolResult>;
   } | null;
 };
 
-export type MagicCDPCommandSpec<Params = unknown, Result = unknown> = {
+export type CDPModsCommandSpec<Params = unknown, Result = unknown> = {
   params: Params;
   result: Result;
 };
-export type MagicCDPCommandMap = Record<string, MagicCDPCommandSpec>;
+export type CDPModsCommandMap = Record<string, CDPModsCommandSpec>;
 type MethodName<TName extends string> = TName extends `${string}.${infer TMethod}` ? TMethod : never;
 type DomainName<TName extends string> = TName extends `${infer TDomain}.${string}` ? TDomain : never;
-type CommandsForDomain<TCommands extends MagicCDPCommandMap, TDomain extends string> = {
+type CommandsForDomain<TCommands extends CDPModsCommandMap, TDomain extends string> = {
   [TName in keyof TCommands as TName extends `${TDomain}.${string}`
     ? MethodName<Extract<TName, string>>
     : never]: undefined extends TCommands[TName]["params"]
     ? (params?: TCommands[TName]["params"]) => Promise<TCommands[TName]["result"]>
     : (params: TCommands[TName]["params"]) => Promise<TCommands[TName]["result"]>;
 };
-export type MagicCDPClientInstance<TCommands extends MagicCDPCommandMap = Record<never, never>> = MagicCDPClient & {
+export type CDPModsClientInstance<TCommands extends CDPModsCommandMap = Record<never, never>> = CDPModsClient & {
   [TDomain in DomainName<Extract<keyof TCommands, string>>]: CommandsForDomain<TCommands, TDomain>;
 };
 
-class MagicCDPEventEmitter {
+class CDPModsEventEmitter {
   private listeners = new Map<string | symbol, Set<(...args: unknown[]) => void>>();
 
   on(eventName: string | symbol, listener: (...args: unknown[]) => void) {
@@ -112,7 +112,7 @@ class MagicCDPEventEmitter {
   }
 }
 
-function defineCustomCommandMethod(client: MagicCDPClient, name: string) {
+function defineCustomCommandMethod(client: CDPModsClient, name: string) {
   const [domain, method] = name.split(".", 2);
   if (!domain || !method) throw new Error(`Custom command must use Domain.method format, got ${name}`);
   const target = client as unknown as Record<string, Record<string, unknown>>;
@@ -198,11 +198,11 @@ function runtimeModuleUrl(relativePath: string) {
   return resolveUrl(relativePath, import.meta.url);
 }
 
-export class MagicCDPClient extends MagicCDPEventEmitter {
+export class CDPModsClient extends CDPModsEventEmitter {
   cdp_url: string | null;
   extension_path: string;
-  routes: MagicRoutes;
-  server: MagicConfigureParams | null;
+  routes: CDPModsRoutes;
+  server: CDPModsConfigureParams | null;
   launch_options: Record<string, unknown>;
   custom_commands: Array<Record<string, unknown>>;
   custom_events: Array<Record<string, unknown>>;
@@ -218,7 +218,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   ext_session_id: string | null;
   ext_target_id: string | null;
   extension_id: string | null;
-  latency: MagicPingLatency | null;
+  latency: CDPModsPingLatency | null;
   event_schemas: Map<string, z.ZodType>;
   command_params_schemas: Map<string, z.ZodType>;
   command_result_schemas: Map<string, z.ZodType>;
@@ -226,8 +226,8 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   cdp_aliases_hydrated: boolean;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
-    on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
-    once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MagicCDPClient;
+    on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModsClient;
+    once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModsClient;
   };
   _launched: { close: () => Promise<void> | void } | null;
 
@@ -295,7 +295,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       this.cdp_url = await liveWebSocketUrlFor();
       if (!this.cdp_url) {
         if (typeof process !== "object" || !process?.versions?.node) {
-          throw new Error("MagicCDPClient requires cdp_url when running outside Node.");
+          throw new Error("CDPModsClient requires cdp_url when running outside Node.");
         }
         const launcherSpecifier = runtimeModuleUrl("../../bridge/launcher.js");
         const importNodeOnly = new Function("specifier", "return import(specifier)") as (
@@ -354,10 +354,10 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
         trustMatchedServiceWorker: trustServiceWorkerTarget,
       });
     } catch (error) {
-      const html = `<!doctype html><title>Enable MagicCDP</title><main style="font:16px system-ui;margin:40px;max-width:820px"><h1>Enable MagicCDP</h1><p>A MagicCDP client has connected, but was unable to set up the extra Magic.* commands because extension installation over CDP is only allowed in Chrome Canary or Chromium. Google Chrome users must install the extension manually and use chrome://inspect/#remote-debugging to open CDP.</p><ol><li>Download Chrome Canary or Chromium instead. MagicCDP can auto-launch these for you.</li><li>Connect to any remote Chrome launched with:<pre>--remote-debugging-address=127.0.0.1
+      const html = `<!doctype html><title>Enable CDPMods</title><main style="font:16px system-ui;margin:40px;max-width:820px"><h1>Enable CDPMods</h1><p>A CDPMods client has connected, but was unable to set up the extra Mods.* commands because extension installation over CDP is only allowed in Chrome Canary or Chromium. Google Chrome users must install the extension manually and use chrome://inspect/#remote-debugging to open CDP.</p><ol><li>Download Chrome Canary or Chromium instead. CDPMods can auto-launch these for you.</li><li>Connect to any remote Chrome launched with:<pre>--remote-debugging-address=127.0.0.1
 --remote-debugging-port=9222
 --enable-unsafe-extension-debugging
---remote-allow-origins=*</pre></li><li>Install the extension manually via chrome://extensions/ &gt; Developer mode &gt; Load unpacked &gt; magiccdp.zip<br><code>${this.extension_path}</code></li></ol></main>`;
+--remote-allow-origins=*</pre></li><li>Install the extension manually via chrome://extensions/ &gt; Developer mode &gt; Load unpacked &gt; cdpmods.zip<br><code>${this.extension_path}</code></li></ol></main>`;
       try {
         const { targetId } = (await this._sendFrame("Target.createTarget", { url: "about:blank" })) as any;
         const { sessionId } = (await this._sendFrame("Target.attachToTarget", {
@@ -380,16 +380,16 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     this.extension_id = ext.extensionId;
     this.ext_target_id = ext.targetId;
     this.ext_session_id = ext.sessionId;
-    this.event_schemas.set("Magic.pong", Magic.PongEvent);
+    this.event_schemas.set("Mods.pong", Mods.PongEvent);
 
     await Promise.all([
       this._sendFrame("Runtime.enable", {}, this.ext_session_id),
-      this._sendFrame("Runtime.addBinding", { name: bindingNameFor("Magic.pong") }, this.ext_session_id),
+      this._sendFrame("Runtime.addBinding", { name: bindingNameFor("Mods.pong") }, this.ext_session_id),
       this._installCustomEventBindings(),
       this.server === null
         ? Promise.resolve()
         : this._sendRaw(
-            wrapCommandIfNeeded("Magic.configure", this._serverConfigureParams(), {
+            wrapCommandIfNeeded("Mods.configure", this._serverConfigureParams(), {
               routes: this.routes,
               cdpSessionId: this.ext_session_id,
             }),
@@ -435,9 +435,9 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
 
   _hydrateCustomSurface() {
     for (const command of this.custom_commands) {
-      const name = normalizeMagicName(command.name);
-      const paramsSchema = command.paramsSchema ? Magic.PayloadSchemaSpec.parse(command.paramsSchema) : null;
-      const resultSchema = command.resultSchema ? Magic.PayloadSchemaSpec.parse(command.resultSchema) : null;
+      const name = normalizeCDPModsName(command.name);
+      const paramsSchema = command.paramsSchema ? Mods.PayloadSchemaSpec.parse(command.paramsSchema) : null;
+      const resultSchema = command.resultSchema ? Mods.PayloadSchemaSpec.parse(command.resultSchema) : null;
       const normalizedParamsSchema = paramsSchema == null ? null : this._normalizePayloadSchema(paramsSchema);
       const normalizedResultSchema = resultSchema == null ? null : this._normalizePayloadSchema(resultSchema);
       if (normalizedParamsSchema) this.command_params_schemas.set(name, normalizedParamsSchema);
@@ -445,14 +445,14 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       defineCustomCommandMethod(this, name);
     }
     for (const event of this.custom_events) {
-      const name = normalizeMagicName(event.name);
+      const name = normalizeCDPModsName(event.name);
       const eventSchema = event.eventSchema ? this._normalizePayloadSchema(event.eventSchema) : null;
       if (eventSchema) this.event_schemas.set(name, eventSchema);
     }
   }
 
   _normalizePayloadSchema(schema) {
-    return normalizeMagicPayloadSchema(Magic.PayloadSchemaSpec.parse(schema));
+    return normalizeCDPModsPayloadSchema(Mods.PayloadSchemaSpec.parse(schema));
   }
 
   async _serviceWorkerUrlSuffixes() {
@@ -475,18 +475,18 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
     return {
       ...(this.server ?? {}),
       custom_commands: this.custom_commands.map(({ name, expression, paramsSchema, resultSchema }) => ({
-        name: normalizeMagicName(name),
+        name: normalizeCDPModsName(name),
         expression,
         paramsSchema: null,
         resultSchema: null,
       })),
       custom_events: this.custom_events.map(({ name, eventSchema }) => ({
-        name: normalizeMagicName(name),
-        bindingName: bindingNameFor(normalizeMagicName(name)),
+        name: normalizeCDPModsName(name),
+        bindingName: bindingNameFor(normalizeCDPModsName(name)),
         eventSchema: null,
       })),
       custom_middlewares: this.custom_middlewares.map(({ name, phase, expression }) => ({
-        ...(name == null ? {} : { name: normalizeMagicName(name) }),
+        ...(name == null ? {} : { name: normalizeCDPModsName(name) }),
         phase,
         expression,
       })),
@@ -496,7 +496,7 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   async _installCustomEventBindings() {
     await Promise.all(
       this.custom_events.map((event) =>
-        this._sendFrame("Runtime.addBinding", { name: bindingNameFor(normalizeMagicName(event.name)) }, this.ext_session_id),
+        this._sendFrame("Runtime.addBinding", { name: bindingNameFor(normalizeCDPModsName(event.name)) }, this.ext_session_id),
       ),
     );
   }
@@ -513,33 +513,33 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
 
   on(eventName, listener) {
     if (typeof eventName !== "string" && typeof eventName !== "symbol" && eventName?.parse) {
-      const name = normalizeMagicName(eventName);
+      const name = normalizeCDPModsName(eventName);
       this.event_schemas.set(name, eventName);
       return super.on(name, listener);
     }
-    return super.on(typeof eventName === "symbol" ? eventName : normalizeMagicName(eventName), listener);
+    return super.on(typeof eventName === "symbol" ? eventName : normalizeCDPModsName(eventName), listener);
   }
 
   once(eventName, listener) {
     if (typeof eventName !== "string" && typeof eventName !== "symbol" && eventName?.parse) {
-      const name = normalizeMagicName(eventName);
+      const name = normalizeCDPModsName(eventName);
       this.event_schemas.set(name, eventName);
       return super.once(name, listener);
     }
-    return super.once(typeof eventName === "symbol" ? eventName : normalizeMagicName(eventName), listener);
+    return super.once(typeof eventName === "symbol" ? eventName : normalizeCDPModsName(eventName), listener);
   }
 
   async _measurePingLatency() {
     const sentAt = Date.now();
     const pong = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Magic.pong timed out")), 10_000);
-      this.once("Magic.pong", (payload) => {
+      const timeout = setTimeout(() => reject(new Error("Mods.pong timed out")), 10_000);
+      this.once("Mods.pong", (payload) => {
         clearTimeout(timeout);
         resolve(payload || {});
       });
     });
-    await this.send("Magic.ping", { sentAt });
-    const payload = (await pong) as MagicPongEvent;
+    await this.send("Mods.ping", { sentAt });
+    const payload = (await pong) as CDPModsPongEvent;
     const returnedAt = Date.now();
     this.latency = {
       sentAt,
@@ -558,10 +558,10 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
       return this._sendFrame(step.method, step.params ?? {});
     }
     if (command.target === "self") {
-      if (!this.self) throw new Error(`MagicCDPClient self route requires a self server.`);
+      if (!this.self) throw new Error(`CDPModsClient self route requires a self server.`);
       this._ensureSelfEventListener();
       const [step] = command.steps;
-      const cdpSessionId = ((step.params as MagicCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
+      const cdpSessionId = ((step.params as CDPModsCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
       return await this.self.handleCommand(step.method, step.params ?? {}, cdpSessionId ?? null);
     }
     if (command.target !== "service_worker") {
@@ -645,4 +645,4 @@ export class MagicCDPClient extends MagicCDPEventEmitter {
   }
 }
 
-export interface MagicCDPClient extends CdpAliases {}
+export interface CDPModsClient extends CdpAliases {}

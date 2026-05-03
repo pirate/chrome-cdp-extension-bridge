@@ -1,5 +1,5 @@
 node_modules/
 dist/
-client/go/magiccdp
-client/go/magic-cdp-go
+client/go/cdpmods
+client/go/cdpmods-go
 __pycache__/

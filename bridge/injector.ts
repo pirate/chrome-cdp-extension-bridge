@@ -1,37 +1,37 @@
 // @ts-nocheck
-// injector.js: inject the MagicCDP extension service worker when needed in a
+// injector.js: inject the CDPMods extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //
 // The caller hands in a `send(method, params, sessionId?)` function bound to
 // the upstream CDP websocket. The injector knows about Extensions.loadUnpacked,
-// service-worker URL pattern matching, and probe-by-globalThis.MagicCDP, but
+// service-worker URL pattern matching, and probe-by-globalThis.CDPMods, but
 // nothing about chrome binaries, the proxy, or wrap/unwrap.
 //
 // Precedence (single source of truth — do not duplicate this in proxy/client):
 //   1. Look for an existing service-worker target whose JS context already has
-//      globalThis.MagicCDP. Use it. (source: "discovered")
+//      globalThis.CDPMods. Use it. (source: "discovered")
 //   2. Otherwise call Extensions.loadUnpacked(extensionPath) and wait for that
 //      extension's service worker to appear. (source: "injected")
-//   3. If Chrome refuses extension loading, bootstrap MagicCDP into every
+//   3. If Chrome refuses extension loading, bootstrap CDPMods into every
 //      already-running extension service worker target and use the best one.
 //      (source: "borrowed")
 //   4. Otherwise throw with explicit instructions for all failure modes.
 
-import type { ProtocolParams, ProtocolResult } from "../types/magic.js";
+import type { ProtocolParams, ProtocolResult } from "../types/cdpmods.js";
 import { commands } from "../types/zod.js";
-import { installMagicCDPServer } from "../extension/MagicCDPServer.js";
+import { installCDPModsServer } from "../extension/CDPModsServer.js";
 
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
 
 type SendCDP = (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
 
-const bootstrapMagicCDPServerExpression = `
+const bootstrapCDPModsServerExpression = `
   (() => {
     const __name = (fn) => fn;
-    const installMagicCDPServer = ${installMagicCDPServer.toString()};
-    const MagicCDP = installMagicCDPServer(globalThis);
+    const installCDPModsServer = ${installCDPModsServer.toString()};
+    const CDPMods = installCDPModsServer(globalThis);
     return {
-      ok: Boolean(MagicCDP?.__MagicCDPServerVersion === 1 && MagicCDP?.handleCommand && MagicCDP?.addCustomEvent),
+      ok: Boolean(CDPMods?.__CDPModsServerVersion === 1 && CDPMods?.handleCommand && CDPMods?.addCustomEvent),
       extensionId: globalThis.chrome?.runtime?.id ?? null,
       hasTabs: Boolean(globalThis.chrome?.tabs?.query),
       hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
@@ -63,14 +63,14 @@ export async function injectExtensionIfNeeded({
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${method} timed out after ${ms}ms`)), ms)),
     ]);
   // extensionPath is only required as a fallback, when discovery does not turn
-  // up an already-loaded MagicCDP service worker. Validate at the point of use
+  // up an already-loaded CDPMods service worker. Validate at the point of use
   // (step 2) so callers running against a browser that already has the
   // extension loaded don't have to provide a path at all.
 
-  // 1. Discover an existing MagicCDP service worker. Extensions loaded with
+  // 1. Discover an existing CDPMods service worker. Extensions loaded with
   // --load-extension at browser launch take a moment to spin their SW *and*
   // for the SW's top-level module init to run, so we attach to each candidate
-  // and re-probe its globalThis until either MagicCDP appears or we time out.
+  // and re-probe its globalThis until either CDPMods appears or we time out.
   const attached: { targetId: string; url: string; sessionId: string }[] = [];
   const discoveryDeadline = Date.now() + discoveryWaitMs;
   while (Date.now() <= discoveryDeadline) {
@@ -109,7 +109,7 @@ export async function injectExtensionIfNeeded({
             "Runtime.evaluate",
             {
               expression:
-                "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+                "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)",
               returnByValue: true,
             },
             a.sessionId,
@@ -152,7 +152,7 @@ export async function injectExtensionIfNeeded({
       } else {
         throw new Error(
           `Extensions.loadUnpacked failed for ${extensionPath}: ${error.message}\n` +
-            `If the path is correct and the manifest is valid, load the MagicCDP extension manually in chrome://extensions and reconnect.`,
+            `If the path is correct and the manifest is valid, load the CDPMods extension manually in chrome://extensions and reconnect.`,
         );
       }
     }
@@ -182,7 +182,7 @@ export async function injectExtensionIfNeeded({
               "Runtime.evaluate",
               {
                 expression:
-                  "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)",
+                  "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)",
                 returnByValue: true,
               },
               sessionId,
@@ -228,7 +228,7 @@ export async function injectExtensionIfNeeded({
         await sendWithTimeout(
           "Runtime.evaluate",
           {
-            expression: bootstrapMagicCDPServerExpression,
+            expression: bootstrapCDPModsServerExpression,
             awaitPromise: true,
             returnByValue: true,
             allowUnsafeEvalBlockedByCSP: true,
@@ -270,13 +270,13 @@ export async function injectExtensionIfNeeded({
   }
 
   throw new Error(
-    `Cannot install or borrow MagicCDP in the running browser.\n\n` +
-      `  - No existing service worker with globalThis.MagicCDP was found in the browser.\n` +
+    `Cannot install or borrow CDPMods in the running browser.\n\n` +
+      `  - No existing service worker with globalThis.CDPMods was found in the browser.\n` +
       `  - Extensions.loadUnpacked is unavailable ("${loadUnpackedUnavailableError.message}").\n` +
-      `  - No running chrome-extension:// service worker target accepted the MagicCDP bootstrap.\n\n` +
+      `  - No running chrome-extension:// service worker target accepted the CDPMods bootstrap.\n\n` +
       `Fixes (any one of these):\n` +
       `  1. Open or wake an installed extension that has a service worker, then reconnect.\n` +
-      `  2. Load the MagicCDP extension once at chrome://extensions and reconnect.\n` +
+      `  2. Load the CDPMods extension once at chrome://extensions and reconnect.\n` +
       (extensionPath ? `  3. For automated/test browsers, relaunch with --load-extension=${extensionPath}.\n` : ""),
   );
 

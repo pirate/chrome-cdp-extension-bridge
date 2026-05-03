@@ -1,6 +1,6 @@
-// JS demo for MagicCDPClient with --direct / --loopback / --debugger modes.
+// JS demo for CDPModsClient with --direct / --loopback / --debugger modes.
 //
-// Modes select where non-Magic CDP commands ultimately get serviced:
+// Modes select where non-CDPMods commands ultimately get serviced:
 //   --live        use the running Google Chrome enabled via chrome://inspect.
 //   --direct      client sends standard CDP straight to the upstream WS.
 //   --loopback    client routes *.* through the extension service worker,
@@ -13,7 +13,7 @@
 //                 on server.)
 //
 // All three modes exercise the same surface: raw Browser.getVersion, raw
-// Target.targetCreated event handling, Magic.evaluate, Custom.* commands,
+// Target.targetCreated event handling, Mods.evaluate, Custom.* commands,
 // Custom.* events, and response middleware.
 
 import path from "node:path";
@@ -25,7 +25,7 @@ import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 
-import { MagicCDPClient } from "./MagicCDPClient.js";
+import { CDPModsClient } from "./CDPModsClient.js";
 import { launchChrome } from "../../bridge/launcher.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -60,7 +60,7 @@ function clientOptionsFor(mode, cdp_url) {
       cdp_url,
       extension_path: EXTENSION_PATH,
       routes: {
-        "Magic.*": "service_worker",
+        "Mods.*": "service_worker",
         "Custom.*": "service_worker",
         "*.*": "direct_cdp",
         ...directNormalEventRoutes,
@@ -71,14 +71,14 @@ function clientOptionsFor(mode, cdp_url) {
     cdp_url,
     extension_path: EXTENSION_PATH,
     routes: {
-      "Magic.*": "service_worker",
+      "Mods.*": "service_worker",
       "Custom.*": "service_worker",
       "*.*": "service_worker",
       ...directNormalEventRoutes,
     },
     server: {
       routes: {
-        "Magic.*": "service_worker",
+        "Mods.*": "service_worker",
         "Custom.*": "service_worker",
         "*.*": mode === "loopback" ? "loopback_cdp" : "chrome_debugger",
       },
@@ -152,7 +152,7 @@ async function main() {
   }
   console.log("upstream cdp:", cdpUrl);
 
-  const cdp = new MagicCDPClient(clientOptionsFor(mode, cdpUrl));
+  const cdp = new CDPModsClient(clientOptionsFor(mode, cdpUrl));
   const foregroundEvents = [];
   const targetCreatedEvents = [];
   cdp.on(cdp.Target.targetCreated, (payload) => {
@@ -176,14 +176,14 @@ async function main() {
       console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")");
     }
 
-    const magicEval = (await cdp.Magic.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
+    const cdpmodsEval = (await cdp.Mods.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
       extensionId?: string;
     };
-    if (magicEval.extensionId !== cdp.extension_id)
-      throw new Error(`unexpected Magic.evaluate result ${JSON.stringify(magicEval)}`);
-    console.log("Magic.evaluate     ->", magicEval);
+    if (cdpmodsEval.extensionId !== cdp.extension_id)
+      throw new Error(`unexpected Mods.evaluate result ${JSON.stringify(cdpmodsEval)}`);
+    console.log("Mods.evaluate     ->", cdpmodsEval);
 
-    await cdp.Magic.addCustomCommand({
+    await cdp.Mods.addCustomCommand({
       name: "Custom.TabIdFromTargetId",
       paramsSchema: {
         targetId: cdp.types.zod.Target.TargetID,
@@ -197,7 +197,7 @@ async function main() {
         return { tabId: target?.tabId ?? null };
       }`,
     });
-    await cdp.Magic.addCustomCommand({
+    await cdp.Mods.addCustomCommand({
       name: "Custom.targetIdFromTabId",
       paramsSchema: {
         tabId: z.number(),
@@ -212,7 +212,7 @@ async function main() {
         return { targetId: target?.id ?? null };
       }`,
     });
-    await cdp.Magic.addMiddleware({
+    await cdp.Mods.addMiddleware({
       name: "*",
       phase: cdp.RESPONSE,
       expression: `async (payload, next) => {
@@ -230,7 +230,7 @@ async function main() {
         return next(payload);
       }`,
     });
-    await cdp.Magic.addMiddleware({
+    await cdp.Mods.addMiddleware({
       name: "*",
       phase: cdp.EVENT,
       expression: `async (payload, next) => {
@@ -257,12 +257,12 @@ async function main() {
       })
       .passthrough()
       .meta({ id: "Custom.foregroundTargetChanged" });
-    await cdp.Magic.addCustomEvent(ForegroundTargetChanged);
+    await cdp.Mods.addCustomEvent(ForegroundTargetChanged);
     cdp.on(ForegroundTargetChanged, (event) => {
       console.log("Custom.foregroundTargetChanged ->", event);
       foregroundEvents.push(event);
     });
-    await cdp.Magic.evaluate({
+    await cdp.Mods.evaluate({
       expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.type === "page" && target.tabId === tabId);
@@ -317,7 +317,7 @@ async function main() {
     // the prompt when run non-interactively (CI, piped stdin) so the demo
     // exits cleanly after assertions.
     if (process.stdin.isTTY) {
-      cdp.on("Magic.pong", (e) => console.log("\n[event] Magic.pong", e));
+      cdp.on("Mods.pong", (e) => console.log("\n[event] Mods.pong", e));
       await runRepl(cdp, mode);
     }
   } finally {
@@ -330,7 +330,7 @@ async function runRepl(cdp, mode) {
   console.log(`\nBrowser remains running. Mode: ${mode}.`);
   console.log("Enter commands as Domain.method({...}). Examples:");
   console.log("  Browser.getVersion({})");
-  console.log('  Magic.evaluate({expression: "chrome.tabs.query({active: true})"})');
+  console.log('  Mods.evaluate({expression: "chrome.tabs.query({active: true})"})');
   console.log("  Custom.TabIdFromTargetId({targetId: '...'})");
   console.log("Type exit or quit to disconnect (browser keeps running).");
 
@@ -339,7 +339,7 @@ async function runRepl(cdp, mode) {
     while (true) {
       let line;
       try {
-        line = (await rl.question("MagicCDP> ")).trim();
+        line = (await rl.question("CDPMods> ")).trim();
       } catch {
         break;
       }

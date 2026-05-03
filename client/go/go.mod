@@ -1,4 +1,4 @@
-module magiccdp
+module cdpmods
 
 go 1.24.7
 

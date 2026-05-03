@@ -1,13 +1,13 @@
 // proxy.js: a transparent local CDP proxy that "upgrades" any vanilla CDP
-// client to speak Magic.* / Custom.*. By default listens on ws://127.0.0.1:9223
+// client to speak Mods.* / Custom.*. By default listens on ws://127.0.0.1:9223
 // and forwards to http://127.0.0.1:9222.
 //
 // Behavior on each client connection:
 //   - If the upstream isn't reachable and { autoLaunch: true }, launch a local
 //     Chrome via launcher.js and use it as the upstream.
-//   - Inject the MagicCDP extension service worker via injector.js if needed
+//   - Inject the CDPMods extension service worker via injector.js if needed
 //     (single source of truth for that precedence + error messages).
-//   - Stand up a hidden CDP session attached to the SW; rewrite Magic.* /
+//   - Stand up a hidden CDP session attached to the SW; rewrite Mods.* /
 //     Custom.* outbound and Runtime.bindingCalled inbound; forward everything
 //     else unchanged.
 //
@@ -26,10 +26,10 @@ import { launchChrome } from "./launcher.js";
 import { injectExtensionIfNeeded } from "./injector.js";
 import {
   bindingNameFor,
-  wrapMagicEvaluate,
-  wrapMagicAddCustomCommand,
-  wrapMagicAddMiddleware,
-  wrapMagicAddCustomEvent,
+  wrapCDPModsEvaluate,
+  wrapCDPModsAddCustomCommand,
+  wrapCDPModsAddMiddleware,
+  wrapCDPModsAddCustomEvent,
   wrapCustomCommand,
   unwrapResponseIfNeeded,
   unwrapEventIfNeeded,
@@ -43,17 +43,17 @@ import type {
   ProtocolResult,
   ProxyConnectionState,
   ProxyUpstreamState,
-} from "../types/magic.js";
+} from "../types/cdpmods.js";
 import {
   CdpCommandFrameSchema,
   CdpEventFrameSchema,
   CdpResponseFrameSchema,
-  MagicAddCustomCommandParamsSchema,
-  MagicAddCustomEventObjectParamsSchema,
-  MagicAddMiddlewareParamsSchema,
-  MagicEvaluateParamsSchema,
-  normalizeMagicName,
-} from "../types/magic.js";
+  CDPModsAddCustomCommandParamsSchema,
+  CDPModsAddCustomEventObjectParamsSchema,
+  CDPModsAddMiddlewareParamsSchema,
+  CDPModsEvaluateParamsSchema,
+  normalizeCDPModsName,
+} from "../types/cdpmods.js";
 import { events } from "../types/zod.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -68,12 +68,12 @@ const dbg = (...args) => {
 };
 
 const MAGIC_METHODS = new Set([
-  "Magic.evaluate",
-  "Magic.addCustomCommand",
-  "Magic.addCustomEvent",
-  "Magic.addMiddleware",
+  "Mods.evaluate",
+  "Mods.addCustomCommand",
+  "Mods.addCustomEvent",
+  "Mods.addMiddleware",
 ]);
-const ROUTE_TO_SW_RE = /^(Magic|Custom)\./;
+const ROUTE_TO_SW_RE = /^(CDPMods|Custom)\./;
 const isWsUrl = (url) => /^wss?:\/\//i.test(url);
 
 function liveBrowserWsUrl(endpoint: string) {
@@ -288,7 +288,7 @@ async function handleConnection(
     } catch {}
   });
 
-  // Bootstrap: ensure the MagicCDP extension is present and attach a hidden
+  // Bootstrap: ensure the CDPMods extension is present and attach a hidden
   // session to it. All single-source-of-truth precedence + error messaging
   // lives in injector.js; the proxy just consumes its result.
   const sendInternal = (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
@@ -335,17 +335,17 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
   dbg("client->", msg.id ?? "", msg.method, msg.sessionId ?? "");
   const { id, method, params = {}, sessionId } = msg;
 
-  // route a Magic.* / Custom.* command into a Runtime.evaluate against the
+  // route a Mods.* / Custom.* command into a Runtime.evaluate against the
   // hidden ext session, while remembering the originating client id+session
   // so the response can be steered back to the right Playwright CDPSession.
   if (MAGIC_METHODS.has(method) || ROUTE_TO_SW_RE.test(method)) {
-    if (method === "Magic.addCustomEvent") {
-      const addEventParams = MagicAddCustomEventObjectParamsSchema.parse(params ?? {});
-      const eventName = normalizeMagicName(addEventParams.name);
+    if (method === "Mods.addCustomEvent") {
+      const addEventParams = CDPModsAddCustomEventObjectParamsSchema.parse(params ?? {});
+      const eventName = normalizeCDPModsName(addEventParams.name);
       // two-step: addBinding, then evaluate the addCustomEvent registration.
       const upId = state.nextUpstreamId++;
       state.pending.set(upId, {
-        kind: "magic_add_event_step1",
+        kind: "cdpmods_add_event_step1",
         clientId: id,
         clientSessionId: sessionId || null,
         eventName,
@@ -361,18 +361,18 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
       return;
     }
     const upId = state.nextUpstreamId++;
-    state.pending.set(upId, { kind: "magic_eval", clientId: id, clientSessionId: sessionId || null });
+    state.pending.set(upId, { kind: "cdpmods_eval", clientId: id, clientSessionId: sessionId || null });
     let runtimeParams;
-    if (method === "Magic.evaluate") {
-      const evaluateParams = MagicEvaluateParamsSchema.parse(params ?? {});
-      runtimeParams = wrapMagicEvaluate({
+    if (method === "Mods.evaluate") {
+      const evaluateParams = CDPModsEvaluateParamsSchema.parse(params ?? {});
+      runtimeParams = wrapCDPModsEvaluate({
         ...evaluateParams,
         cdpSessionId: evaluateParams.cdpSessionId ?? sessionId ?? null,
       });
-    } else if (method === "Magic.addCustomCommand") {
-      runtimeParams = wrapMagicAddCustomCommand(MagicAddCustomCommandParamsSchema.parse(params ?? {}));
-    } else if (method === "Magic.addMiddleware") {
-      runtimeParams = wrapMagicAddMiddleware(MagicAddMiddlewareParamsSchema.parse(params ?? {}));
+    } else if (method === "Mods.addCustomCommand") {
+      runtimeParams = wrapCDPModsAddCustomCommand(CDPModsAddCustomCommandParamsSchema.parse(params ?? {}));
+    } else if (method === "Mods.addMiddleware") {
+      runtimeParams = wrapCDPModsAddMiddleware(CDPModsAddMiddlewareParamsSchema.parse(params ?? {}));
     } else {
       const cdpSessionId =
         params && typeof params === "object" && "cdpSessionId" in params && typeof params.cdpSessionId === "string"
@@ -414,7 +414,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
       sendToClient(state, out);
     };
 
-    if (p.kind === "magic_eval") {
+    if (p.kind === "cdpmods_eval") {
       try {
         replyToClient({ result: unwrapResponseIfNeeded(response.result || {}, "evaluate") ?? {} });
       } catch (e) {
@@ -422,18 +422,18 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
       }
       return;
     }
-    if (p.kind === "magic_add_event_step1") {
+    if (p.kind === "cdpmods_add_event_step1") {
       if (response.error) {
         replyToClient({ error: response.error });
         return;
       }
       const upId = state.nextUpstreamId++;
-      state.pending.set(upId, { kind: "magic_eval", clientId: p.clientId, clientSessionId: p.clientSessionId });
+      state.pending.set(upId, { kind: "cdpmods_eval", clientId: p.clientId, clientSessionId: p.clientSessionId });
       state.upstream.send(
         JSON.stringify({
           id: upId,
           method: "Runtime.evaluate",
-          params: wrapMagicAddCustomEvent({ name: p.eventName ?? "" }),
+          params: wrapCDPModsAddCustomEvent({ name: p.eventName ?? "" }),
           sessionId: state.extSessionId,
         }),
       );

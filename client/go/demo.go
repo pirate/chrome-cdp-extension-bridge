@@ -1,6 +1,6 @@
-//go:build magiccdp_demo
+//go:build cdpmods_demo
 
-// Go demo for MagicCDPClient. Mirrors client/js/demo.js and client/python/demo.py.
+// Go demo for CDPModsClient. Mirrors client/js/demo.js and client/python/demo.py.
 //
 // Modes:
 //   --live       Use the running Google Chrome enabled via chrome://inspect.
@@ -73,7 +73,7 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 			CDPURL:        cdpURL,
 			ExtensionPath: extensionPath,
 			Routes: routes(map[string]string{
-				"Magic.*":  "service_worker",
+				"Mods.*":  "service_worker",
 				"Custom.*": "service_worker",
 				"*.*":      "direct_cdp",
 			}),
@@ -85,7 +85,7 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 	}
 	server := &ServerConfig{
 		Routes: map[string]string{
-			"Magic.*":  "service_worker",
+			"Mods.*":  "service_worker",
 			"Custom.*": "service_worker",
 			"*.*":      serverRoute,
 		},
@@ -97,7 +97,7 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 		CDPURL:        cdpURL,
 		ExtensionPath: extensionPath,
 		Routes: routes(map[string]string{
-			"Magic.*":  "service_worker",
+			"Mods.*":  "service_worker",
 			"Custom.*": "service_worker",
 			"*.*":      "service_worker",
 		}),
@@ -146,7 +146,7 @@ func main() {
 			log.Fatal(err)
 		}
 	} else {
-		profile, _ := os.MkdirTemp("", "magic-cdp-go.")
+		profile, _ := os.MkdirTemp("", "cdpmods-go.")
 		defer os.RemoveAll(profile)
 
 		chromePort := freePort()
@@ -208,20 +208,20 @@ func main() {
 		fmt.Println("Browser.getVersion ->", string(b))
 	}
 
-	if r, err := cdp.Send("Magic.evaluate", map[string]any{
+	if r, err := cdp.Send("Mods.evaluate", map[string]any{
 		"expression": "({ extensionId: chrome.runtime.id })",
 	}); err != nil {
-		log.Fatalf("Magic.evaluate: %v", err)
+		log.Fatalf("Mods.evaluate: %v", err)
 	} else {
-		magicEval, _ := r.(map[string]any)
-		if magicEval["extensionId"] != cdp.ExtensionID {
-			log.Fatalf("unexpected Magic.evaluate result: %v", magicEval)
+		cdpmodsEval, _ := r.(map[string]any)
+		if cdpmodsEval["extensionId"] != cdp.ExtensionID {
+			log.Fatalf("unexpected Mods.evaluate result: %v", cdpmodsEval)
 		}
 		b, _ := json.Marshal(r)
-		fmt.Println("Magic.evaluate     ->", string(b))
+		fmt.Println("Mods.evaluate     ->", string(b))
 	}
 
-	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
+	if _, err := cdp.Send("Mods.addCustomCommand", map[string]any{
 		"name": "Custom.TabIdFromTargetId",
 		"expression": `async ({ targetId }) => {
           const targets = await chrome.debugger.getTargets();
@@ -231,7 +231,7 @@ func main() {
 	}); err != nil {
 		log.Fatal(err)
 	}
-	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
+	if _, err := cdp.Send("Mods.addCustomCommand", map[string]any{
 		"name": "Custom.targetIdFromTabId",
 		"expression": `async ({ tabId }) => {
           const targets = await chrome.debugger.getTargets();
@@ -242,7 +242,7 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, phase := range []string{"response", "event"} {
-		if _, err := cdp.Send("Magic.addMiddleware", map[string]any{
+		if _, err := cdp.Send("Mods.addMiddleware", map[string]any{
 			"name":  "*",
 			"phase": phase,
 			"expression": `async (payload, next) => {
@@ -264,7 +264,7 @@ func main() {
 		}
 	}
 
-	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}); err != nil {
+	if _, err := cdp.Send("Mods.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}); err != nil {
 		log.Fatal(err)
 	}
 	cdp.On("Custom.foregroundTargetChanged", func(p any) {
@@ -274,7 +274,7 @@ func main() {
 		foregroundEvents = append(foregroundEvents, event)
 		eventsMu.Unlock()
 	})
-	if _, err := cdp.Send("Magic.evaluate", map[string]any{
+	if _, err := cdp.Send("Mods.evaluate", map[string]any{
 		"expression": `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
             const targets = await chrome.debugger.getTargets();
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
@@ -374,9 +374,9 @@ func main() {
 	// (CI / piped input / /dev/null) so the demo exits cleanly after
 	// assertions.
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		cdp.On("Magic.pong", func(p any) {
+		cdp.On("Mods.pong", func(p any) {
 			b, _ := json.Marshal(p)
-			fmt.Printf("\n[event] Magic.pong %s\n", string(b))
+			fmt.Printf("\n[event] Mods.pong %s\n", string(b))
 		})
 		runRepl(cdp, mode)
 	}
@@ -425,20 +425,20 @@ func waitForLiveCDPURL() (string, error) {
 	}
 }
 
-func runRepl(cdp *MagicCDPClient, mode string) {
+func runRepl(cdp *CDPModsClient, mode string) {
 	fmt.Printf("\nBrowser remains running. Mode: %s.\n", mode)
 	fmt.Println("Enter commands as Domain.method({...JSON params...}). Examples:")
 	fmt.Println(`  Browser.getVersion({})`)
-	fmt.Println(`  Magic.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
+	fmt.Println(`  Mods.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
 	fmt.Println(`  Custom.TabIdFromTargetId({"targetId": "..."})`)
 	fmt.Println("Type exit or quit to disconnect (browser keeps running).")
 	cmdRE := regexp.MustCompile(`^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$`)
 	sc := bufio.NewScanner(os.Stdin)
-	fmt.Print("MagicCDP> ")
+	fmt.Print("CDPMods> ")
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
-			fmt.Print("MagicCDP> ")
+			fmt.Print("CDPMods> ")
 			continue
 		}
 		if line == "exit" || line == "quit" {
@@ -447,7 +447,7 @@ func runRepl(cdp *MagicCDPClient, mode string) {
 		m := cmdRE.FindStringSubmatch(line)
 		if m == nil {
 			fmt.Println("error: format: Domain.method({...JSON...})")
-			fmt.Print("MagicCDP> ")
+			fmt.Print("CDPMods> ")
 			continue
 		}
 		method := m[1]
@@ -456,18 +456,18 @@ func runRepl(cdp *MagicCDPClient, mode string) {
 		if raw != "" {
 			if err := json.Unmarshal([]byte(raw), &params); err != nil {
 				fmt.Printf("error: parse params: %v\n", err)
-				fmt.Print("MagicCDP> ")
+				fmt.Print("CDPMods> ")
 				continue
 			}
 		}
 		result, err := cdp.Send(method, params)
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
-			fmt.Print("MagicCDP> ")
+			fmt.Print("CDPMods> ")
 			continue
 		}
 		b, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(b))
-		fmt.Print("MagicCDP> ")
+		fmt.Print("CDPMods> ")
 	}
 }

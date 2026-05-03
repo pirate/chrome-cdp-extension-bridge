@@ -32,13 +32,13 @@ export const TargetAttachedToTargetEventSchema = z
   .passthrough();
 export type TargetAttachedToTargetEvent = z.infer<typeof TargetAttachedToTargetEventSchema>;
 
-export const MagicRoutesSchema = z.object({}).catchall(z.string());
-export type MagicRoutes = z.infer<typeof MagicRoutesSchema>;
+export const CDPModsRoutesSchema = z.object({}).catchall(z.string());
+export type CDPModsRoutes = z.infer<typeof CDPModsRoutesSchema>;
 
-export const MagicCustomPayloadSchema = z.object({}).passthrough();
-export type MagicCustomPayload = z.infer<typeof MagicCustomPayloadSchema>;
+export const CDPModsCustomPayloadSchema = z.object({}).passthrough();
+export type CDPModsCustomPayload = z.infer<typeof CDPModsCustomPayloadSchema>;
 
-export type MagicNamedValue = {
+export type CDPModsNamedValue = {
   cdp_command_name?: string;
   cdp_event_name?: string;
   id?: string;
@@ -48,7 +48,7 @@ export type MagicNamedValue = {
     | undefined;
 };
 
-export function normalizeMagicName(value: MagicName) {
+export function normalizeCDPModsName(value: CDPModsName) {
   if (typeof value === "string") return value;
   const meta = typeof value?.meta === "function" ? value.meta() : undefined;
   const name =
@@ -64,90 +64,90 @@ export function normalizeMagicName(value: MagicName) {
   return name;
 }
 
-export const MagicNameSchema = z.custom<string | MagicNamedValue>((value) => {
+export const CDPModsNameSchema = z.custom<string | CDPModsNamedValue>((value) => {
   try {
-    normalizeMagicName(value as MagicName);
+    normalizeCDPModsName(value as CDPModsName);
     return true;
   } catch {
     return false;
   }
 });
-export type MagicName = z.infer<typeof MagicNameSchema>;
+export type CDPModsName = z.infer<typeof CDPModsNameSchema>;
 
-export const MagicZodTypeSchema = z.custom<z.ZodType>(isZodType);
-export type MagicZodType = z.infer<typeof MagicZodTypeSchema>;
+export const CDPModsZodTypeSchema = z.custom<z.ZodType>(isZodType);
+export type CDPModsZodType = z.infer<typeof CDPModsZodTypeSchema>;
 
-export const MagicPayloadJsonSchemaSchema = z.record(z.string(), z.unknown());
-export const MagicPayloadShapeSchema = z.record(z.string(), MagicZodTypeSchema);
-export type MagicPayloadShape = z.infer<typeof MagicPayloadShapeSchema>;
+export const CDPModsPayloadJsonSchemaSchema = z.record(z.string(), z.unknown());
+export const CDPModsPayloadShapeSchema = z.record(z.string(), CDPModsZodTypeSchema);
+export type CDPModsPayloadShape = z.infer<typeof CDPModsPayloadShapeSchema>;
 
-export const MagicPayloadSchemaSpecSchema = z.union([
-  MagicZodTypeSchema,
-  MagicPayloadShapeSchema,
-  MagicPayloadJsonSchemaSchema,
+export const CDPModsPayloadSchemaSpecSchema = z.union([
+  CDPModsZodTypeSchema,
+  CDPModsPayloadShapeSchema,
+  CDPModsPayloadJsonSchemaSchema,
 ]);
-export type MagicPayloadSchemaSpec = z.infer<typeof MagicPayloadSchemaSpecSchema>;
+export type CDPModsPayloadSchemaSpec = z.infer<typeof CDPModsPayloadSchemaSpecSchema>;
 
-export function normalizeMagicPayloadSchema(schema: MagicPayloadSchemaSpec | null | undefined) {
+export function normalizeCDPModsPayloadSchema(schema: CDPModsPayloadSchemaSpec | null | undefined) {
   if (!schema) return null;
   if (isZodType(schema)) return schema;
-  if (Object.values(schema).every(isZodType)) return z.object(schema as MagicPayloadShape).passthrough();
+  if (Object.values(schema).every(isZodType)) return z.object(schema as CDPModsPayloadShape).passthrough();
   if (schema.type === "object") return z.object({}).passthrough();
   return z.unknown();
 }
 
-export const MagicEvaluateParamsSchema = z.object({
+export const CDPModsEvaluateParamsSchema = z.object({
   expression: z.string(),
-  params: MagicCustomPayloadSchema.optional(),
+  params: CDPModsCustomPayloadSchema.optional(),
   cdpSessionId: z.string().nullable().optional(),
 });
-export type MagicEvaluateParams = z.infer<typeof MagicEvaluateParamsSchema>;
+export type CDPModsEvaluateParams = z.infer<typeof CDPModsEvaluateParamsSchema>;
 
-export const MagicAddCustomCommandParamsSchema = z.object({
-  name: MagicNameSchema,
+export const CDPModsAddCustomCommandParamsSchema = z.object({
+  name: CDPModsNameSchema,
   expression: z.string(),
-  paramsSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
-  resultSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
+  paramsSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
+  resultSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
 });
-export type MagicAddCustomCommandParams = z.infer<typeof MagicAddCustomCommandParamsSchema>;
+export type CDPModsAddCustomCommandParams = z.infer<typeof CDPModsAddCustomCommandParamsSchema>;
 
-export const MagicAddCustomEventObjectParamsSchema = z.object({
-  name: MagicNameSchema,
-  eventSchema: MagicPayloadSchemaSpecSchema.nullable().optional(),
+export const CDPModsAddCustomEventObjectParamsSchema = z.object({
+  name: CDPModsNameSchema,
+  eventSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
 });
-export const MagicAddCustomEventParamsSchema = z.union([MagicZodTypeSchema, MagicAddCustomEventObjectParamsSchema]);
-export type MagicAddCustomEventParams = z.infer<typeof MagicAddCustomEventParamsSchema>;
+export const CDPModsAddCustomEventParamsSchema = z.union([CDPModsZodTypeSchema, CDPModsAddCustomEventObjectParamsSchema]);
+export type CDPModsAddCustomEventParams = z.infer<typeof CDPModsAddCustomEventParamsSchema>;
 
-export const MagicAddMiddlewareParamsSchema = z.object({
-  name: MagicNameSchema.optional(),
+export const CDPModsAddMiddlewareParamsSchema = z.object({
+  name: CDPModsNameSchema.optional(),
   phase: z.enum(["request", "response", "event"]),
   expression: z.string(),
 });
-export type MagicAddMiddlewareParams = z.infer<typeof MagicAddMiddlewareParamsSchema>;
+export type CDPModsAddMiddlewareParams = z.infer<typeof CDPModsAddMiddlewareParamsSchema>;
 
-export const MagicConfigureParamsSchema = z.object({
+export const CDPModsConfigureParamsSchema = z.object({
   loopback_cdp_url: z.string().nullable().optional(),
-  routes: MagicRoutesSchema.optional(),
+  routes: CDPModsRoutesSchema.optional(),
   browserToken: z.string().nullable().optional(),
-  custom_commands: z.array(MagicAddCustomCommandParamsSchema).optional(),
-  custom_events: z.array(MagicAddCustomEventObjectParamsSchema).optional(),
-  custom_middlewares: z.array(MagicAddMiddlewareParamsSchema).optional(),
+  custom_commands: z.array(CDPModsAddCustomCommandParamsSchema).optional(),
+  custom_events: z.array(CDPModsAddCustomEventObjectParamsSchema).optional(),
+  custom_middlewares: z.array(CDPModsAddMiddlewareParamsSchema).optional(),
 });
-export type MagicConfigureParams = z.infer<typeof MagicConfigureParamsSchema>;
+export type CDPModsConfigureParams = z.infer<typeof CDPModsConfigureParamsSchema>;
 
-export const MagicPingParamsSchema = z.object({
+export const CDPModsPingParamsSchema = z.object({
   sentAt: z.number().optional(),
 });
-export type MagicPingParams = z.infer<typeof MagicPingParamsSchema>;
+export type CDPModsPingParams = z.infer<typeof CDPModsPingParamsSchema>;
 
-export const MagicPongEventSchema = z.object({
+export const CDPModsPongEventSchema = z.object({
   sentAt: z.number(),
   receivedAt: z.number(),
   from: z.string(),
 });
-export type MagicPongEvent = z.infer<typeof MagicPongEventSchema>;
+export type CDPModsPongEvent = z.infer<typeof CDPModsPongEventSchema>;
 
-export const MagicPingLatencySchema = z.object({
+export const CDPModsPingLatencySchema = z.object({
   sentAt: z.number(),
   receivedAt: z.number().nullable(),
   returnedAt: z.number(),
@@ -155,77 +155,77 @@ export const MagicPingLatencySchema = z.object({
   serviceWorkerMs: z.number().nullable(),
   returnPathMs: z.number().nullable(),
 });
-export type MagicPingLatency = z.infer<typeof MagicPingLatencySchema>;
+export type CDPModsPingLatency = z.infer<typeof CDPModsPingLatencySchema>;
 
-export const MagicCommandParamsSchema = z.union([
-  MagicEvaluateParamsSchema,
-  MagicAddCustomCommandParamsSchema,
-  MagicAddCustomEventParamsSchema,
-  MagicAddMiddlewareParamsSchema,
-  MagicConfigureParamsSchema,
-  MagicPingParamsSchema,
-  MagicCustomPayloadSchema,
+export const CDPModsCommandParamsSchema = z.union([
+  CDPModsEvaluateParamsSchema,
+  CDPModsAddCustomCommandParamsSchema,
+  CDPModsAddCustomEventParamsSchema,
+  CDPModsAddMiddlewareParamsSchema,
+  CDPModsConfigureParamsSchema,
+  CDPModsPingParamsSchema,
+  CDPModsCustomPayloadSchema,
 ]);
-export type MagicCommandParams = z.infer<typeof MagicCommandParamsSchema>;
+export type CDPModsCommandParams = z.infer<typeof CDPModsCommandParamsSchema>;
 
-export const MagicCommandResultSchema = z.union([
-  MagicCustomPayloadSchema,
+export const CDPModsCommandResultSchema = z.union([
+  CDPModsCustomPayloadSchema,
   z.object({ ok: z.boolean() }).passthrough(),
 ]);
-export type MagicCommandResult = z.infer<typeof MagicCommandResultSchema>;
+export type CDPModsCommandResult = z.infer<typeof CDPModsCommandResultSchema>;
 
-export const MagicEvaluateResponseSchema = z.unknown();
-export type MagicEvaluateResponse = z.infer<typeof MagicEvaluateResponseSchema>;
+export const CDPModsEvaluateResponseSchema = z.unknown();
+export type CDPModsEvaluateResponse = z.infer<typeof CDPModsEvaluateResponseSchema>;
 
-export const MagicAddCustomCommandResponseSchema = z
+export const CDPModsAddCustomCommandResponseSchema = z
   .object({
     name: z.string(),
     registered: z.boolean(),
   })
   .passthrough();
-export type MagicAddCustomCommandResponse = z.infer<typeof MagicAddCustomCommandResponseSchema>;
+export type CDPModsAddCustomCommandResponse = z.infer<typeof CDPModsAddCustomCommandResponseSchema>;
 
-export const MagicAddCustomEventResponseSchema = z
+export const CDPModsAddCustomEventResponseSchema = z
   .object({
     name: z.string(),
     bindingName: z.string(),
     registered: z.boolean(),
   })
   .passthrough();
-export type MagicAddCustomEventResponse = z.infer<typeof MagicAddCustomEventResponseSchema>;
+export type CDPModsAddCustomEventResponse = z.infer<typeof CDPModsAddCustomEventResponseSchema>;
 
-export const MagicAddMiddlewareResponseSchema = z
+export const CDPModsAddMiddlewareResponseSchema = z
   .object({
     name: z.string(),
     phase: z.enum(["request", "response", "event"]),
     registered: z.boolean(),
   })
   .passthrough();
-export type MagicAddMiddlewareResponse = z.infer<typeof MagicAddMiddlewareResponseSchema>;
+export type CDPModsAddMiddlewareResponse = z.infer<typeof CDPModsAddMiddlewareResponseSchema>;
 
-export const MagicConfigureResponseSchema = z
+export const CDPModsConfigureResponseSchema = z
   .object({
     loopback_cdp_url: z.string().nullable().optional(),
-    routes: MagicRoutesSchema,
+    routes: CDPModsRoutesSchema,
   })
   .passthrough();
-export type MagicConfigureResponse = z.infer<typeof MagicConfigureResponseSchema>;
+export type CDPModsConfigureResponse = z.infer<typeof CDPModsConfigureResponseSchema>;
 
-export const MagicPingResponseSchema = z
+export const CDPModsPingResponseSchema = z
   .object({
     ok: z.boolean(),
   })
   .passthrough();
-export type MagicPingResponse = z.infer<typeof MagicPingResponseSchema>;
+export type CDPModsPingResponse = z.infer<typeof CDPModsPingResponseSchema>;
 
-export const MagicBindingPayloadSchema = z.object({
+export const CDPModsBindingPayloadSchema = z.object({
   event: z.string(),
   data: z.unknown(),
   cdpSessionId: z.string().nullable().optional(),
 });
-export type MagicBindingPayload = z.infer<typeof MagicBindingPayloadSchema>;
+export type CDPModsBindingPayload = z.infer<typeof CDPModsBindingPayloadSchema>;
 
-export const CdpDebuggeeCommandParamsSchema = MagicCustomPayloadSchema.extend({
+export const CdpDebuggeeCommandParamsSchema = CDPModsCustomPayloadSchema.extend({
   debuggee: z.custom<chrome.debugger.Debuggee>().nullable().optional(),
   tabId: z.number().nullable().optional(),
   targetId: z.string().nullable().optional(),
@@ -233,16 +233,16 @@ export const CdpDebuggeeCommandParamsSchema = MagicCustomPayloadSchema.extend({
 });
 export type CdpDebuggeeCommandParams = z.infer<typeof CdpDebuggeeCommandParamsSchema>;
 
-export const ProtocolParamsSchema = z.union([CdpCommandParamsSchema, MagicCommandParamsSchema]);
+export const ProtocolParamsSchema = z.union([CdpCommandParamsSchema, CDPModsCommandParamsSchema]);
 export type ProtocolParams = z.infer<typeof ProtocolParamsSchema>;
 
-export const ProtocolResultSchema = z.union([CdpCommandResultSchema, MagicCommandResultSchema]);
+export const ProtocolResultSchema = z.union([CdpCommandResultSchema, CDPModsCommandResultSchema]);
 export type ProtocolResult = z.infer<typeof ProtocolResultSchema>;
 
 export const ProtocolEventParamsSchema = z.union([
   CdpEventParamsSchema,
-  MagicCustomPayloadSchema,
-  MagicPongEventSchema,
+  CDPModsCustomPayloadSchema,
+  CDPModsPongEventSchema,
 ]);
 export type ProtocolEventParams = z.infer<typeof ProtocolEventParamsSchema>;
 
@@ -250,36 +250,36 @@ export const ProtocolPayloadSchema = z.union([
   ProtocolParamsSchema,
   ProtocolResultSchema,
   ProtocolEventParamsSchema,
-  MagicBindingPayloadSchema,
+  CDPModsBindingPayloadSchema,
   z.null(),
 ]);
 export type ProtocolPayload = z.infer<typeof ProtocolPayloadSchema>;
 
-export const MagicCustomCommandRegistrationSchema = MagicAddCustomCommandParamsSchema.extend({
+export const CDPModsCustomCommandRegistrationSchema = CDPModsAddCustomCommandParamsSchema.extend({
   expression: z.string().nullable().optional(),
   handler:
     z.custom<
       (params: ProtocolParams, cdpSessionId: string | null, method?: string) => ProtocolResult | Promise<ProtocolResult>
     >(),
 });
-export type MagicCustomCommandRegistration = z.infer<typeof MagicCustomCommandRegistrationSchema>;
+export type CDPModsCustomCommandRegistration = z.infer<typeof CDPModsCustomCommandRegistrationSchema>;
 
-export const MagicCustomEventRegistrationSchema = MagicAddCustomEventObjectParamsSchema.extend({
+export const CDPModsCustomEventRegistrationSchema = CDPModsAddCustomEventObjectParamsSchema.extend({
   bindingName: z.string(),
 });
-export type MagicCustomEventRegistration = z.infer<typeof MagicCustomEventRegistrationSchema>;
+export type CDPModsCustomEventRegistration = z.infer<typeof CDPModsCustomEventRegistrationSchema>;
 
-export const MagicMiddlewareRegistrationSchema = MagicAddMiddlewareParamsSchema.extend({
+export const CDPModsMiddlewareRegistrationSchema = CDPModsAddMiddlewareParamsSchema.extend({
   handler:
     z.custom<
       (
         payload: ProtocolPayload,
         next: (payload?: ProtocolPayload) => Promise<ProtocolPayload>,
-        context: MagicCustomPayload,
+        context: CDPModsCustomPayload,
       ) => ProtocolPayload | Promise<ProtocolPayload>
     >(),
 });
-export type MagicMiddlewareRegistration = z.infer<typeof MagicMiddlewareRegistrationSchema>;
+export type CDPModsMiddlewareRegistration = z.infer<typeof CDPModsMiddlewareRegistrationSchema>;
 
 export const CdpErrorSchema = z
   .object({
@@ -340,14 +340,14 @@ export const TranslatedCommandSchema = z
   .passthrough();
 export type TranslatedCommand = z.infer<typeof TranslatedCommandSchema>;
 
-export const UnwrappedMagicEventSchema = z
+export const UnwrappedCDPModsEventSchema = z
   .object({
     event: z.string(),
     data: ProtocolPayloadSchema,
     sessionId: z.string().nullable(),
   })
   .passthrough();
-export type UnwrappedMagicEvent = z.infer<typeof UnwrappedMagicEventSchema>;
+export type UnwrappedCDPModsEvent = z.infer<typeof UnwrappedCDPModsEventSchema>;
 
 export const ProxyPendingSchema = z
   .object({
@@ -388,32 +388,32 @@ export const ProxyConnectionStateSchema = z.object({
 });
 export type ProxyConnectionState = z.infer<typeof ProxyConnectionStateSchema>;
 
-export const Magic = {
-  Routes: MagicRoutesSchema,
-  CustomPayload: MagicCustomPayloadSchema,
-  Name: MagicNameSchema,
-  ZodType: MagicZodTypeSchema,
-  PayloadShape: MagicPayloadShapeSchema,
-  PayloadSchemaSpec: MagicPayloadSchemaSpecSchema,
-  EvaluateParams: MagicEvaluateParamsSchema,
-  AddCustomCommandParams: MagicAddCustomCommandParamsSchema,
-  AddCustomEventObjectParams: MagicAddCustomEventObjectParamsSchema,
-  AddCustomEventParams: MagicAddCustomEventParamsSchema,
-  AddMiddlewareParams: MagicAddMiddlewareParamsSchema,
-  ConfigureParams: MagicConfigureParamsSchema,
-  PingParams: MagicPingParamsSchema,
-  PongEvent: MagicPongEventSchema,
-  PingLatency: MagicPingLatencySchema,
-  CommandParams: MagicCommandParamsSchema,
-  CommandResult: MagicCommandResultSchema,
-  EvaluateResponse: MagicEvaluateResponseSchema,
-  AddCustomCommandResponse: MagicAddCustomCommandResponseSchema,
-  AddCustomEventResponse: MagicAddCustomEventResponseSchema,
-  AddMiddlewareResponse: MagicAddMiddlewareResponseSchema,
-  ConfigureResponse: MagicConfigureResponseSchema,
-  PingResponse: MagicPingResponseSchema,
-  BindingPayload: MagicBindingPayloadSchema,
-  CustomCommandRegistration: MagicCustomCommandRegistrationSchema,
-  CustomEventRegistration: MagicCustomEventRegistrationSchema,
-  MiddlewareRegistration: MagicMiddlewareRegistrationSchema,
+export const Mods = {
+  Routes: CDPModsRoutesSchema,
+  CustomPayload: CDPModsCustomPayloadSchema,
+  Name: CDPModsNameSchema,
+  ZodType: CDPModsZodTypeSchema,
+  PayloadShape: CDPModsPayloadShapeSchema,
+  PayloadSchemaSpec: CDPModsPayloadSchemaSpecSchema,
+  EvaluateParams: CDPModsEvaluateParamsSchema,
+  AddCustomCommandParams: CDPModsAddCustomCommandParamsSchema,
+  AddCustomEventObjectParams: CDPModsAddCustomEventObjectParamsSchema,
+  AddCustomEventParams: CDPModsAddCustomEventParamsSchema,
+  AddMiddlewareParams: CDPModsAddMiddlewareParamsSchema,
+  ConfigureParams: CDPModsConfigureParamsSchema,
+  PingParams: CDPModsPingParamsSchema,
+  PongEvent: CDPModsPongEventSchema,
+  PingLatency: CDPModsPingLatencySchema,
+  CommandParams: CDPModsCommandParamsSchema,
+  CommandResult: CDPModsCommandResultSchema,
+  EvaluateResponse: CDPModsEvaluateResponseSchema,
+  AddCustomCommandResponse: CDPModsAddCustomCommandResponseSchema,
+  AddCustomEventResponse: CDPModsAddCustomEventResponseSchema,
+  AddMiddlewareResponse: CDPModsAddMiddlewareResponseSchema,
+  ConfigureResponse: CDPModsConfigureResponseSchema,
+  PingResponse: CDPModsPingResponseSchema,
+  BindingPayload: CDPModsBindingPayloadSchema,
+  CustomCommandRegistration: CDPModsCustomCommandRegistrationSchema,
+  CustomEventRegistration: CDPModsCustomEventRegistrationSchema,
+  MiddlewareRegistration: CDPModsMiddlewareRegistrationSchema,
 } as const;

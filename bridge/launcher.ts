@@ -1,6 +1,6 @@
 // @ts-nocheck
 // launcher.js: find a Chrome/Chromium binary and launch it with CDP enabled.
-// Knows nothing about MagicCDP, the extension, or wrap/unwrap. NEVER passes
+// Knows nothing about CDPMods, the extension, or wrap/unwrap. NEVER passes
 // --load-extension; the caller (or injector.js over CDP) is responsible for
 // getting the extension into the running browser.
 
@@ -67,7 +67,7 @@ async function wakePreloadedExtension(wsUrl: string) {
 
   try {
     const { targetId } = await send("Target.createTarget", {
-      url: `about:blank#magic-cdp-extension-wakeup-${Date.now()}`,
+      url: `about:blank#cdpmods-extension-wakeup-${Date.now()}`,
       newWindow: false,
     });
     if (typeof targetId === "string") await send("Target.closeTarget", { targetId }).catch(() => ({}));
@@ -116,7 +116,7 @@ export async function launchChrome({
 } = {}) {
   const exe = findChromeBinary(executablePath);
   const usePort = port || (await freePort());
-  const profileDir = await mkdtemp(path.join(tmpdir(), "magic-cdp."));
+  const profileDir = await mkdtemp(path.join(tmpdir(), "cdpmods."));
   const flags = [
     ...DEFAULT_FLAGS,
     headless ? "--headless=new" : null,

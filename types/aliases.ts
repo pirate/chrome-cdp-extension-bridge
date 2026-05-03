@@ -2,7 +2,7 @@
 import type { z } from "zod";
 import type { cdp } from "./cdp.js";
 import { commands, events, types as runtimeTypes } from "./zod.js";
-import { Magic, normalizeMagicName, normalizeMagicPayloadSchema } from "./magic.js";
+import { Mods, normalizeCDPModsName, normalizeCDPModsPayloadSchema } from "./cdpmods.js";
 
 export type CdpNamedValue<Name extends string = string, Kind extends string = string> = {
   readonly id: Name;
@@ -3894,15 +3894,15 @@ export type CdpAliases = {
     toolInvoked: CdpEventAlias<cdp.types.ts.WebMCP.ToolInvokedEvent, "WebMCP.toolInvoked">;
     toolResponded: CdpEventAlias<cdp.types.ts.WebMCP.ToolRespondedEvent, "WebMCP.toolResponded">;
   };
-  Magic: {
-    evaluate(params: cdp.types.ts.Magic.EvaluateParams): Promise<cdp.types.ts.Magic.EvaluateResponse>;
+  Mods: {
+    evaluate(params: cdp.types.ts.Mods.EvaluateParams): Promise<cdp.types.ts.Mods.EvaluateResponse>;
     addCustomCommand(
-      params: cdp.types.ts.Magic.AddCustomCommandParams,
-    ): Promise<cdp.types.ts.Magic.AddCustomCommandResponse>;
-    addCustomEvent(params: cdp.types.ts.Magic.AddCustomEventParams): Promise<cdp.types.ts.Magic.AddCustomEventResponse>;
-    addMiddleware(params: cdp.types.ts.Magic.AddMiddlewareParams): Promise<cdp.types.ts.Magic.AddMiddlewareResponse>;
-    configure(params: cdp.types.ts.Magic.ConfigureParams): Promise<cdp.types.ts.Magic.ConfigureResponse>;
-    ping(params?: cdp.types.ts.Magic.PingParams): Promise<cdp.types.ts.Magic.PingResponse>;
+      params: cdp.types.ts.Mods.AddCustomCommandParams,
+    ): Promise<cdp.types.ts.Mods.AddCustomCommandResponse>;
+    addCustomEvent(params: cdp.types.ts.Mods.AddCustomEventParams): Promise<cdp.types.ts.Mods.AddCustomEventResponse>;
+    addMiddleware(params: cdp.types.ts.Mods.AddMiddlewareParams): Promise<cdp.types.ts.Mods.AddMiddlewareResponse>;
+    configure(params: cdp.types.ts.Mods.ConfigureParams): Promise<cdp.types.ts.Mods.ConfigureResponse>;
+    ping(params?: cdp.types.ts.Mods.PingParams): Promise<cdp.types.ts.Mods.PingResponse>;
   };
 };
 
@@ -11139,55 +11139,55 @@ export function createCdpAliases(send: CdpAliasSend, hooks: CdpAliasHooks = {}):
         "WebMCP.toolResponded"
       >,
     },
-    Magic: {
+    Mods: {
       evaluate: async (params?: unknown) => {
-        const parsed = Magic.EvaluateParams.parse(params ?? {});
-        return Magic.EvaluateResponse.parse(await send("Magic.evaluate", parsed));
+        const parsed = Mods.EvaluateParams.parse(params ?? {});
+        return Mods.EvaluateResponse.parse(await send("Mods.evaluate", parsed));
       },
       addCustomCommand: async (params?: unknown) => {
-        const parsed = Magic.AddCustomCommandParams.parse(params ?? {});
-        const name = normalizeMagicName(parsed.name);
-        const paramsSchema = normalizeMagicPayloadSchema(parsed.paramsSchema);
-        const resultSchema = normalizeMagicPayloadSchema(parsed.resultSchema);
-        const response = Magic.AddCustomCommandResponse.parse(
-          await send("Magic.addCustomCommand", { ...parsed, name, paramsSchema: null, resultSchema: null }),
+        const parsed = Mods.AddCustomCommandParams.parse(params ?? {});
+        const name = normalizeCDPModsName(parsed.name);
+        const paramsSchema = normalizeCDPModsPayloadSchema(parsed.paramsSchema);
+        const resultSchema = normalizeCDPModsPayloadSchema(parsed.resultSchema);
+        const response = Mods.AddCustomCommandResponse.parse(
+          await send("Mods.addCustomCommand", { ...parsed, name, paramsSchema: null, resultSchema: null }),
         );
         hooks.onCustomCommand?.(name, paramsSchema, resultSchema);
         return response;
       },
       addCustomEvent: async (params?: unknown) => {
-        const parsed = Magic.AddCustomEventParams.parse(params ?? {});
-        const directSchema = Magic.ZodType.safeParse(parsed);
+        const parsed = Mods.AddCustomEventParams.parse(params ?? {});
+        const directSchema = Mods.ZodType.safeParse(parsed);
         if (directSchema.success) {
-          const name = normalizeMagicName(directSchema.data);
-          const eventSchema = normalizeMagicPayloadSchema(directSchema.data);
-          const response = Magic.AddCustomEventResponse.parse(
-            await send("Magic.addCustomEvent", { name, eventSchema: null }),
+          const name = normalizeCDPModsName(directSchema.data);
+          const eventSchema = normalizeCDPModsPayloadSchema(directSchema.data);
+          const response = Mods.AddCustomEventResponse.parse(
+            await send("Mods.addCustomEvent", { name, eventSchema: null }),
           );
           hooks.onCustomEvent?.(name, eventSchema);
           return response;
         }
-        const objectParams = Magic.AddCustomEventObjectParams.parse(parsed);
-        const name = normalizeMagicName(objectParams.name);
-        const eventSchema = normalizeMagicPayloadSchema(objectParams.eventSchema);
-        const response = Magic.AddCustomEventResponse.parse(
-          await send("Magic.addCustomEvent", { ...objectParams, name, eventSchema: null }),
+        const objectParams = Mods.AddCustomEventObjectParams.parse(parsed);
+        const name = normalizeCDPModsName(objectParams.name);
+        const eventSchema = normalizeCDPModsPayloadSchema(objectParams.eventSchema);
+        const response = Mods.AddCustomEventResponse.parse(
+          await send("Mods.addCustomEvent", { ...objectParams, name, eventSchema: null }),
         );
         hooks.onCustomEvent?.(name, eventSchema);
         return response;
       },
       addMiddleware: async (params?: unknown) => {
-        const parsed = Magic.AddMiddlewareParams.parse(params ?? {});
-        const name = parsed.name == null ? undefined : normalizeMagicName(parsed.name);
-        return Magic.AddMiddlewareResponse.parse(await send("Magic.addMiddleware", { ...parsed, name }));
+        const parsed = Mods.AddMiddlewareParams.parse(params ?? {});
+        const name = parsed.name == null ? undefined : normalizeCDPModsName(parsed.name);
+        return Mods.AddMiddlewareResponse.parse(await send("Mods.addMiddleware", { ...parsed, name }));
       },
       configure: async (params?: unknown) => {
-        const parsed = Magic.ConfigureParams.parse(params ?? {});
-        return Magic.ConfigureResponse.parse(await send("Magic.configure", parsed));
+        const parsed = Mods.ConfigureParams.parse(params ?? {});
+        return Mods.ConfigureResponse.parse(await send("Mods.configure", parsed));
       },
       ping: async (params?: unknown) => {
-        const parsed = Magic.PingParams.parse(params ?? {});
-        return Magic.PingResponse.parse(await send("Magic.ping", parsed));
+        const parsed = Mods.PingParams.parse(params ?? {});
+        return Mods.PingResponse.parse(await send("Mods.ping", parsed));
       },
     },
   };

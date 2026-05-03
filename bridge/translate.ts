@@ -1,34 +1,34 @@
 // @ts-nocheck
-// Pure stateless translation between MagicCDP and raw CDP frames.
+// Pure stateless translation between CDPMods and raw CDP frames.
 // No I/O, no maps, no classes. Trivial to port to any language.
 // Used on both the Node side (proxy + client) and the extension service worker
 // side, so the binding payload format only has one definition.
 
 import type {
-  MagicAddCustomCommandParams,
-  MagicAddMiddlewareParams,
-  MagicBindingPayload,
-  MagicCustomPayload,
-  MagicEvaluateParams,
-  MagicPingParams,
-  MagicRoutes,
+  CDPModsAddCustomCommandParams,
+  CDPModsAddMiddlewareParams,
+  CDPModsBindingPayload,
+  CDPModsCustomPayload,
+  CDPModsEvaluateParams,
+  CDPModsPingParams,
+  CDPModsRoutes,
   ProtocolParams,
   ProtocolResult,
   RuntimeBindingCalledEvent,
   TranslatedCommand,
-  UnwrappedMagicEvent,
-} from "../types/magic.js";
+  UnwrappedCDPModsEvent,
+} from "../types/cdpmods.js";
 import type { cdp } from "../types/cdp.js";
 
-export const BINDING_PREFIX = "__MagicCDP_";
+export const BINDING_PREFIX = "__CDPMods_";
 
 export const DEFAULT_CLIENT_ROUTES = {
-  "Magic.*": "service_worker",
+  "Mods.*": "service_worker",
   "Custom.*": "service_worker",
   "*.*": "service_worker",
-} satisfies MagicRoutes;
+} satisfies CDPModsRoutes;
 
-type TranslateOptions = { routes?: MagicRoutes; cdpSessionId?: string | null };
+type TranslateOptions = { routes?: CDPModsRoutes; cdpSessionId?: string | null };
 
 export const bindingNameFor = (eventName: string) =>
   BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
@@ -36,7 +36,7 @@ export const bindingNameFor = (eventName: string) =>
 export const eventNameFor = (bindingName: string) =>
   bindingName.startsWith(BINDING_PREFIX) ? bindingName.slice(BINDING_PREFIX.length).replaceAll("_", ".") : null;
 
-function normalizeMagicName(
+function normalizeCDPModsName(
   value:
     | {
         cdp_command_name?: string;
@@ -62,7 +62,7 @@ function normalizeMagicName(
   return name;
 }
 
-export function routeFor(method: string, routes: MagicRoutes = {}) {
+export function routeFor(method: string, routes: CDPModsRoutes = {}) {
   if (Object.prototype.hasOwnProperty.call(routes, method)) return routes[method];
   let bestPrefixLen = -1;
   let bestRoute: string | null = null;
@@ -79,19 +79,19 @@ export function routeFor(method: string, routes: MagicRoutes = {}) {
   return "direct_cdp";
 }
 
-// --- outbound: MagicCDP method -> Runtime.* params on the extension session --
+// --- outbound: CDPMods method -> Runtime.* params on the extension session --
 
-export function wrapMagicEvaluate({
+export function wrapCDPModsEvaluate({
   expression,
   params = {},
   cdpSessionId = null,
-}: MagicEvaluateParams): cdp.types.ts.Runtime.EvaluateParams {
+}: CDPModsEvaluateParams): cdp.types.ts.Runtime.EvaluateParams {
   return {
     expression: `
       (async () => {
         const params = ${JSON.stringify(params)};
-        const cdp = globalThis.MagicCDP.attachToSession(${JSON.stringify(cdpSessionId)});
-        const MagicCDP = globalThis.MagicCDP;
+        const cdp = globalThis.CDPMods.attachToSession(${JSON.stringify(cdpSessionId)});
+        const CDPMods = globalThis.CDPMods;
         const chrome = globalThis.chrome;
         const value = (${expression});
         return typeof value === "function" ? await value(params) : value;
@@ -103,22 +103,22 @@ export function wrapMagicEvaluate({
   };
 }
 
-export function wrapMagicAddCustomCommand({
+export function wrapCDPModsAddCustomCommand({
   name,
   expression,
-}: MagicAddCustomCommandParams): cdp.types.ts.Runtime.EvaluateParams {
-  const commandName = normalizeMagicName(name);
+}: CDPModsAddCustomCommandParams): cdp.types.ts.Runtime.EvaluateParams {
+  const commandName = normalizeCDPModsName(name);
   return {
     expression: `
       (() => {
-        return globalThis.MagicCDP.addCustomCommand({
+        return globalThis.CDPMods.addCustomCommand({
           name: ${JSON.stringify(commandName)},
           paramsSchema: null,
           resultSchema: null,
           expression: ${JSON.stringify(expression)},
           handler: async (params, cdpSessionId, method) => {
-            const cdp = globalThis.MagicCDP.attachToSession(cdpSessionId);
-            const MagicCDP = globalThis.MagicCDP;
+            const cdp = globalThis.CDPMods.attachToSession(cdpSessionId);
+            const CDPMods = globalThis.CDPMods;
             const chrome = globalThis.chrome;
             const handler = (${expression});
             return await handler(params || {}, method);
@@ -132,11 +132,11 @@ export function wrapMagicAddCustomCommand({
   };
 }
 
-export function wrapMagicAddCustomEvent({ name }: { name: string }): cdp.types.ts.Runtime.EvaluateParams {
-  const eventName = normalizeMagicName(name);
+export function wrapCDPModsAddCustomEvent({ name }: { name: string }): cdp.types.ts.Runtime.EvaluateParams {
+  const eventName = normalizeCDPModsName(name);
   return {
     expression: `
-      globalThis.MagicCDP.addCustomEvent({
+      globalThis.CDPMods.addCustomEvent({
         name: ${JSON.stringify(eventName)},
         bindingName: ${JSON.stringify(bindingNameFor(eventName))},
         eventSchema: null,
@@ -148,22 +148,22 @@ export function wrapMagicAddCustomEvent({ name }: { name: string }): cdp.types.t
   };
 }
 
-export function wrapMagicAddMiddleware({
+export function wrapCDPModsAddMiddleware({
   name = "*",
   phase,
   expression,
-}: MagicAddMiddlewareParams): cdp.types.ts.Runtime.EvaluateParams {
-  const middlewareName = normalizeMagicName(name);
+}: CDPModsAddMiddlewareParams): cdp.types.ts.Runtime.EvaluateParams {
+  const middlewareName = normalizeCDPModsName(name);
   return {
     expression: `
       (() => {
-        return globalThis.MagicCDP.addMiddleware({
+        return globalThis.CDPMods.addMiddleware({
           name: ${JSON.stringify(middlewareName)},
           phase: ${JSON.stringify(phase)},
           expression: ${JSON.stringify(expression)},
           handler: async (payload, next, context = {}) => {
-            const cdp = globalThis.MagicCDP.attachToSession(context.cdpSessionId ?? null);
-            const MagicCDP = globalThis.MagicCDP;
+            const cdp = globalThis.CDPMods.attachToSession(context.cdpSessionId ?? null);
+            const CDPMods = globalThis.CDPMods;
             const chrome = globalThis.chrome;
             const middleware = (${expression});
             return await middleware(payload, next, context);
@@ -183,7 +183,7 @@ export function wrapCustomCommand(
   cdpSessionId: string | null = null,
 ): cdp.types.ts.Runtime.EvaluateParams {
   return {
-    expression: `globalThis.MagicCDP.handleCommand(${JSON.stringify(method)}, ${JSON.stringify(params)}, ${JSON.stringify(cdpSessionId)})`,
+    expression: `globalThis.CDPMods.handleCommand(${JSON.stringify(method)}, ${JSON.stringify(params)}, ${JSON.stringify(cdpSessionId)})`,
     awaitPromise: true,
     returnByValue: true,
     allowUnsafeEvalBlockedByCSP: true,
@@ -191,13 +191,13 @@ export function wrapCustomCommand(
 }
 
 function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, cdpSessionId: string | null = null) {
-  if (method === "Magic.ping" && !Object.prototype.hasOwnProperty.call(params, "sentAt")) {
-    params = { ...(params as MagicPingParams), sentAt: Date.now() };
+  if (method === "Mods.ping" && !Object.prototype.hasOwnProperty.call(params, "sentAt")) {
+    params = { ...(params as CDPModsPingParams), sentAt: Date.now() };
   }
 
-  if (method === "Magic.addCustomEvent") {
+  if (method === "Mods.addCustomEvent") {
     const eventParams = params as { name: any };
-    const eventName = normalizeMagicName(eventParams.name);
+    const eventName = normalizeCDPModsName(eventParams.name);
     return [
       {
         method: "Runtime.addBinding",
@@ -205,25 +205,25 @@ function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, c
       },
       {
         method: "Runtime.evaluate",
-        params: wrapMagicAddCustomEvent({ name: eventName }),
+        params: wrapCDPModsAddCustomEvent({ name: eventName }),
         unwrap: "evaluate" as const,
       },
     ];
   }
 
   let runtimeParams;
-  if (method === "Magic.evaluate") {
-    const evaluateParams = params as MagicEvaluateParams;
-    runtimeParams = wrapMagicEvaluate({ ...evaluateParams, cdpSessionId: evaluateParams.cdpSessionId ?? cdpSessionId });
-  } else if (method === "Magic.addCustomCommand") {
-    runtimeParams = wrapMagicAddCustomCommand(params as MagicAddCustomCommandParams);
-  } else if (method === "Magic.addMiddleware") {
-    runtimeParams = wrapMagicAddMiddleware(params as MagicAddMiddlewareParams);
+  if (method === "Mods.evaluate") {
+    const evaluateParams = params as CDPModsEvaluateParams;
+    runtimeParams = wrapCDPModsEvaluate({ ...evaluateParams, cdpSessionId: evaluateParams.cdpSessionId ?? cdpSessionId });
+  } else if (method === "Mods.addCustomCommand") {
+    runtimeParams = wrapCDPModsAddCustomCommand(params as CDPModsAddCustomCommandParams);
+  } else if (method === "Mods.addMiddleware") {
+    runtimeParams = wrapCDPModsAddMiddleware(params as CDPModsAddMiddlewareParams);
   } else {
     runtimeParams = wrapCustomCommand(
       method,
       params,
-      ((params as MagicCustomPayload).cdpSessionId as string) ?? cdpSessionId,
+      ((params as CDPModsCustomPayload).cdpSessionId as string) ?? cdpSessionId,
     );
   }
 
@@ -267,7 +267,7 @@ export function wrapCommandIfNeeded(
   throw new Error(`Unsupported client route "${route}" for ${method}`);
 }
 
-// --- inbound: Runtime.* result/event -> MagicCDP value/event ----------------
+// --- inbound: Runtime.* result/event -> CDPMods value/event ----------------
 
 function unwrapEvaluateResponse(result: cdp.types.ts.Runtime.EvaluateResult) {
   if (result?.exceptionDetails) {
@@ -284,7 +284,7 @@ export function unwrapResponseIfNeeded(
   return unwrap === "evaluate" ? unwrapEvaluateResponse(result as cdp.types.ts.Runtime.EvaluateResult) : (result ?? {});
 }
 
-// Returns { event, data } or null when the binding is not a MagicCDP event,
+// Returns { event, data } or null when the binding is not a CDPMods event,
 // when the payload is scoped to a different cdpSessionId than ourSessionId,
 // or when the payload string is not valid JSON.
 export function unwrapEventIfNeeded(
@@ -292,9 +292,9 @@ export function unwrapEventIfNeeded(
   params: RuntimeBindingCalledEvent,
   sessionId: string | null = null,
   ourSessionId: string | null = null,
-): UnwrappedMagicEvent | null {
+): UnwrappedCDPModsEvent | null {
   if (method !== "Runtime.bindingCalled") return null;
-  let payload: MagicBindingPayload;
+  let payload: CDPModsBindingPayload;
   try {
     payload = JSON.parse(params.payload || "{}");
   } catch {
@@ -311,6 +311,6 @@ export function unwrapEventIfNeeded(
 
 // --- shared encoder used by the extension service worker --------------------
 
-export function encodeBindingPayload({ event, data, cdpSessionId = null }: MagicBindingPayload) {
+export function encodeBindingPayload({ event, data, cdpSessionId = null }: CDPModsBindingPayload) {
   return JSON.stringify({ event, data, cdpSessionId });
 }

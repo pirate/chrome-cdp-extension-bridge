@@ -1,5 +1,5 @@
 // @ts-nocheck
-// MagicCDPServer: lives inside an extension service worker. Owns the registry
+// CDPModsServer: lives inside an extension service worker. Owns the registry
 // of custom commands and event bindings, and emits events through the binding
 // API installed by the client (Runtime.addBinding -> globalThis[bindingName]).
 //
@@ -10,29 +10,29 @@
 import type { cdp } from "../types/cdp.js";
 import type {
   CdpDebuggeeCommandParams,
-  MagicConfigureParams,
-  MagicCustomCommandRegistration,
-  MagicCustomEventRegistration,
-  MagicMiddlewareRegistration,
-  MagicPingParams,
-  MagicRoutes,
+  CDPModsConfigureParams,
+  CDPModsCustomCommandRegistration,
+  CDPModsCustomEventRegistration,
+  CDPModsMiddlewareRegistration,
+  CDPModsPingParams,
+  CDPModsRoutes,
   ProtocolParams,
   ProtocolPayload,
   ProtocolResult,
-} from "../types/magic.js";
+} from "../types/cdpmods.js";
 
 type MiddlewarePhase = "request" | "response" | "event";
 
-export function installMagicCDPServer(globalScope: typeof globalThis = globalThis) {
-  const MAGIC_CDP_SERVER_VERSION = 1;
+export function installCDPModsServer(globalScope: typeof globalThis = globalThis) {
+  const CDP_MODS_SERVER_VERSION = 1;
   if (
-    globalScope.MagicCDP?.__MagicCDPServerVersion === MAGIC_CDP_SERVER_VERSION &&
-    globalScope.MagicCDP?.handleCommand &&
-    globalScope.MagicCDP?.addCustomEvent
+    globalScope.CDPMods?.__CDPModsServerVersion === CDP_MODS_SERVER_VERSION &&
+    globalScope.CDPMods?.handleCommand &&
+    globalScope.CDPMods?.addCustomEvent
   )
-    return globalScope.MagicCDP;
+    return globalScope.CDPMods;
 
-  const BINDING_PREFIX = "__MagicCDP_";
+  const BINDING_PREFIX = "__CDPMods_";
   const bindingNameFor = (eventName: string) =>
     BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
   const encodeBindingPayload = ({
@@ -45,14 +45,14 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     cdpSessionId?: string | null;
   }) => JSON.stringify({ event, data, cdpSessionId });
 
-  const commandHandlers = new Map<string, MagicCustomCommandRegistration>();
-  const eventBindings = new Map<string, MagicCustomEventRegistration>();
+  const commandHandlers = new Map<string, CDPModsCustomCommandRegistration>();
+  const eventBindings = new Map<string, CDPModsCustomEventRegistration>();
   const eventListeners = new Set<(event: string, data: ProtocolPayload, cdpSessionId: string | null) => void>();
   const middlewares = {
     request: [],
     response: [],
     event: [],
-  } satisfies Record<MiddlewarePhase, MagicMiddlewareRegistration[]>;
+  } satisfies Record<MiddlewarePhase, CDPModsMiddlewareRegistration[]>;
   const attachedDebuggees = new Set<string>();
 
   const targetAutoAttachParams = {
@@ -62,22 +62,23 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
   } satisfies cdp.types.ts.Target.SetAutoAttachParams;
 
   const defaultRoutes = {
-    "Magic.*": "service_worker",
+    "Mods.*": "service_worker",
     "Custom.*": "service_worker",
     "*.*": "auto",
-  } satisfies MagicRoutes;
+  } satisfies CDPModsRoutes;
 
   const browserLevelDomains = new Set(["Browser", "Target", "SystemInfo"]);
 
   let nextLoopbackId = 1;
   const loopbackSockets = new Map<string, WebSocket>();
   const loopbackSocketPromises = new Map<string, Promise<WebSocket>>();
+  const loopbackTargetSessions = new Map<string, string>();
   const initializedLoopbackSockets = new WeakSet<WebSocket>();
   const loopbackPending = new Map<
     number,
     { resolve: (value: ProtocolResult) => void; reject: (error: Error) => void }
   >();
-  const offscreenKeepAlivePortName = "MagicCDPOffscreenKeepAlive";
+  const offscreenKeepAlivePortName = "CDPModsOffscreenKeepAlive";
   const offscreenKeepAlivePath = "offscreen/keepalive.html";
   let creatingOffscreenKeepAlive: Promise<void> | null = null;
   let offscreenKeepAlivePort: chrome.runtime.Port | null = null;
@@ -97,7 +98,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     return match;
   }
 
-  function normalizeMagicName(
+  function normalizeCDPModsName(
     value:
       | {
           cdp_command_name?: string;
@@ -206,7 +207,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
               ? (msg.params as ProtocolPayload)
               : {};
           const cdpSessionId = typeof msg.sessionId === "string" ? msg.sessionId : null;
-          void MagicCDPServer.runMiddleware("event", method, payload, {
+          void CDPModsServer.runMiddleware("event", method, payload, {
             cdpSessionId,
             event: { name: method, payload },
           })
@@ -216,11 +217,11 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
                 try {
                   listener(method, nextPayload, cdpSessionId);
                 } catch (error) {
-                  console.error("[MagicCDPServer] event listener failed", error);
+                  console.error("[CDPModsServer] event listener failed", error);
                 }
               }
             })
-            .catch((error) => console.error("[MagicCDPServer] loopback event listener failed", error));
+            .catch((error) => console.error("[CDPModsServer] loopback event listener failed", error));
           return;
         }
         const pending = loopbackPending.get(id);
@@ -231,10 +232,12 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       });
       ws.addEventListener("error", () => {
         if (loopbackSockets.get(endpoint) === ws) loopbackSockets.delete(endpoint);
+        loopbackTargetSessions.clear();
         rejectLoopbackPending(new Error(`CDP socket error ${endpoint}`));
       });
       ws.addEventListener("close", (event) => {
         if (loopbackSockets.get(endpoint) === ws) loopbackSockets.delete(endpoint);
+        loopbackTargetSessions.clear();
         rejectLoopbackPending(
           new Error(
             `CDP socket closed ${endpoint} close.code=${event.code} close.reason=${event.reason || ""} close.wasClean=${
@@ -250,8 +253,8 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
   }
 
   async function callLoopbackWS(method: string, params: ProtocolParams = {}, sessionId: string | null = null) {
-    if (!MagicCDPServer.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
-    const ws = await loopbackWS(MagicCDPServer.loopback_cdp_url);
+    if (!CDPModsServer.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
+    const ws = await loopbackWS(CDPModsServer.loopback_cdp_url);
     const id = nextLoopbackId++;
     const message: { id: number; method: string; params: ProtocolParams; sessionId?: string } = {
       id,
@@ -262,15 +265,15 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     ws.send(JSON.stringify(message));
     return new Promise<ProtocolResult>((resolve, reject) => {
       loopbackPending.set(id, { resolve, reject });
-      ws.addEventListener("error", () => reject(new Error(`CDP socket error ${MagicCDPServer.loopback_cdp_url}`)), {
+      ws.addEventListener("error", () => reject(new Error(`CDP socket error ${CDPModsServer.loopback_cdp_url}`)), {
         once: true,
       });
     });
   }
 
   async function initializeLoopbackCDP() {
-    if (!MagicCDPServer.loopback_cdp_url) return;
-    const ws = await loopbackWS(MagicCDPServer.loopback_cdp_url);
+    if (!CDPModsServer.loopback_cdp_url) return;
+    const ws = await loopbackWS(CDPModsServer.loopback_cdp_url);
     if (initializedLoopbackSockets.has(ws)) return;
     await callLoopbackWS("Target.setAutoAttach", targetAutoAttachParams);
     await callLoopbackWS("Target.setDiscoverTargets", { discover: true });
@@ -296,7 +299,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         .createDocument({
           url: offscreenKeepAlivePath,
           reasons: ["BLOBS"],
-          justification: "Keep MagicCDP service worker active while CDP clients route commands through it.",
+          justification: "Keep CDPMods service worker active while CDP clients route commands through it.",
         })
         .finally(() => {
           creatingOffscreenKeepAlive = null;
@@ -308,15 +311,15 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     }
   }
 
-  const MagicCDPServer = {
-    __MagicCDPServerVersion: MAGIC_CDP_SERVER_VERSION,
+  const CDPModsServer = {
+    __CDPModsServerVersion: CDP_MODS_SERVER_VERSION,
     routes: { ...defaultRoutes },
     loopback_cdp_url: null,
     browserToken: null,
     startOffscreenKeepAlive,
     ensureOffscreenKeepAlive,
 
-    async configure(params: MagicConfigureParams = {}) {
+    async configure(params: CDPModsConfigureParams = {}) {
       const {
         loopback_cdp_url = this.loopback_cdp_url,
         routes,
@@ -332,9 +335,9 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         this.routes = { ...defaultRoutes };
         await this.discoverLoopbackCDP();
       }
-      for (const command of custom_commands) this.addCustomCommand(command as MagicCustomCommandRegistration);
-      for (const event of custom_events) this.addCustomEvent(event as MagicCustomEventRegistration);
-      for (const middleware of custom_middlewares) this.addMiddleware(middleware as MagicMiddlewareRegistration);
+      for (const command of custom_commands) this.addCustomCommand(command as CDPModsCustomCommandRegistration);
+      for (const event of custom_events) this.addCustomEvent(event as CDPModsCustomEventRegistration);
+      for (const middleware of custom_middlewares) this.addMiddleware(middleware as CDPModsMiddlewareRegistration);
       await initializeLoopbackCDP();
       return { loopback_cdp_url: this.loopback_cdp_url, routes: this.routes };
     },
@@ -345,26 +348,26 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       resultSchema = null,
       expression = null,
       handler,
-    }: MagicCustomCommandRegistration) {
-      name = normalizeMagicName(name);
+    }: CDPModsCustomCommandRegistration) {
+      name = normalizeCDPModsName(name);
       if (!name || !name.includes(".")) throw new Error("name must be in Domain.method form.");
       if (typeof handler !== "function" && typeof expression === "string") {
         handler = async (params: ProtocolParams = {}, cdpSessionId: string | null = null, method: string = name) => {
-          const cdp = MagicCDPServer.attachToSession(cdpSessionId);
-          const MagicCDP = MagicCDPServer;
+          const cdp = CDPModsServer.attachToSession(cdpSessionId);
+          const CDPMods = CDPModsServer;
           const chrome = globalScope.chrome;
           const value = new Function(
             "params",
             "method",
             "cdp",
-            "MagicCDP",
+            "CDPMods",
             "chrome",
             `return (async () => {
               const handler = (${expression});
               return typeof handler === "function" ? await handler(params || {}, method) : handler;
             })()`,
           );
-          return await value(params, method, cdp, MagicCDP, chrome);
+          return await value(params, method, cdp, CDPMods, chrome);
         };
       }
       if (typeof handler !== "function") throw new Error(`Custom command ${name} was registered without a handler.`);
@@ -372,8 +375,8 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       return { name, registered: true };
     },
 
-    addCustomEvent({ name, bindingName, eventSchema = null }: MagicCustomEventRegistration) {
-      name = normalizeMagicName(name);
+    addCustomEvent({ name, bindingName, eventSchema = null }: CDPModsCustomEventRegistration) {
+      name = normalizeCDPModsName(name);
       if (!name || !name.includes(".")) throw new Error("name must be in Domain.event form.");
       bindingName ??= bindingNameFor(name);
       eventBindings.set(name, { name, bindingName, eventSchema });
@@ -385,8 +388,8 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
       return { remove: () => eventListeners.delete(listener) };
     },
 
-    addMiddleware({ name = "*", phase, expression = null, handler }: MagicMiddlewareRegistration) {
-      name = normalizeMagicName(name);
+    addMiddleware({ name = "*", phase, expression = null, handler }: CDPModsMiddlewareRegistration) {
+      name = normalizeCDPModsName(name);
       if (!["request", "response", "event"].includes(phase))
         throw new Error("phase must be request, response, or event.");
       if (name !== "*" && (!name || !name.includes("."))) throw new Error("name must be '*' or Domain.name form.");
@@ -460,7 +463,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         }
       } else if (upstream === "loopback_cdp") result = await this.sendLoopback(method, params);
       else if (upstream === "chrome_debugger") result = await this.sendChromeDebugger(method, params);
-      else throw new Error(`No MagicCDP command registered for ${method}.`);
+      else throw new Error(`No CDPMods command registered for ${method}.`);
 
       return this.runMiddleware("response", method, result, {
         cdpSessionId,
@@ -493,7 +496,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         try {
           listener(eventName, payload, cdpSessionId);
         } catch (error) {
-          console.error("[MagicCDPServer] event listener failed", error);
+          console.error("[CDPModsServer] event listener failed", error);
         }
       }
       if (typeof binding === "function") binding(encodeBindingPayload({ event: eventName, data: payload, cdpSessionId }));
@@ -530,7 +533,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         const result = (await callLoopbackWS(
           "Runtime.evaluate",
           {
-            expression: `globalThis.MagicCDP?.browserToken === ${JSON.stringify(this.browserToken)}`,
+            expression: `globalThis.CDPMods?.browserToken === ${JSON.stringify(this.browserToken)}`,
             returnByValue: true,
           },
           sessionId,
@@ -592,22 +595,24 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         }
         if (!resolvedTargetId) {
           const created = (await callLoopbackWS("Target.createTarget", {
-            url: "about:blank#magic-cdp",
+            url: "about:blank#cdpmods",
           })) as cdp.types.ts.Target.CreateTargetResult;
           resolvedTargetId = created.targetId || null;
         }
       }
       if (!resolvedTargetId) throw new Error(`loopback_cdp route for ${method} could not resolve a page target.`);
 
-      const { sessionId } = (await callLoopbackWS("Target.attachToTarget", {
-        targetId: resolvedTargetId,
-        flatten: true,
-      })) as cdp.types.ts.Target.AttachToTargetResult;
-      try {
-        return await callLoopbackWS(method, commandParams, sessionId);
-      } finally {
-        await callLoopbackWS("Target.detachFromTarget", { sessionId }).catch(() => {});
+      let sessionId = loopbackTargetSessions.get(resolvedTargetId) || null;
+      if (!sessionId) {
+        const attached = (await callLoopbackWS("Target.attachToTarget", {
+          targetId: resolvedTargetId,
+          flatten: true,
+        })) as cdp.types.ts.Target.AttachToTargetResult;
+        sessionId = attached.sessionId;
+        loopbackTargetSessions.set(resolvedTargetId, sessionId);
+        await callLoopbackWS("Target.setAutoAttach", targetAutoAttachParams, sessionId).catch(() => {});
       }
+      return await callLoopbackWS(method, commandParams, sessionId);
     },
 
     async sendChromeDebugger(method: string, params: ProtocolParams = {}) {
@@ -630,9 +635,9 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
         if (!tab?.id) [tab] = await chromeApi.tabs.query({});
         if (!tab?.id) {
           try {
-            tab = await chromeApi.tabs.create({ url: "https://example.com/#magic-cdp", active: true });
+            tab = await chromeApi.tabs.create({ url: "https://example.com/#cdpmods", active: true });
           } catch {
-            const win = await chromeApi.windows.create({ url: "https://example.com/#magic-cdp", focused: true });
+            const win = await chromeApi.windows.create({ url: "https://example.com/#cdpmods", focused: true });
             tab = win.tabs?.[0] || null;
           }
         }
@@ -673,19 +678,19 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     },
   };
 
-  globalScope.MagicCDP = MagicCDPServer;
+  globalScope.CDPMods = CDPModsServer;
 
-  MagicCDPServer.addCustomEvent({
-    name: "Magic.pong",
-    bindingName: bindingNameFor("Magic.pong"),
+  CDPModsServer.addCustomEvent({
+    name: "Mods.pong",
+    bindingName: bindingNameFor("Mods.pong"),
   });
 
-  MagicCDPServer.addCustomCommand({
-    name: "Magic.ping",
-    handler: async (params: MagicPingParams = {}, cdpSessionId: string | null = null) => {
+  CDPModsServer.addCustomCommand({
+    name: "Mods.ping",
+    handler: async (params: CDPModsPingParams = {}, cdpSessionId: string | null = null) => {
       const receivedAt = Date.now();
-      await MagicCDPServer.emit(
-        "Magic.pong",
+      await CDPModsServer.emit(
+        "Mods.pong",
         {
           sentAt: typeof params.sentAt === "number" ? params.sentAt : receivedAt,
           receivedAt,
@@ -697,46 +702,46 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
     },
   });
 
-  MagicCDPServer.addCustomCommand({
-    name: "Magic.configure",
-    handler: async (params: MagicConfigureParams = {}) => MagicCDPServer.configure(params),
+  CDPModsServer.addCustomCommand({
+    name: "Mods.configure",
+    handler: async (params: CDPModsConfigureParams = {}) => CDPModsServer.configure(params),
   });
 
-  MagicCDPServer.addCustomCommand({
-    name: "Magic.evaluate",
+  CDPModsServer.addCustomCommand({
+    name: "Mods.evaluate",
     handler: async ({ expression, params = {}, cdpSessionId = null }: ProtocolParams = {}) => {
-      const cdp = MagicCDPServer.attachToSession(typeof cdpSessionId === "string" ? cdpSessionId : null);
-      const MagicCDP = MagicCDPServer;
+      const cdp = CDPModsServer.attachToSession(typeof cdpSessionId === "string" ? cdpSessionId : null);
+      const CDPMods = CDPModsServer;
       const chrome = globalScope.chrome;
       const value = new Function(
         "params",
         "cdp",
-        "MagicCDP",
+        "CDPMods",
         "chrome",
         `return (async () => {
           const value = (${expression});
           return typeof value === "function" ? await value(params || {}) : value;
         })()`,
       );
-      return await value(params, cdp, MagicCDP, chrome);
+      return await value(params, cdp, CDPMods, chrome);
     },
   });
 
-  MagicCDPServer.addCustomCommand({
-    name: "Magic.addCustomCommand",
+  CDPModsServer.addCustomCommand({
+    name: "Mods.addCustomCommand",
     handler: async (params: ProtocolParams = {}) =>
-      MagicCDPServer.addCustomCommand(params as MagicCustomCommandRegistration),
+      CDPModsServer.addCustomCommand(params as CDPModsCustomCommandRegistration),
   });
 
-  MagicCDPServer.addCustomCommand({
-    name: "Magic.addCustomEvent",
+  CDPModsServer.addCustomCommand({
+    name: "Mods.addCustomEvent",
     handler: async (params: ProtocolParams = {}) =>
-      MagicCDPServer.addCustomEvent(params as MagicCustomEventRegistration),
+      CDPModsServer.addCustomEvent(params as CDPModsCustomEventRegistration),
   });
 
-  MagicCDPServer.addCustomCommand({
-    name: "Magic.addMiddleware",
-    handler: async (params: ProtocolParams = {}) => MagicCDPServer.addMiddleware(params as MagicMiddlewareRegistration),
+  CDPModsServer.addCustomCommand({
+    name: "Mods.addMiddleware",
+    handler: async (params: ProtocolParams = {}) => CDPModsServer.addMiddleware(params as CDPModsMiddlewareRegistration),
   });
 
   const chromeApi = globalScope.chrome;
@@ -761,7 +766,7 @@ export function installMagicCDPServer(globalScope: typeof globalThis = globalThi
   } catch {}
   startOffscreenKeepAlive();
 
-  return MagicCDPServer;
+  return CDPModsServer;
 }
 
-export const MagicCDPServer = installMagicCDPServer(globalThis);
+export const CDPModsServer = installCDPModsServer(globalThis);

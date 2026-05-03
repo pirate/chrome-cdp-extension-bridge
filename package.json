@@ -1,19 +1,19 @@
 {
-  "name": "magiccdp",
+  "name": "cdpmods",
   "version": "0.0.0",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pirate/magic-cdp.git"
+    "url": "git+https://github.com/pirate/cdpmods.git"
   },
   "type": "module",
   "exports": {
     ".": {
-      "types": "./client/js/MagicCDPClient.ts",
-      "import": "./client/js/MagicCDPClient.ts"
+      "types": "./client/js/CDPModsClient.ts",
+      "import": "./client/js/CDPModsClient.ts"
     },
     "./extension/service_worker.js": "./extension/service_worker.ts",
-    "./extension/MagicCDPServer.js": "./extension/MagicCDPServer.ts",
+    "./extension/CDPModsServer.js": "./extension/CDPModsServer.ts",
     "./extension/translate.js": "./extension/translate.ts",
     "./bridge/translate.js": "./bridge/translate.ts",
     "./types/*": "./types/*"

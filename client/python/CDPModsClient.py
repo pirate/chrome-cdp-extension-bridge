@@ -1,10 +1,10 @@
-"""MagicCDPClient (Python): importable, no CLI, no demo code.
+"""CDPModsClient (Python): importable, no CLI, no demo code.
 
 Constructor parameter names mirror the JS / Go ports:
     cdp_url           upstream CDP URL (str)
     extension_path    extension directory (str)
     routes            client-side routing dict
-    server            { 'loopback_cdp_url'?, 'routes'? } passed to MagicCDPServer.configure
+    server            { 'loopback_cdp_url'?, 'routes'? } passed to CDPModsServer.configure
 
 Public methods: connect(), send(method, params), on(event, handler), close().
 Synchronous (blocking) API; one background thread reads frames off the WS.
@@ -30,8 +30,8 @@ from translate import (
 
 EXT_ID_FROM_URL_RE = re.compile(r"^chrome-extension://([a-z]+)/")
 MAGIC_READY_EXPRESSION = (
-    "Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && "
-    "globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)"
+    "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && "
+    "globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)"
 )
 DEFAULT_SERVER = object()
 
@@ -62,18 +62,18 @@ def websocket_url_for(endpoint: str) -> str:
     return ws_url
 
 
-def magic_server_bootstrap_expression(extension_path: str) -> str:
-    server_path = Path(extension_path) / "MagicCDPServer.js"
+def cdpmods_server_bootstrap_expression(extension_path: str) -> str:
+    server_path = Path(extension_path) / "CDPModsServer.js"
     source = server_path.read_text()
-    start = source.index("export function installMagicCDPServer")
-    end = source.index("export const MagicCDPServer")
+    start = source.index("export function installCDPModsServer")
+    end = source.index("export const CDPModsServer")
     installer = source[start:end].replace("export function", "function", 1)
     return (
         "(() => {\n"
         f"{installer}\n"
-        "const MagicCDP = installMagicCDPServer(globalThis);\n"
+        "const CDPMods = installCDPModsServer(globalThis);\n"
         "return {\n"
-        "  ok: Boolean(MagicCDP?.__MagicCDPServerVersion === 1 && MagicCDP?.handleCommand && MagicCDP?.addCustomEvent),\n"
+        "  ok: Boolean(CDPMods?.__CDPModsServerVersion === 1 && CDPMods?.handleCommand && CDPMods?.addCustomEvent),\n"
         "  extensionId: globalThis.chrome?.runtime?.id ?? null,\n"
         "  hasTabs: Boolean(globalThis.chrome?.tabs?.query),\n"
         "  hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),\n"
@@ -82,7 +82,7 @@ def magic_server_bootstrap_expression(extension_path: str) -> str:
     )
 
 
-class MagicCDPClient:
+class CDPModsClient:
     def __init__(self, cdp_url, extension_path, routes=None, server=DEFAULT_SERVER):
         self.cdp_url = cdp_url
         self.extension_path = extension_path
@@ -120,11 +120,11 @@ class MagicCDPClient:
         self.ext_target_id = ext["targetId"]
         self.ext_session_id = ext["sessionId"]
         self._send_frame("Runtime.enable", {}, self.ext_session_id)
-        self._send_frame("Runtime.addBinding", {"name": binding_name_for("Magic.pong")}, self.ext_session_id)
+        self._send_frame("Runtime.addBinding", {"name": binding_name_for("Mods.pong")}, self.ext_session_id)
 
         if self.server is not None:
             self._send_raw(wrap_command_if_needed(
-                "Magic.configure",
+                "Mods.configure",
                 self.server,
                 routes=self.routes,
                 cdp_session_id=self.ext_session_id,
@@ -188,14 +188,14 @@ class MagicCDPClient:
         def on_pong(payload):
             done.put(payload or {})
 
-        self._handlers.setdefault("Magic.pong", []).append(on_pong)
+        self._handlers.setdefault("Mods.pong", []).append(on_pong)
         try:
-            self.send("Magic.ping", {"sentAt": sent_at})
+            self.send("Mods.ping", {"sentAt": sent_at})
             payload = done.get(timeout=10)
         except Empty:
-            raise RuntimeError("Magic.pong timed out")
+            raise RuntimeError("Mods.pong timed out")
         finally:
-            handlers = self._handlers.get("Magic.pong") or []
+            handlers = self._handlers.get("Mods.pong") or []
             if on_pong in handlers:
                 handlers.remove(on_pong)
 
@@ -255,17 +255,17 @@ class MagicCDPClient:
                     if u:
                         for h in self._handlers.get(u["event"], []):
                             try: h(u["data"])
-                            except Exception as e: print(f"[MagicCDPClient] handler error for {u['event']}: {e}")
+                            except Exception as e: print(f"[CDPModsClient] handler error for {u['event']}: {e}")
                     continue
                 method = msg.get("method")
                 if method:
                     event = {"method": method, "params": msg.get("params") or {}, "cdp_session_id": msg.get("sessionId")}
                     for h in self._handlers.get(method, []):
                         try: h(event)
-                        except Exception as e: print(f"[MagicCDPClient] handler error for {method}: {e}")
+                        except Exception as e: print(f"[CDPModsClient] handler error for {method}: {e}")
         except Exception as e:
             if not self._closed:
-                print(f"[MagicCDPClient] reader exited: {e}")
+                print(f"[CDPModsClient] reader exited: {e}")
         finally:
             with self._lock:
                 pending = list(self._pending.values())
@@ -274,7 +274,7 @@ class MagicCDPClient:
                 done.put({"error": {"message": "connection closed"}})
 
     def _ensure_extension(self):
-        # 1. Discover an existing MagicCDP service worker. Poll briefly because
+        # 1. Discover an existing CDPMods service worker. Poll briefly because
         # extensions loaded with --load-extension take a moment to spin up.
         attached = []
         deadline = time.time() + 10.0
@@ -345,7 +345,7 @@ class MagicCDPClient:
 
     def _borrow_extension_worker(self, load_error):
         borrowed = []
-        bootstrap = magic_server_bootstrap_expression(self.extension_path)
+        bootstrap = cdpmods_server_bootstrap_expression(self.extension_path)
         for t in (self._send_frame("Target.getTargets")["targetInfos"]):
             if t["type"] != "service_worker": continue
             if not t["url"].startswith("chrome-extension://"): continue
@@ -389,8 +389,8 @@ class MagicCDPClient:
             selected.pop("hasDebugger", None)
             return selected
         raise RuntimeError(
-            "Cannot install or borrow MagicCDP in the running browser.\n"
-            "  - No existing service worker with globalThis.MagicCDP was found.\n"
+            "Cannot install or borrow CDPMods in the running browser.\n"
+            "  - No existing service worker with globalThis.CDPMods was found.\n"
             f"  - Extensions.loadUnpacked is unavailable ({load_error}).\n"
-            "  - No running chrome-extension:// service worker accepted the MagicCDP bootstrap."
+            "  - No running chrome-extension:// service worker accepted the CDPMods bootstrap."
         )

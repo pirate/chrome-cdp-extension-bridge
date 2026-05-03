@@ -1,23 +1,23 @@
-// MagicCDPClient (Go): importable, no CLI, no demo code.
+// CDPModsClient (Go): importable, no CLI, no demo code.
 //
 // Field/option names mirror the JS / Python ports:
 //
 //	CDPURL          upstream CDP URL.
 //	ExtensionPath   extension directory.
 //	Routes          client-side routing map.
-//	Server          { LoopbackCDPURL?, Routes? } passed to MagicCDPServer.configure.
+//	Server          { LoopbackCDPURL?, Routes? } passed to CDPModsServer.configure.
 //
 // Public methods: Connect, Send(method, params), On(event, handler), Close.
 // Synchronous; one background goroutine reads frames off the WS.
 //
-// Route and MagicCDP wire translation lives in translate.go. This file owns
+// Route and CDPMods wire translation lives in translate.go. This file owns
 // websocket transport, request bookkeeping, extension discovery, and events.
 //
 // Transport: gobwas/ws is intentionally low-level. We hold the underlying
 // net.Conn ourselves and use wsutil.ReadServerText / WriteClientText to push
 // raw JSON []byte over the websocket -- no message types, no schema, no
 // dependency on chromedp/cdproto's static method enumeration.
-package magiccdp
+package cdpmods
 
 import (
 	"context"
@@ -42,7 +42,7 @@ var (
 	extIDFromURL = regexp.MustCompile(`^chrome-extension://([a-z]+)/`)
 )
 
-const magicReadyExpression = `Boolean(globalThis.MagicCDP?.__MagicCDPServerVersion === 1 && globalThis.MagicCDP?.handleCommand && globalThis.MagicCDP?.addCustomEvent)`
+const cdpmodsReadyExpression = `Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)`
 
 func websocketURLFor(endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
@@ -89,7 +89,7 @@ type CDPEvent struct {
 	TargetID     string
 }
 
-type MagicCDPClient struct {
+type CDPModsClient struct {
 	opts          Options
 	CDPURL        string
 	conn          net.Conn
@@ -109,7 +109,7 @@ type MagicCDPClient struct {
 	Latency       map[string]any
 }
 
-func New(opts Options) *MagicCDPClient {
+func New(opts Options) *CDPModsClient {
 	if opts.Routes == nil {
 		opts.Routes = DefaultClientRoutes()
 	} else {
@@ -122,7 +122,7 @@ func New(opts Options) *MagicCDPClient {
 	if opts.Server == nil {
 		opts.Server = &ServerConfig{}
 	}
-	return &MagicCDPClient{
+	return &CDPModsClient{
 		opts:        opts,
 		pending:     map[int64]chan map[string]any{},
 		handlers:    map[string][]Handler{},
@@ -130,7 +130,7 @@ func New(opts Options) *MagicCDPClient {
 	}
 }
 
-func (c *MagicCDPClient) Connect() error {
+func (c *CDPModsClient) Connect() error {
 	inputCDPURL := c.opts.CDPURL
 	wsURL, err := websocketURLFor(c.opts.CDPURL)
 	if err != nil {
@@ -178,23 +178,23 @@ func (c *MagicCDPClient) Connect() error {
 		c.Close()
 		return err
 	}
-	if _, err := c.sendFrame("Runtime.addBinding", map[string]any{"name": bindingNameFor("Magic.pong")}, c.ExtSessionID); err != nil {
+	if _, err := c.sendFrame("Runtime.addBinding", map[string]any{"name": bindingNameFor("Mods.pong")}, c.ExtSessionID); err != nil {
 		c.Close()
 		return err
 	}
 
 	if c.opts.Server != nil {
-		command, err := wrapCommandIfNeeded("Magic.configure", map[string]any{
+		command, err := wrapCommandIfNeeded("Mods.configure", map[string]any{
 			"loopback_cdp_url": c.opts.Server.LoopbackCDPURL,
 			"routes":           c.opts.Server.Routes,
 		}, c.opts.Routes, c.ExtSessionID)
 		if err != nil {
 			c.Close()
-			return fmt.Errorf("Magic.configure: %w", err)
+			return fmt.Errorf("Mods.configure: %w", err)
 		}
 		if _, err := c.sendRaw(command); err != nil {
 			c.Close()
-			return fmt.Errorf("Magic.configure: %w", err)
+			return fmt.Errorf("Mods.configure: %w", err)
 		}
 	}
 	if err := c.measurePingLatency(); err != nil {
@@ -204,7 +204,7 @@ func (c *MagicCDPClient) Connect() error {
 	return nil
 }
 
-func (c *MagicCDPClient) Send(method string, params map[string]any) (any, error) {
+func (c *CDPModsClient) Send(method string, params map[string]any) (any, error) {
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -215,19 +215,19 @@ func (c *MagicCDPClient) Send(method string, params map[string]any) (any, error)
 	return c.sendRaw(command)
 }
 
-func (c *MagicCDPClient) On(event string, handler Handler) {
+func (c *CDPModsClient) On(event string, handler Handler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
 	c.handlers[event] = append(c.handlers[event], handler)
 }
 
-func (c *MagicCDPClient) OnCDP(event string, handler CDPHandler) {
+func (c *CDPModsClient) OnCDP(event string, handler CDPHandler) {
 	c.cdpHandlersMu.Lock()
 	defer c.cdpHandlersMu.Unlock()
 	c.cdpHandlers[event] = append(c.cdpHandlers[event], handler)
 }
 
-func (c *MagicCDPClient) Close() {
+func (c *CDPModsClient) Close() {
 	if c.ExtSessionID != "" {
 		_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": c.ExtSessionID}, "")
 	}
@@ -241,7 +241,7 @@ func (c *MagicCDPClient) Close() {
 
 // --- internals -----------------------------------------------------------
 
-func (c *MagicCDPClient) sendRaw(command rawCommand) (any, error) {
+func (c *CDPModsClient) sendRaw(command rawCommand) (any, error) {
 	if command.Target == "direct_cdp" {
 		step := command.Steps[0]
 		return c.sendFrame(step.Method, step.Params, "")
@@ -263,16 +263,16 @@ func (c *MagicCDPClient) sendRaw(command rawCommand) (any, error) {
 	return unwrapResponseIfNeeded(result, unwrap)
 }
 
-func (c *MagicCDPClient) measurePingLatency() error {
+func (c *CDPModsClient) measurePingLatency() error {
 	sentAt := time.Now().UnixMilli()
 	ch := make(chan any, 1)
-	c.On("Magic.pong", func(data any) {
+	c.On("Mods.pong", func(data any) {
 		select {
 		case ch <- data:
 		default:
 		}
 	})
-	if _, err := c.Send("Magic.ping", map[string]any{"sentAt": sentAt}); err != nil {
+	if _, err := c.Send("Mods.ping", map[string]any{"sentAt": sentAt}); err != nil {
 		return err
 	}
 	select {
@@ -296,7 +296,7 @@ func (c *MagicCDPClient) measurePingLatency() error {
 		c.Latency = latency
 		return nil
 	case <-time.After(10 * time.Second):
-		return fmt.Errorf("Magic.pong timed out")
+		return fmt.Errorf("Mods.pong timed out")
 	}
 }
 
@@ -313,11 +313,11 @@ func numberAsInt64(value any) (int64, bool) {
 	}
 }
 
-func (c *MagicCDPClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
+func (c *CDPModsClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
 	return c.sendFrameTimeout(method, params, sessionID, 10*time.Second)
 }
 
-func (c *MagicCDPClient) sendFrameTimeout(method string, params map[string]any, sessionID string, timeout time.Duration) (map[string]any, error) {
+func (c *CDPModsClient) sendFrameTimeout(method string, params map[string]any, sessionID string, timeout time.Duration) (map[string]any, error) {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -356,23 +356,23 @@ func (c *MagicCDPClient) sendFrameTimeout(method string, params map[string]any, 
 	}
 }
 
-func (c *MagicCDPClient) magicServerBootstrapExpression() (string, error) {
-	body, err := os.ReadFile(filepath.Join(c.opts.ExtensionPath, "MagicCDPServer.js"))
+func (c *CDPModsClient) cdpmodsServerBootstrapExpression() (string, error) {
+	body, err := os.ReadFile(filepath.Join(c.opts.ExtensionPath, "CDPModsServer.js"))
 	if err != nil {
 		return "", err
 	}
 	source := string(body)
-	start := strings.Index(source, "export function installMagicCDPServer")
-	end := strings.Index(source, "export const MagicCDPServer")
+	start := strings.Index(source, "export function installCDPModsServer")
+	end := strings.Index(source, "export const CDPModsServer")
 	if start < 0 || end < start {
-		return "", fmt.Errorf("could not find installMagicCDPServer in MagicCDPServer.js")
+		return "", fmt.Errorf("could not find installCDPModsServer in CDPModsServer.js")
 	}
 	installer := strings.Replace(source[start:end], "export function", "function", 1)
 	return fmt.Sprintf(`(() => {
 %s
-const MagicCDP = installMagicCDPServer(globalThis);
+const CDPMods = installCDPModsServer(globalThis);
 return {
-  ok: Boolean(MagicCDP?.__MagicCDPServerVersion === 1 && MagicCDP?.handleCommand && MagicCDP?.addCustomEvent),
+  ok: Boolean(CDPMods?.__CDPModsServerVersion === 1 && CDPMods?.handleCommand && CDPMods?.addCustomEvent),
   extensionId: globalThis.chrome?.runtime?.id ?? null,
   hasTabs: Boolean(globalThis.chrome?.tabs?.query),
   hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
@@ -380,7 +380,7 @@ return {
 })()`, installer), nil
 }
 
-func (c *MagicCDPClient) reader() {
+func (c *CDPModsClient) reader() {
 	for {
 		data, err := wsutil.ReadServerText(c.conn)
 		if err != nil {
@@ -461,7 +461,7 @@ func targetIDFromEventParams(params map[string]any) string {
 	return ""
 }
 
-func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
+func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 	type attached struct{ TargetID, URL, SessionID string }
 	var seen []attached
 
@@ -499,7 +499,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 		}
 		for _, a := range seen {
 			probe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
-				"expression":    magicReadyExpression,
+				"expression":    cdpmodsReadyExpression,
 				"returnByValue": true,
 			}, a.SessionID, 2*time.Second)
 			if err != nil {
@@ -562,7 +562,7 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 				}
 				sid, _ := a["sessionId"].(string)
 				probe, err := c.sendFrame("Runtime.evaluate", map[string]any{
-					"expression":    magicReadyExpression,
+					"expression":    cdpmodsReadyExpression,
 					"returnByValue": true,
 				}, sid)
 				if err != nil {
@@ -584,8 +584,8 @@ func (c *MagicCDPClient) ensureExtension() (map[string]any, error) {
 	return nil, fmt.Errorf("Extensions.loadUnpacked installed %s but its SW did not appear", extID)
 }
 
-func (c *MagicCDPClient) borrowExtensionWorker(loadError string) (map[string]any, error) {
-	bootstrap, err := c.magicServerBootstrapExpression()
+func (c *CDPModsClient) borrowExtensionWorker(loadError string) (map[string]any, error) {
+	bootstrap, err := c.cdpmodsServerBootstrapExpression()
 	if err != nil {
 		return nil, err
 	}
@@ -663,10 +663,10 @@ func (c *MagicCDPClient) borrowExtensionWorker(loadError string) (map[string]any
 		return borrowed[0], nil
 	}
 	return nil, fmt.Errorf(
-		"cannot install or borrow MagicCDP in the running browser:\n"+
-			"  - no service worker with globalThis.MagicCDP found\n"+
+		"cannot install or borrow CDPMods in the running browser:\n"+
+			"  - no service worker with globalThis.CDPMods found\n"+
 			"  - Extensions.loadUnpacked unavailable (%s)\n"+
-			"  - no running chrome-extension:// service worker accepted the MagicCDP bootstrap",
+			"  - no running chrome-extension:// service worker accepted the CDPMods bootstrap",
 		loadError,
 	)
 }
