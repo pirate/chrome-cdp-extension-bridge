@@ -15,8 +15,8 @@ import { startProxy } from "../../../bridge/proxy.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extension_path = path.resolve(here, "../../../extension");
 
-let chrome: Awaited<ReturnType<typeof launchChrome>> | null = null;
 let proxy: Awaited<ReturnType<typeof startProxy>> | null = null;
+let chrome: Awaited<ReturnType<typeof launchChrome>> | null = null;
 let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
 
 try {
@@ -27,9 +27,8 @@ try {
   });
   proxy = await startProxy({
     port: await freePort(),
-    upstream: chrome.cdpUrl,
     extensionPath: extension_path,
-    autoLaunch: false,
+    upstream: chrome.cdpUrl,
   });
 
   browser = await chromium.connectOverCDP(proxy.url);

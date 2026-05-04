@@ -48,6 +48,14 @@ function parseArgs(argv) {
   return { mode, live };
 }
 
+function serverRoutesFor(mode) {
+  return {
+    "Mod.*": "service_worker",
+    "Custom.*": "service_worker",
+    "*.*": mode === "loopback" ? "loopback_cdp" : mode === "debugger" ? "chrome_debugger" : "auto",
+  };
+}
+
 function clientOptionsFor(mode, cdp_url, launch_options = {}) {
   const directNormalEventRoutes = {
     "Target.setDiscoverTargets": "direct_cdp",
@@ -78,14 +86,33 @@ function clientOptionsFor(mode, cdp_url, launch_options = {}) {
       ...directNormalEventRoutes,
     },
     server: {
-      routes: {
-        "Mod.*": "service_worker",
-        "Custom.*": "service_worker",
-        "*.*": mode === "loopback" ? "loopback_cdp" : "chrome_debugger",
-      },
+      routes: serverRoutesFor(mode),
       ...(mode === "loopback" && cdp_url ? { loopback_cdp_url: cdp_url } : {}),
     },
   };
+}
+
+function assertObject(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} returned non-object value ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+async function waitForEvent(cdp, eventName, predicate = (_payload) => true, timeoutMs = 3000) {
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cdp.off(eventName, onEvent);
+      reject(new Error(`timed out waiting for ${eventName}`));
+    }, timeoutMs);
+    const onEvent = (payload) => {
+      if (!predicate(payload)) return;
+      clearTimeout(timeout);
+      cdp.off(eventName, onEvent);
+      resolve(payload);
+    };
+    cdp.on(eventName, onEvent);
+  });
 }
 
 function openLiveInspectPage() {
@@ -149,7 +176,6 @@ async function main() {
   }
 
   const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl, launch_options));
-  const foregroundEvents = [];
   const targetCreatedEvents = [];
 
   try {
@@ -162,15 +188,50 @@ async function main() {
     console.log("connected; ext", cdp.extension_id, "session", cdp.ext_session_id);
     console.log("ping latency      ->", cdp.latency);
 
-    // standard CDP route differs per mode. --direct goes straight to the
-    // upstream WS. --loopback comes back into the browser via a verified
-    // ws://localhost:9222. --debugger goes through chrome.debugger which is
-    // tab-scoped and rejects browser-level methods like Browser.getVersion --
-    // expected, just report.
-    try {
-      console.log("Browser.getVersion ->", await cdp.Browser.getVersion());
-    } catch (e) {
-      console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")");
+    const configureResult = assertObject(
+      await cdp.Mod.configure({
+        routes: serverRoutesFor(mode),
+        ...(mode === "loopback" ? { loopback_cdp_url: cdp.cdp_url } : {}),
+      }),
+      "Mod.configure",
+    );
+    if (configureResult.routes?.["*.*"] !== serverRoutesFor(mode)["*.*"]) {
+      throw new Error(`unexpected Mod.configure result ${JSON.stringify(configureResult)}`);
+    }
+    console.log("Mod.configure    ->", configureResult.routes);
+
+    const pingSentAt = Date.now();
+    const pongPromise = waitForEvent(cdp, "Mod.pong", (event) => event?.sentAt === pingSentAt);
+    const pingResult = assertObject(await cdp.Mod.ping({ sentAt: pingSentAt }), "Mod.ping");
+    const pong = assertObject(await pongPromise, "Mod.pong");
+    if (pingResult.ok !== true || pong.receivedAt == null || pong.from !== "extension-service-worker") {
+      throw new Error(`unexpected Mod.ping/Mod.pong result ${JSON.stringify({ pingResult, pong })}`);
+    }
+    console.log("Mod.ping/pong    ->", { pingResult, pong });
+
+    // Browser.getVersion is browser-scoped and chrome.debugger is tab-scoped,
+    // so debugger mode asserts a positive raw CDP Runtime.evaluate instead.
+    if (mode === "debugger") {
+      try {
+        await cdp.Browser.getVersion();
+        throw new Error("Browser.getVersion unexpectedly succeeded in debugger mode");
+      } catch (e) {
+        if (e.message.includes("unexpectedly succeeded")) throw e;
+        console.log("Browser.getVersion -> (expected debugger rejection:", e.message.replace(/\n/g, " "), ")");
+      }
+      const runtimeEval = assertObject(
+        await cdp.Runtime.evaluate({ expression: "(() => 42)()", returnByValue: true }),
+        "Runtime.evaluate",
+      );
+      if (runtimeEval.result?.value !== 42)
+        throw new Error(`unexpected Runtime.evaluate result ${JSON.stringify(runtimeEval)}`);
+      console.log("Runtime.evaluate ->", runtimeEval);
+    } else {
+      const version = assertObject(await cdp.Browser.getVersion(), "Browser.getVersion");
+      if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
+        throw new Error(`unexpected Browser.getVersion result ${JSON.stringify(version)}`);
+      }
+      console.log("Browser.getVersion ->", version);
     }
 
     const cdpmodEval = (await cdp.Mod.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
@@ -180,39 +241,68 @@ async function main() {
       throw new Error(`unexpected Mod.evaluate result ${JSON.stringify(cdpmodEval)}`);
     console.log("Mod.evaluate     ->", cdpmodEval);
 
-    await cdp.Mod.addCustomCommand({
-      name: "Custom.TabIdFromTargetId",
-      paramsSchema: {
-        targetId: cdp.types.zod.Target.TargetID,
-      },
-      resultSchema: {
-        tabId: z.number().nullable(),
-      },
-      expression: `async ({ targetId }) => {
+    const echoRegistration = assertObject(
+      await cdp.Mod.addCustomCommand({
+        name: "Custom.echo",
+        expression: `async (params, method) => ({ echoed: params.value, method })`,
+      }),
+      "Mod.addCustomCommand Custom.echo",
+    );
+    if (echoRegistration.registered !== true || echoRegistration.name !== "Custom.echo") {
+      throw new Error(`unexpected Custom.echo registration ${JSON.stringify(echoRegistration)}`);
+    }
+    const echoResult = assertObject(await cdp.send("Custom.echo", { value: "custom-command-ok" }), "Custom.echo");
+    if (echoResult.echoed !== "custom-command-ok" || echoResult.method !== "Custom.echo") {
+      throw new Error(`unexpected Custom.echo result ${JSON.stringify(echoResult)}`);
+    }
+    console.log("Custom.echo      ->", echoResult);
+
+    const tabCommandRegistration = assertObject(
+      await cdp.Mod.addCustomCommand({
+        name: "Custom.TabIdFromTargetId",
+        paramsSchema: {
+          targetId: cdp.types.zod.Target.TargetID,
+        },
+        resultSchema: {
+          tabId: z.number().nullable(),
+        },
+        expression: `async ({ targetId }) => {
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.id === targetId);
         return { tabId: target?.tabId ?? null };
       }`,
-    });
-    await cdp.Mod.addCustomCommand({
-      name: "Custom.targetIdFromTabId",
-      paramsSchema: {
-        tabId: z.number(),
-      },
-      resultSchema: {
-        targetId: cdp.types.zod.Target.TargetID.nullable(),
-        tabId: z.number().optional(),
-      },
-      expression: `async ({ tabId }) => {
+      }),
+      "Mod.addCustomCommand Custom.TabIdFromTargetId",
+    );
+    if (tabCommandRegistration.registered !== true) {
+      throw new Error(`unexpected TabIdFromTargetId registration ${JSON.stringify(tabCommandRegistration)}`);
+    }
+    const targetCommandRegistration = assertObject(
+      await cdp.Mod.addCustomCommand({
+        name: "Custom.targetIdFromTabId",
+        paramsSchema: {
+          tabId: z.number(),
+        },
+        resultSchema: {
+          targetId: cdp.types.zod.Target.TargetID.nullable(),
+          tabId: z.number().optional(),
+        },
+        expression: `async ({ tabId }) => {
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.type === "page" && target.tabId === tabId);
         return { targetId: target?.id ?? null };
       }`,
-    });
-    await cdp.Mod.addMiddleware({
-      name: "*",
-      phase: cdp.RESPONSE,
-      expression: `async (payload, next) => {
+      }),
+      "Mod.addCustomCommand Custom.targetIdFromTabId",
+    );
+    if (targetCommandRegistration.registered !== true) {
+      throw new Error(`unexpected targetIdFromTabId registration ${JSON.stringify(targetCommandRegistration)}`);
+    }
+    const responseMiddlewareRegistration = assertObject(
+      await cdp.Mod.addMiddleware({
+        name: "*",
+        phase: cdp.RESPONSE,
+        expression: `async (payload, next) => {
         const seen = new WeakSet();
         const visit = async value => {
           if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -226,11 +316,18 @@ async function main() {
         await visit(payload);
         return next(payload);
       }`,
-    });
-    await cdp.Mod.addMiddleware({
-      name: "*",
-      phase: cdp.EVENT,
-      expression: `async (payload, next) => {
+      }),
+      "Mod.addMiddleware response",
+    );
+    if (responseMiddlewareRegistration.registered !== true || responseMiddlewareRegistration.phase !== cdp.RESPONSE) {
+      throw new Error(`unexpected response middleware registration ${JSON.stringify(responseMiddlewareRegistration)}`);
+    }
+
+    const eventMiddlewareRegistration = assertObject(
+      await cdp.Mod.addMiddleware({
+        name: "*",
+        phase: cdp.EVENT,
+        expression: `async (payload, next) => {
         const seen = new WeakSet();
         const visit = async value => {
           if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -244,7 +341,31 @@ async function main() {
         await visit(payload);
         return next(payload);
       }`,
-    });
+      }),
+      "Mod.addMiddleware event",
+    );
+    if (eventMiddlewareRegistration.registered !== true || eventMiddlewareRegistration.phase !== cdp.EVENT) {
+      throw new Error(`unexpected event middleware registration ${JSON.stringify(eventMiddlewareRegistration)}`);
+    }
+
+    const demoEventRegistration = assertObject(
+      await cdp.Mod.addCustomEvent({ name: "Custom.demoEvent" }),
+      "Mod.addCustomEvent Custom.demoEvent",
+    );
+    if (demoEventRegistration.registered !== true || demoEventRegistration.name !== "Custom.demoEvent") {
+      throw new Error(`unexpected Custom.demoEvent registration ${JSON.stringify(demoEventRegistration)}`);
+    }
+    const demoEventPromise = waitForEvent(cdp, "Custom.demoEvent", (event) => event?.value === "custom-event-ok");
+    const emitResult = assertObject(
+      await cdp.Mod.evaluate({
+        expression: `async () => await CDPMod.emit("Custom.demoEvent", { value: "custom-event-ok" })`,
+      }),
+      "Custom.demoEvent emit",
+    );
+    if (emitResult.emitted !== true)
+      throw new Error(`unexpected Custom.demoEvent emit result ${JSON.stringify(emitResult)}`);
+    const demoEvent = assertObject(await demoEventPromise, "Custom.demoEvent");
+    console.log("Custom.demoEvent ->", demoEvent);
 
     const ForegroundTargetChanged = z
       .object({
@@ -254,18 +375,15 @@ async function main() {
       })
       .passthrough()
       .meta({ id: "Custom.foregroundTargetChanged" });
-    await cdp.Mod.addCustomEvent(ForegroundTargetChanged);
+    const foregroundEventRegistration = assertObject(
+      await cdp.Mod.addCustomEvent(ForegroundTargetChanged),
+      "Mod.addCustomEvent Custom.foregroundTargetChanged",
+    );
+    if (foregroundEventRegistration.registered !== true) {
+      throw new Error(`unexpected foreground event registration ${JSON.stringify(foregroundEventRegistration)}`);
+    }
     cdp.on(ForegroundTargetChanged, (event) => {
       console.log("Custom.foregroundTargetChanged ->", event);
-      foregroundEvents.push(event);
-    });
-    await cdp.Mod.evaluate({
-      expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-          const targets = await chrome.debugger.getTargets();
-          const target = targets.find(target => target.type === "page" && target.tabId === tabId);
-          const tab = await chrome.tabs.get(tabId).catch(() => null);
-          await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
-        })`,
     });
 
     await cdp.Target.setDiscoverTargets({ discover: true });
@@ -282,21 +400,30 @@ async function main() {
     }
     console.log("normal event matched ->", createdTarget.targetId);
 
-    await cdp.Target.activateTarget({ targetId: createdTarget.targetId });
-    const foregroundDeadline = Date.now() + 3000;
-    while (
-      !foregroundEvents.some((event) => event.targetId === createdTarget.targetId) &&
-      Date.now() < foregroundDeadline
-    ) {
-      await sleep(20);
-    }
-    const foreground = foregroundEvents.find((event) => event.targetId === createdTarget.targetId);
-    if (!foreground) throw new Error(`expected Custom.foregroundTargetChanged for ${createdTarget.targetId}`);
-
     const tabFromTarget = await cdp.send("Custom.TabIdFromTargetId", { targetId: createdTarget.targetId });
-    if (tabFromTarget.tabId !== foreground.tabId)
+    if (typeof tabFromTarget.tabId !== "number")
       throw new Error(`unexpected Custom.TabIdFromTargetId result ${JSON.stringify(tabFromTarget)}`);
     console.log("Custom.TabIdFromTargetId ->", tabFromTarget);
+
+    const foregroundPromise = waitForEvent(
+      cdp,
+      "Custom.foregroundTargetChanged",
+      (event) => event?.targetId === createdTarget.targetId,
+    );
+    await cdp.Target.activateTarget({ targetId: createdTarget.targetId });
+    const foregroundEmit = assertObject(
+      await cdp.Mod.evaluate({
+        expression: `async ({ tabId, targetId }) => await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId, url: "https://example.com/" })`,
+        params: { tabId: tabFromTarget.tabId, targetId: createdTarget.targetId },
+      }),
+      "Custom.foregroundTargetChanged emit",
+    );
+    if (foregroundEmit.emitted !== true) {
+      throw new Error(`unexpected Custom.foregroundTargetChanged emit result ${JSON.stringify(foregroundEmit)}`);
+    }
+    const foreground = assertObject(await foregroundPromise, "Custom.foregroundTargetChanged");
+    if (foreground.tabId !== tabFromTarget.tabId)
+      throw new Error(`unexpected Custom.foregroundTargetChanged result ${JSON.stringify(foreground)}`);
 
     const targetFromTab = await cdp.send("Custom.targetIdFromTabId", { tabId: foreground.tabId });
     if (targetFromTab.targetId !== createdTarget.targetId || targetFromTab.tabId !== foreground.tabId) {

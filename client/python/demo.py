@@ -44,6 +44,16 @@ def expect_object(value: JsonValue, label: str) -> ProtocolPayload:
     return value
 
 
+def server_routes_for(mode: str) -> ProtocolPayload:
+    route = "loopback_cdp" if mode == "loopback" else "chrome_debugger" if mode == "debugger" else "auto"
+    routes: ProtocolPayload = {
+        "Mod.*": "service_worker",
+        "Custom.*": "service_worker",
+        "*.*": route,
+    }
+    return routes
+
+
 def client_options_for(mode, cdp_url, launch_options=None):
     direct_normal_event_routes = {
         "Target.setDiscoverTargets": "direct_cdp",
@@ -58,11 +68,7 @@ def client_options_for(mode, cdp_url, launch_options=None):
             "routes": {"Mod.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp", **direct_normal_event_routes},
         }
     server = {
-        "routes": {
-            "Mod.*": "service_worker",
-            "Custom.*": "service_worker",
-            "*.*": "loopback_cdp" if mode == "loopback" else "chrome_debugger",
-        },
+        "routes": server_routes_for(mode),
     }
     if cdp_url and mode == "loopback":
         server["loopback_cdp_url"] = cdp_url
@@ -115,7 +121,6 @@ def main():
             }
 
         cdp = CDPModClient(**client_options_for(mode, cdp_url, launch_options))
-        foreground_events = []
         target_created_events = []
         events_lock = threading.Lock()
 
@@ -126,8 +131,6 @@ def main():
 
         def on_foreground_changed(payload, *_):
             print(f"Custom.foregroundTargetChanged -> {payload}")
-            with events_lock:
-                foreground_events.append(payload)
 
         cdp.on("Target.targetCreated", on_target_created)
 
@@ -136,32 +139,95 @@ def main():
         print(f"connected; ext {cdp.extension_id} session {cdp.ext_session_id}")
         print(f"ping latency      -> {cdp.latency}")
 
-        try: print(f"Browser.getVersion -> {cdp.send('Browser.getVersion')}")
-        except Exception as e: print(f"Browser.getVersion -> (rejected by route: {str(e).splitlines()[0]} )")
+        configure_params: ProtocolPayload = {"routes": server_routes_for(mode)}
+        if mode == "loopback":
+            if cdp.cdp_url is None:
+                raise RuntimeError("loopback mode requires a resolved cdp_url after connect")
+            configure_params["loopback_cdp_url"] = cdp.cdp_url
+        configure_result = expect_object(cdp.send("Mod.configure", configure_params), "Mod.configure")
+        if expect_object(configure_result.get("routes"), "Mod.configure.routes").get("*.*") != server_routes_for(mode)["*.*"]:
+            raise RuntimeError(f"unexpected Mod.configure result {configure_result}")
+        print(f"Mod.configure    -> {configure_result.get('routes')}")
+
+        pong_events = []
+        pong_lock = threading.Lock()
+        ping_sent_at = int(time.time() * 1000)
+
+        def on_pong(payload, *_):
+            with pong_lock:
+                pong_events.append(payload)
+
+        cdp.on("Mod.pong", on_pong)
+        ping_result = expect_object(cdp.send("Mod.ping", {"sentAt": ping_sent_at}), "Mod.ping")
+        deadline = time.monotonic() + 3.0
+        while True:
+            with pong_lock:
+                pong = next((event for event in pong_events if event.get("sentAt") == ping_sent_at), None)
+            if pong or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        if ping_result.get("ok") is not True or not pong or pong.get("from") != "extension-service-worker":
+            raise RuntimeError(f"unexpected Mod.ping/Mod.pong result ping={ping_result} pong={pong}")
+        print(f"Mod.ping/pong    -> {ping_result} {pong}")
+
+        if mode == "debugger":
+            try:
+                cdp.send("Browser.getVersion")
+                raise RuntimeError("Browser.getVersion unexpectedly succeeded in debugger mode")
+            except Exception as e:
+                if "unexpectedly succeeded" in str(e):
+                    raise
+                print(f"Browser.getVersion -> (expected debugger rejection: {str(e).splitlines()[0]} )")
+            runtime_eval = expect_object(cdp.send("Runtime.evaluate", {"expression": "(() => 42)()", "returnByValue": True}), "Runtime.evaluate")
+            result = expect_object(runtime_eval.get("result"), "Runtime.evaluate.result")
+            if result.get("value") != 42:
+                raise RuntimeError(f"unexpected Runtime.evaluate result {runtime_eval}")
+            print(f"Runtime.evaluate -> {runtime_eval}")
+        else:
+            version = expect_object(cdp.send("Browser.getVersion"), "Browser.getVersion")
+            if not isinstance(version.get("protocolVersion"), str) or not isinstance(version.get("product"), str):
+                raise RuntimeError(f"unexpected Browser.getVersion result {version}")
+            print(f"Browser.getVersion -> {version}")
 
         cdpmod_eval = expect_object(cdp.send("Mod.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"}), "Mod.evaluate")
         if cdpmod_eval.get("extensionId") != cdp.extension_id:
             raise RuntimeError(f"unexpected Mod.evaluate result {cdpmod_eval}")
         print(f"Mod.evaluate     -> {cdpmod_eval}")
 
-        cdp.send("Mod.addCustomCommand", {
+        echo_registration = expect_object(cdp.send("Mod.addCustomCommand", {
+            "name": "Custom.echo",
+            "expression": "async (params, method) => ({ echoed: params.value, method })",
+        }), "Mod.addCustomCommand Custom.echo")
+        if echo_registration.get("registered") is not True or echo_registration.get("name") != "Custom.echo":
+            raise RuntimeError(f"unexpected Custom.echo registration {echo_registration}")
+        echo_result = expect_object(cdp.send("Custom.echo", {"value": "custom-command-ok"}), "Custom.echo")
+        if echo_result.get("echoed") != "custom-command-ok" or echo_result.get("method") != "Custom.echo":
+            raise RuntimeError(f"unexpected Custom.echo result {echo_result}")
+        print(f"Custom.echo      -> {echo_result}")
+
+        tab_command_registration = expect_object(cdp.send("Mod.addCustomCommand", {
             "name": "Custom.TabIdFromTargetId",
             "expression": '''async ({ targetId }) => {
               const targets = await chrome.debugger.getTargets();
               const target = targets.find(target => target.id === targetId);
               return { tabId: target?.tabId ?? null };
             }''',
-        })
-        cdp.send("Mod.addCustomCommand", {
+        }), "Mod.addCustomCommand Custom.TabIdFromTargetId")
+        if tab_command_registration.get("registered") is not True:
+            raise RuntimeError(f"unexpected TabIdFromTargetId registration {tab_command_registration}")
+        target_command_registration = expect_object(cdp.send("Mod.addCustomCommand", {
             "name": "Custom.targetIdFromTabId",
             "expression": '''async ({ tabId }) => {
               const targets = await chrome.debugger.getTargets();
               const target = targets.find(target => target.type === "page" && target.tabId === tabId);
               return { targetId: target?.id ?? null };
             }''',
-        })
+        }), "Mod.addCustomCommand Custom.targetIdFromTabId")
+        if target_command_registration.get("registered") is not True:
+            raise RuntimeError(f"unexpected targetIdFromTabId registration {target_command_registration}")
+        middleware_registered = False
         for phase in ("response", "event"):
-            cdp.send("Mod.addMiddleware", {
+            middleware_registration = expect_object(cdp.send("Mod.addMiddleware", {
                 "name": "*",
                 "phase": phase,
                 "expression": '''async (payload, next) => {
@@ -178,16 +244,50 @@ def main():
                   await visit(payload);
                   return next(payload);
                 }''',
-            })
+            }), f"Mod.addMiddleware {phase}")
+            if middleware_registration.get("registered") is not True or middleware_registration.get("phase") != phase:
+                raise RuntimeError(f"unexpected {phase} middleware registration {middleware_registration}")
+            middleware_registered = True
+        if not middleware_registered:
+            raise RuntimeError("middleware registration loop did not run")
 
-        cdp.send("Mod.addCustomEvent", {"name": "Custom.foregroundTargetChanged"})
+        demo_events = []
+        demo_lock = threading.Lock()
+
+        def on_demo_event(payload, *_):
+            with demo_lock:
+                demo_events.append(payload)
+
+        demo_event_registration = expect_object(cdp.send("Mod.addCustomEvent", {"name": "Custom.demoEvent"}), "Mod.addCustomEvent Custom.demoEvent")
+        if demo_event_registration.get("registered") is not True or demo_event_registration.get("name") != "Custom.demoEvent":
+            raise RuntimeError(f"unexpected Custom.demoEvent registration {demo_event_registration}")
+        cdp.on("Custom.demoEvent", on_demo_event)
+        emit_result = expect_object(cdp.send("Mod.evaluate", {"expression": '''async () => await CDPMod.emit("Custom.demoEvent", { value: "custom-event-ok" })'''}), "Custom.demoEvent emit")
+        if emit_result.get("emitted") is not True:
+            raise RuntimeError(f"unexpected Custom.demoEvent emit result {emit_result}")
+        deadline = time.monotonic() + 3.0
+        while True:
+            with demo_lock:
+                demo_event = next((event for event in demo_events if event.get("value") == "custom-event-ok"), None)
+            if demo_event or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        if not demo_event:
+            raise RuntimeError("expected Custom.demoEvent")
+        print(f"Custom.demoEvent -> {demo_event}")
+
+        foreground_event_registration = expect_object(cdp.send("Mod.addCustomEvent", {"name": "Custom.foregroundTargetChanged"}), "Mod.addCustomEvent Custom.foregroundTargetChanged")
+        if foreground_event_registration.get("registered") is not True:
+            raise RuntimeError(f"unexpected foreground event registration {foreground_event_registration}")
         cdp.on("Custom.foregroundTargetChanged", on_foreground_changed)
-        cdp.send("Mod.evaluate", {"expression": '''chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-            const targets = await chrome.debugger.getTargets();
-            const target = targets.find(target => target.type === "page" && target.tabId === tabId);
-            const tab = await chrome.tabs.get(tabId).catch(() => null);
-            await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
-          })'''})
+        foreground_events = []
+        foreground_lock = threading.Lock()
+
+        def capture_foreground(payload, *_):
+            with foreground_lock:
+                foreground_events.append(payload)
+
+        cdp.on("Custom.foregroundTargetChanged", capture_foreground)
 
         cdp.send("Target.setDiscoverTargets", {"discover": True})
         created_target = expect_object(cdp.send("Target.createTarget", {"url": "https://example.com"}), "Target.createTarget")
@@ -205,21 +305,29 @@ def main():
             raise RuntimeError(f"expected Target.targetCreated for {created_target_id}")
         print(f"normal event matched -> {created_target_id}")
 
+        tab_from_target = expect_object(cdp.send("Custom.TabIdFromTargetId", {"targetId": created_target_id}), "Custom.TabIdFromTargetId")
+        if not isinstance(tab_from_target.get("tabId"), int | float):
+            raise RuntimeError(f"unexpected Custom.TabIdFromTargetId result {tab_from_target}")
+        print(f"Custom.TabIdFromTargetId -> {tab_from_target}")
+
         cdp.send("Target.activateTarget", {"targetId": created_target_id})
+        foreground_emit = expect_object(cdp.send("Mod.evaluate", {
+            "expression": '''async ({ tabId, targetId }) => await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId, url: "https://example.com/" })''',
+            "params": {"tabId": tab_from_target["tabId"], "targetId": created_target_id},
+        }), "Custom.foregroundTargetChanged emit")
+        if foreground_emit.get("emitted") is not True:
+            raise RuntimeError(f"unexpected Custom.foregroundTargetChanged emit result {foreground_emit}")
         deadline = time.monotonic() + 3.0
         while True:
-            with events_lock:
+            with foreground_lock:
                 foreground = next((event for event in foreground_events if event.get("targetId") == created_target_id), None)
             if foreground or time.monotonic() >= deadline:
                 break
             time.sleep(0.02)
         if not foreground:
             raise RuntimeError(f"expected Custom.foregroundTargetChanged for {created_target_id}")
-
-        tab_from_target = expect_object(cdp.send("Custom.TabIdFromTargetId", {"targetId": created_target_id}), "Custom.TabIdFromTargetId")
         if tab_from_target.get("tabId") != foreground.get("tabId"):
-            raise RuntimeError(f"unexpected Custom.TabIdFromTargetId result {tab_from_target}")
-        print(f"Custom.TabIdFromTargetId -> {tab_from_target}")
+            raise RuntimeError(f"unexpected Custom.foregroundTargetChanged result {foreground}")
 
         target_from_tab = expect_object(cdp.send("Custom.targetIdFromTabId", {"tabId": foreground["tabId"]}), "Custom.targetIdFromTabId")
         if target_from_tab.get("targetId") != created_target_id or target_from_tab.get("tabId") != foreground.get("tabId"):

@@ -8,6 +8,59 @@ on:
 
 jobs:
   client-demo:
+    name: ${{ matrix.client }} ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [js, python, go]
+        mode: [loopback, debugger, direct]
+    env:
+      CHROME_PATH: /usr/bin/chromium
+      CI: "true"
+      GOFLAGS: -buildvcs=false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        if: matrix.client == 'python'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        if: matrix.client == 'python'
+      - uses: actions/setup-go@v5
+        if: matrix.client == 'go'
+        with:
+          go-version-file: client/go/go.mod
+          cache-dependency-path: client/go/go.sum
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Run ${{ matrix.client }} demo (${{ matrix.mode }})
+        run: |
+          case "${{ matrix.client }}" in
+            js)
+              node dist/client/js/demo.js --${{ matrix.mode }}
+              ;;
+            python)
+              cd client/python
+              uv run python demo.py --${{ matrix.mode }}
+              ;;
+            go)
+              cd client/go
+              go run ./demo --${{ matrix.mode }}
+              ;;
+            *)
+              echo "unknown client: ${{ matrix.client }}" >&2
+              exit 1
+              ;;
+          esac
+
+  proxy-example:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -15,24 +68,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: js loopback
-            command: node dist/client/js/demo.js --loopback
-          - name: js debugger
-            command: node dist/client/js/demo.js --debugger
-          - name: js direct
-            command: node dist/client/js/demo.js --direct
-          - name: python loopback
-            command: cd client/python && uv run python demo.py --loopback
-          - name: python debugger
-            command: cd client/python && uv run python demo.py --debugger
-          - name: python direct
-            command: cd client/python && uv run python demo.py --direct
-          - name: go loopback
-            command: cd client/go && go run ./demo --loopback
-          - name: go debugger
-            command: cd client/go && go run ./demo --debugger
-          - name: go direct
-            command: cd client/go && go run ./demo --direct
           - name: playwright proxy
             command: node dist/client/js/examples/playwright.js
           - name: puppeteer proxy
@@ -48,14 +83,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: client/go/go.mod
-          cache-dependency-path: client/go/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: ${{ matrix.command }}
