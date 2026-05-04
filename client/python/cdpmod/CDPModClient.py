@@ -6,7 +6,7 @@ Constructor parameter names mirror the JS / Go ports:
     routes            client-side routing dict
     server            { 'loopback_cdp_url'?, 'routes'? } passed to CDPModServer.configure
 
-Public methods: connect(), send(method, params), on(event, handler), close().
+Public methods: connect(), send(method, params), on(event, handler), close(), _cdp.send(), _cdp.on().
 Synchronous (blocking) API; one background thread reads frames off the WS.
 """
 
@@ -19,6 +19,7 @@ import time
 import tempfile
 import urllib.request
 import socket
+import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from queue import Queue, Empty
@@ -83,6 +84,22 @@ class _DomainMethods:
             return self._client.send(f"{self._domain}.{method}", params)
 
         return call
+
+
+class _RawCDP:
+    def __init__(self, client: "CDPModClient") -> None:
+        self._client = client
+
+    def send(
+        self,
+        method: str,
+        params: ProtocolParams | None = None,
+        session_id: str | None = None,
+    ) -> ProtocolResult:
+        return self._client._send_frame(method, params or {}, session_id=session_id, record_raw_timing=True)
+
+    def on(self, event: str, handler: Handler) -> "CDPModClient":
+        return self._client.on(event, handler)
 
 
 def websocket_url_for(endpoint: str) -> str:
@@ -188,6 +205,8 @@ class CDPModClient:
         self._closed = False
         self._launched_process: subprocess.Popen[bytes] | None = None
         self._profile_dir: tempfile.TemporaryDirectory[str] | None = None
+        self._prepared_extension_dir: tempfile.TemporaryDirectory[str] | None = None
+        self._cdp = _RawCDP(self)
 
     def connect(self) -> "CDPModClient":
         connect_started_at = int(time.time() * 1000)
@@ -214,6 +233,7 @@ class CDPModClient:
         self._send_frame("Target.setDiscoverTargets", {"discover": True})
 
         extension_started_at = int(time.time() * 1000)
+        self._prepare_extension_path()
         ext = self._ensure_extension()
         extension_completed_at = int(time.time() * 1000)
         self.extension_id = ext["extension_id"]
@@ -280,9 +300,6 @@ class CDPModClient:
         }
         return result
 
-    def raw_send(self, method: str, params: ProtocolParams | None = None) -> ProtocolResult:
-        return self._send_frame(method, params or {}, record_raw_timing=True)
-
     def on(self, event: str, handler: Handler) -> "CDPModClient":
         self._handlers.setdefault(event, []).append(handler)
         return self
@@ -309,6 +326,9 @@ class CDPModClient:
         if self._profile_dir is not None:
             self._profile_dir.cleanup()
             self._profile_dir = None
+        if self._prepared_extension_dir is not None:
+            self._prepared_extension_dir.cleanup()
+            self._prepared_extension_dir = None
 
     def _ready_expression(self) -> str:
         if not self.service_worker_ready_expression:
@@ -383,6 +403,14 @@ class CDPModClient:
         raise RuntimeError(f"Chrome at {cdp_url} did not become ready within 15s")
 
     # --- internals ---------------------------------------------------------
+
+    def _prepare_extension_path(self) -> None:
+        if not self.extension_path or not self.extension_path.endswith(".zip"):
+            return
+        self._prepared_extension_dir = tempfile.TemporaryDirectory(prefix="cdpmod-extension.")
+        with zipfile.ZipFile(self.extension_path) as archive:
+            archive.extractall(self._prepared_extension_dir.name)
+        self.extension_path = self._prepared_extension_dir.name
 
     def _send_raw(self, wrapped: TranslatedCommand) -> JsonValue:
         if wrapped["target"] == "direct_cdp":
@@ -563,6 +591,11 @@ class CDPModClient:
 
     def _ensure_extension(self) -> ExtensionInfo:
         ready_expression = self._ready_expression()
+        trust_service_worker_target = (
+            self.trust_service_worker_target
+            or len(self.service_worker_url_includes) > 0
+            or any(len([part for part in suffix.split("/") if part]) > 1 for suffix in self.service_worker_url_suffixes)
+        )
 
         def probe_target(target: TargetInfo, timeout: float = 0) -> ExtensionProbe | None:
             target_id = target.get("targetId")
@@ -591,7 +624,7 @@ class CDPModClient:
         # 1. Discover an existing CDPMod service worker from the current CDP
         # target snapshot. If none is already ready, use explicit injection.
         target_infos = self._target_infos()
-        if self.trust_service_worker_target:
+        if trust_service_worker_target:
             for t in target_infos:
                 if self._service_worker_target_matches(t):
                     result = probe_target(t, timeout=2)
@@ -621,7 +654,7 @@ class CDPModClient:
         except RuntimeError as e:
             if "Method not available" in str(e) or "wasn't found" in str(e):
                 target_infos = self._target_infos()
-                if self.trust_service_worker_target:
+                if trust_service_worker_target:
                     for t in target_infos:
                         if self._service_worker_target_matches(t):
                             result = probe_target(t, timeout=2)

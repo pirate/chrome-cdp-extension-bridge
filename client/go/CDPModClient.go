@@ -7,7 +7,7 @@
 //	Routes          client-side routing map.
 //	Server          { LoopbackCDPURL?, Routes? } passed to CDPModServer.configure.
 //
-// Public methods: Connect, Send(method, params), On(event, handler), Close.
+// Public methods: Connect, Send(method, params), SendRaw, On, OnRaw, Close.
 // Synchronous; one background goroutine reads frames off the WS.
 //
 // Route and CDPMod wire translation lives in translate.go. This file owns
@@ -20,6 +20,7 @@
 package cdpmod
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -136,29 +137,30 @@ type Options struct {
 type Handler func(data any)
 
 type CDPModClient struct {
-	opts              Options
-	CDPURL            string
-	conn              net.Conn
-	writeMu           sync.Mutex
-	ctx               context.Context
-	cancel            context.CancelFunc
-	mu                sync.Mutex
-	nextID            int64
-	pending           map[int64]chan map[string]any
-	handlers          map[string][]Handler
-	handlersMu        sync.Mutex
-	targetSessions    map[string]string
-	sessionTargets    map[string]map[string]any
-	targetSessionsMu  sync.Mutex
-	ExtensionID       string
-	ExtTargetID       string
-	ExtSessionID      string
-	Latency           map[string]any
-	ConnectTiming     map[string]any
-	LastCommandTiming map[string]any
-	LastRawTiming     map[string]any
-	launchedProcess   *exec.Cmd
-	profileDir        string
+	opts                 Options
+	CDPURL               string
+	conn                 net.Conn
+	writeMu              sync.Mutex
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	mu                   sync.Mutex
+	nextID               int64
+	pending              map[int64]chan map[string]any
+	handlers             map[string][]Handler
+	handlersMu           sync.Mutex
+	targetSessions       map[string]string
+	sessionTargets       map[string]map[string]any
+	targetSessionsMu     sync.Mutex
+	ExtensionID          string
+	ExtTargetID          string
+	ExtSessionID         string
+	Latency              map[string]any
+	ConnectTiming        map[string]any
+	LastCommandTiming    map[string]any
+	LastRawTiming        map[string]any
+	launchedProcess      *exec.Cmd
+	profileDir           string
+	preparedExtensionDir string
 }
 
 func New(opts Options) *CDPModClient {
@@ -231,6 +233,10 @@ func (c *CDPModClient) Connect() error {
 	// once the reader goroutine is running, any further error must call Close
 	// to tear it down; otherwise the goroutine + ws connection leak.
 	extensionStartedAt := time.Now().UnixMilli()
+	if err := c.prepareExtensionPath(); err != nil {
+		c.Close()
+		return err
+	}
 	ext, err := c.ensureExtension()
 	if err != nil {
 		c.Close()
@@ -340,9 +346,16 @@ func (c *CDPModClient) Send(method string, params map[string]any) (any, error) {
 	return result, err
 }
 
-func (c *CDPModClient) RawSend(method string, params map[string]any) (map[string]any, error) {
+func (c *CDPModClient) SendRaw(method string, params map[string]any, sessionID ...string) (map[string]any, error) {
 	startedAt := time.Now().UnixMilli()
-	result, err := c.sendFrame(method, params, "")
+	if params == nil {
+		params = map[string]any{}
+	}
+	targetSessionID := ""
+	if len(sessionID) > 0 {
+		targetSessionID = sessionID[0]
+	}
+	result, err := c.sendFrame(method, params, targetSessionID)
 	completedAt := time.Now().UnixMilli()
 	c.LastRawTiming = map[string]any{
 		"method":       method,
@@ -351,6 +364,10 @@ func (c *CDPModClient) RawSend(method string, params map[string]any) (map[string
 		"duration_ms":  completedAt - startedAt,
 	}
 	return result, err
+}
+
+func (c *CDPModClient) OnRaw(event string, handler Handler) {
+	c.On(event, handler)
 }
 
 func (c *CDPModClient) On(event string, handler Handler) {
@@ -374,6 +391,10 @@ func (c *CDPModClient) Close() {
 	if c.profileDir != "" {
 		_ = os.RemoveAll(c.profileDir)
 		c.profileDir = ""
+	}
+	if c.preparedExtensionDir != "" {
+		_ = os.RemoveAll(c.preparedExtensionDir)
+		c.preparedExtensionDir = ""
 	}
 }
 
@@ -464,6 +485,65 @@ func (c *CDPModClient) launchChrome() (string, error) {
 }
 
 // --- internals -----------------------------------------------------------
+
+func (c *CDPModClient) prepareExtensionPath() error {
+	if c.opts.ExtensionPath == "" || !strings.HasSuffix(c.opts.ExtensionPath, ".zip") {
+		return nil
+	}
+	dir, err := os.MkdirTemp("", "cdpmod-extension.")
+	if err != nil {
+		return err
+	}
+	reader, err := zip.OpenReader(c.opts.ExtensionPath)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return err
+	}
+	defer reader.Close()
+	for _, file := range reader.File {
+		targetPath := filepath.Join(dir, file.Name)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+				_ = os.RemoveAll(dir)
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			_ = os.RemoveAll(dir)
+			return err
+		}
+		src, err := file.Open()
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			return err
+		}
+		dst, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.FileInfo().Mode())
+		if err != nil {
+			_ = src.Close()
+			_ = os.RemoveAll(dir)
+			return err
+		}
+		_, copyErr := io.Copy(dst, src)
+		srcErr := src.Close()
+		dstErr := dst.Close()
+		if copyErr != nil {
+			_ = os.RemoveAll(dir)
+			return copyErr
+		}
+		if srcErr != nil {
+			_ = os.RemoveAll(dir)
+			return srcErr
+		}
+		if dstErr != nil {
+			_ = os.RemoveAll(dir)
+			return dstErr
+		}
+	}
+	c.preparedExtensionDir = dir
+	c.opts.ExtensionPath = dir
+	return nil
+}
 
 func (c *CDPModClient) sendRaw(command rawCommand) (any, error) {
 	if command.Target == "direct_cdp" {
@@ -699,7 +779,8 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 		return nil, err
 	}
 	targetsRaw, _ := targetsResp["targetInfos"].([]any)
-	if c.opts.TrustServiceWorkerTarget {
+	trustServiceWorkerTarget := c.trustServiceWorkerTarget()
+	if trustServiceWorkerTarget {
 		for _, t := range targetsRaw {
 			ti, _ := t.(map[string]any)
 			if !c.serviceWorkerTargetMatches(ti) {
@@ -740,7 +821,7 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 				return nil, getTargetsErr
 			}
 			targetsRaw, _ := targetsResp["targetInfos"].([]any)
-			if c.opts.TrustServiceWorkerTarget {
+			if trustServiceWorkerTarget {
 				for _, t := range targetsRaw {
 					ti, _ := t.(map[string]any)
 					if !c.serviceWorkerTargetMatches(ti) {
@@ -798,6 +879,24 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("timed out after 60s waiting for service worker target for extension %s", extID)
+}
+
+func (c *CDPModClient) trustServiceWorkerTarget() bool {
+	if c.opts.TrustServiceWorkerTarget || len(c.opts.ServiceWorkerURLIncludes) > 0 {
+		return true
+	}
+	for _, suffix := range c.opts.ServiceWorkerURLSuffixes {
+		parts := 0
+		for _, part := range strings.Split(suffix, "/") {
+			if part != "" {
+				parts++
+			}
+		}
+		if parts > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CDPModClient) serviceWorkerTargetMatches(target map[string]any) bool {
