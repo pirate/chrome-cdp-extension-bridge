@@ -1,4 +1,4 @@
-package cdpmod
+package modcdp
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const bindingPrefix = "__CDPMod_"
+const bindingPrefix = "__ModCDP_"
 
 func DefaultClientRoutes() map[string]string {
 	return map[string]string{
@@ -74,7 +74,7 @@ func evalParams(expression string) map[string]any {
 	}
 }
 
-func wrapCDPModEvaluate(params map[string]any, sessionID string) map[string]any {
+func wrapModCDPEvaluate(params map[string]any, sessionID string) map[string]any {
 	expr, _ := params["expression"].(string)
 	userParams := params["params"]
 	if userParams == nil {
@@ -87,35 +87,35 @@ func wrapCDPModEvaluate(params map[string]any, sessionID string) map[string]any 
 	up, _ := json.Marshal(userParams)
 	sid, _ := json.Marshal(cdpSessionID)
 	return evalParams(fmt.Sprintf(
-		`(async () => { const params = %s; const cdp = globalThis.CDPMod.attachToSession(%s); const CDPMod = globalThis.CDPMod; const chrome = globalThis.chrome; const value = (%s); return typeof value === 'function' ? await value(params) : value; })()`,
+		`(async () => { const params = %s; const cdp = globalThis.ModCDP.attachToSession(%s); const ModCDP = globalThis.ModCDP; const chrome = globalThis.chrome; const value = (%s); return typeof value === 'function' ? await value(params) : value; })()`,
 		string(up), string(sid), expr,
 	))
 }
 
-func wrapCDPModAddCustomCommand(params map[string]any) map[string]any {
+func wrapModCDPAddCustomCommand(params map[string]any) map[string]any {
 	name, _ := json.Marshal(params["name"])
 	expr, _ := params["expression"].(string)
 	exprJSON, _ := json.Marshal(expr)
 	pSchema, _ := json.Marshal(params["paramsSchema"])
 	rSchema, _ := json.Marshal(params["resultSchema"])
 	return evalParams(fmt.Sprintf(
-		`(() => { return globalThis.CDPMod.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, cdpSessionId, method) => { const cdp = globalThis.CDPMod.attachToSession(cdpSessionId); const CDPMod = globalThis.CDPMod; const chrome = globalThis.chrome; const handler = (%s); return await handler(params || {}, method); }, }); })()`,
+		`(() => { return globalThis.ModCDP.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, cdpSessionId, method) => { const cdp = globalThis.ModCDP.attachToSession(cdpSessionId); const ModCDP = globalThis.ModCDP; const chrome = globalThis.chrome; const handler = (%s); return await handler(params || {}, method); }, }); })()`,
 		string(name), string(pSchema), string(rSchema), string(exprJSON), expr,
 	))
 }
 
-func wrapCDPModAddCustomEvent(params map[string]any) map[string]any {
+func wrapModCDPAddCustomEvent(params map[string]any) map[string]any {
 	rawName, _ := params["name"].(string)
 	name, _ := json.Marshal(rawName)
 	bn, _ := json.Marshal(bindingNameFor(rawName))
 	pSchema, _ := json.Marshal(params["eventSchema"])
 	return evalParams(fmt.Sprintf(
-		`globalThis.CDPMod.addCustomEvent({ name: %s, bindingName: %s, eventSchema: %s })`,
+		`globalThis.ModCDP.addCustomEvent({ name: %s, bindingName: %s, eventSchema: %s })`,
 		string(name), string(bn), string(pSchema),
 	))
 }
 
-func wrapCDPModAddMiddleware(params map[string]any) map[string]any {
+func wrapModCDPAddMiddleware(params map[string]any) map[string]any {
 	name := params["name"]
 	if name == nil {
 		name = "*"
@@ -125,7 +125,7 @@ func wrapCDPModAddMiddleware(params map[string]any) map[string]any {
 	phaseJSON, _ := json.Marshal(params["phase"])
 	exprJSON, _ := json.Marshal(rawExpr)
 	return evalParams(fmt.Sprintf(
-		`(() => { return globalThis.CDPMod.addMiddleware({ name: %s, phase: %s, expression: %s, handler: async (payload, next, context = {}) => { const cdp = globalThis.CDPMod.attachToSession(context.cdpSessionId ?? null); const CDPMod = globalThis.CDPMod; const chrome = globalThis.chrome; const middleware = (%s); return await middleware(payload, next, context); }, }); })()`,
+		`(() => { return globalThis.ModCDP.addMiddleware({ name: %s, phase: %s, expression: %s, handler: async (payload, next, context = {}) => { const cdp = globalThis.ModCDP.attachToSession(context.cdpSessionId ?? null); const ModCDP = globalThis.ModCDP; const chrome = globalThis.chrome; const middleware = (%s); return await middleware(payload, next, context); }, }); })()`,
 		string(nameJSON), string(phaseJSON), string(exprJSON), rawExpr,
 	))
 }
@@ -134,7 +134,7 @@ func wrapCustomCommand(method string, params map[string]any, sessionID string) m
 	m, _ := json.Marshal(method)
 	p, _ := json.Marshal(params)
 	sid, _ := json.Marshal(sessionID)
-	return evalParams(fmt.Sprintf(`globalThis.CDPMod.handleCommand(%s, %s, %s)`, string(m), string(p), string(sid)))
+	return evalParams(fmt.Sprintf(`globalThis.ModCDP.handleCommand(%s, %s, %s)`, string(m), string(p), string(sid)))
 }
 
 func wrapServiceWorkerCommand(method string, params map[string]any, sessionID string) []rawStep {
@@ -156,17 +156,17 @@ func wrapServiceWorkerCommand(method string, params map[string]any, sessionID st
 		name, _ := params["name"].(string)
 		return []rawStep{
 			{Method: "Runtime.addBinding", Params: map[string]any{"name": bindingNameFor(name)}},
-			{Method: "Runtime.evaluate", Params: wrapCDPModAddCustomEvent(params), Unwrap: "evaluate"},
+			{Method: "Runtime.evaluate", Params: wrapModCDPAddCustomEvent(params), Unwrap: "evaluate"},
 		}
 	}
 	runtimeParams := map[string]any{}
 	switch method {
 	case "Mod.evaluate":
-		runtimeParams = wrapCDPModEvaluate(params, sessionID)
+		runtimeParams = wrapModCDPEvaluate(params, sessionID)
 	case "Mod.addCustomCommand":
-		runtimeParams = wrapCDPModAddCustomCommand(params)
+		runtimeParams = wrapModCDPAddCustomCommand(params)
 	case "Mod.addMiddleware":
-		runtimeParams = wrapCDPModAddMiddleware(params)
+		runtimeParams = wrapModCDPAddMiddleware(params)
 	default:
 		cdpSessionID, _ := params["cdpSessionId"].(string)
 		if cdpSessionID == "" {

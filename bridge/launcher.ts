@@ -1,6 +1,6 @@
 // @ts-nocheck
 // launcher.js: find a Chrome/Chromium binary and launch it with CDP enabled.
-// Knows nothing about CDPMod, the extension, or wrap/unwrap. Extra launch args
+// Knows nothing about ModCDP, the extension, or wrap/unwrap. Extra launch args
 // are passed through verbatim; extension discovery/injection is owned elsewhere.
 
 import { spawn } from "node:child_process";
@@ -31,6 +31,7 @@ const DEFAULT_FLAGS = [
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-default-apps",
+  "--disable-dev-shm-usage",
   "--disable-background-networking",
   "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding",
@@ -67,7 +68,7 @@ export async function freePort() {
 export async function launchChrome({
   executable_path,
   port,
-  headless = false,
+  headless = process.platform === "linux" && !process.env.DISPLAY,
   sandbox = false,
   extra_args = [],
   stdio = "ignore",
@@ -81,7 +82,7 @@ export async function launchChrome({
 } = {}) {
   const exe = findChromeBinary(executable_path);
   const usePort = port || (await freePort());
-  const profileDir = await mkdtemp(path.join(tmpdir(), "cdpmod."));
+  const profileDir = await mkdtemp(path.join(tmpdir(), "modcdp."));
   const flags = [
     ...DEFAULT_FLAGS,
     headless ? "--headless=new" : null,
@@ -103,7 +104,8 @@ export async function launchChrome({
   };
 
   const cdpUrl = `http://127.0.0.1:${usePort}`;
-  const deadline = Date.now() + 15_000;
+  const chromeReadyTimeoutMs = 45_000;
+  const deadline = Date.now() + chromeReadyTimeoutMs;
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`${cdpUrl}/json/version`);
@@ -115,5 +117,5 @@ export async function launchChrome({
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await close();
-  throw new Error(`Chrome at ${cdpUrl} did not become ready within 15s`);
+  throw new Error(`Chrome at ${cdpUrl} did not become ready within ${chromeReadyTimeoutMs / 1000}s`);
 }

@@ -1,4 +1,4 @@
-// Puppeteer through the standalone CDPMod proxy.
+// Puppeteer through the standalone ModCDP proxy.
 //
 // This is intentionally a normal Puppeteer connect flow. The proxy endpoint
 // exposes the regular CDP discovery endpoints while adding Mod.* and Custom.*

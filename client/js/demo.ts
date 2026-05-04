@@ -1,6 +1,6 @@
-// JS demo for CDPModClient with --direct / --loopback / --debugger modes.
+// JS demo for ModCDPClient with --direct / --loopback / --debugger modes.
 //
-// Modes select where non-CDPMod commands ultimately get serviced:
+// Modes select where non-ModCDP commands ultimately get serviced:
 //   --live        use the running Google Chrome enabled via chrome://inspect.
 //   --direct      client sends standard CDP straight to the upstream WS.
 //   --loopback    client routes *.* through the extension service worker,
@@ -25,7 +25,7 @@ import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 
-import { CDPModClient } from "./CDPModClient.js";
+import { ModCDPClient } from "./ModCDPClient.js";
 
 type TargetCreatedPayload = {
   targetInfo?: { targetId?: string } & Record<string, unknown>;
@@ -185,7 +185,7 @@ async function main() {
     };
   }
 
-  const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl, launch_options));
+  const cdp = new ModCDPClient(clientOptionsFor(mode, cdpUrl, launch_options));
   const foregroundEvents = [];
   const targetCreatedEvents: TargetCreatedPayload[] = [];
 
@@ -248,12 +248,12 @@ async function main() {
       console.log("Browser.getVersion ->", version);
     }
 
-    const cdpmodEval = (await cdp.Mod.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
+    const modcdpEval = (await cdp.Mod.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
       extensionId?: string;
     };
-    if (cdpmodEval.extensionId !== cdp.extension_id)
-      throw new Error(`unexpected Mod.evaluate result ${JSON.stringify(cdpmodEval)}`);
-    console.log("Mod.evaluate     ->", cdpmodEval);
+    if (modcdpEval.extensionId !== cdp.extension_id)
+      throw new Error(`unexpected Mod.evaluate result ${JSON.stringify(modcdpEval)}`);
+    console.log("Mod.evaluate     ->", modcdpEval);
 
     const echoRegistration = assertObject(
       await cdp.Mod.addCustomCommand({
@@ -372,7 +372,7 @@ async function main() {
     const demoEventPromise = waitForEvent(cdp, "Custom.demoEvent", (event) => event?.value === "custom-event-ok");
     const emitResult = assertObject(
       await cdp.Mod.evaluate({
-        expression: `async () => await CDPMod.emit("Custom.demoEvent", { value: "custom-event-ok" })`,
+        expression: `async () => await ModCDP.emit("Custom.demoEvent", { value: "custom-event-ok" })`,
       }),
       "Custom.demoEvent emit",
     );
@@ -478,7 +478,7 @@ async function runRepl(cdp, mode) {
     while (true) {
       let line;
       try {
-        line = (await rl.question("CDPMod> ")).trim();
+        line = (await rl.question("ModCDP> ")).trim();
       } catch {
         break;
       }

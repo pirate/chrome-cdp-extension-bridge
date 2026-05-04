@@ -2,7 +2,7 @@
 import type { z } from "zod";
 import type { cdp } from "./cdp.js";
 import { commands, events, types as runtimeTypes } from "./zod.js";
-import { Mod, normalizeCDPModName, normalizeCDPModPayloadSchema } from "./cdpmod.js";
+import { Mod, normalizeModCDPName, normalizeModCDPPayloadSchema } from "./modcdp.js";
 
 export type CdpNamedValue<Name extends string = string, Kind extends string = string> = { readonly id: Name; readonly name: Name; readonly kind: Kind; meta(): { id: Name; name: Name; kind: Kind } };
 export type CdpCommandAlias<Params, Result, Name extends string> = ((params: Params) => Promise<Result>) & CdpNamedValue<Name, "command">;
@@ -2088,9 +2088,9 @@ export function createCdpAliases(send: CdpAliasSend, hooks: CdpAliasHooks = {}):
       },
       addCustomCommand: async (params?: unknown) => {
         const parsed = Mod.AddCustomCommandParams.parse(params ?? {});
-        const name = normalizeCDPModName(parsed.name);
-        const paramsSchema = normalizeCDPModPayloadSchema(parsed.paramsSchema);
-        const resultSchema = normalizeCDPModPayloadSchema(parsed.resultSchema);
+        const name = normalizeModCDPName(parsed.name);
+        const paramsSchema = normalizeModCDPPayloadSchema(parsed.paramsSchema);
+        const resultSchema = normalizeModCDPPayloadSchema(parsed.resultSchema);
         const response = Mod.AddCustomCommandResponse.parse(await send("Mod.addCustomCommand", { ...parsed, name, paramsSchema: null, resultSchema: null }));
         hooks.onCustomCommand?.(name, paramsSchema, resultSchema);
         return response;
@@ -2099,22 +2099,22 @@ export function createCdpAliases(send: CdpAliasSend, hooks: CdpAliasHooks = {}):
         const parsed = Mod.AddCustomEventParams.parse(params ?? {});
         const directSchema = Mod.ZodType.safeParse(parsed);
         if (directSchema.success) {
-          const name = normalizeCDPModName(directSchema.data);
-          const eventSchema = normalizeCDPModPayloadSchema(directSchema.data);
+          const name = normalizeModCDPName(directSchema.data);
+          const eventSchema = normalizeModCDPPayloadSchema(directSchema.data);
           const response = Mod.AddCustomEventResponse.parse(await send("Mod.addCustomEvent", { name, eventSchema: null }));
           hooks.onCustomEvent?.(name, eventSchema);
           return response;
         }
         const objectParams = Mod.AddCustomEventObjectParams.parse(parsed);
-        const name = normalizeCDPModName(objectParams.name);
-        const eventSchema = normalizeCDPModPayloadSchema(objectParams.eventSchema);
+        const name = normalizeModCDPName(objectParams.name);
+        const eventSchema = normalizeModCDPPayloadSchema(objectParams.eventSchema);
         const response = Mod.AddCustomEventResponse.parse(await send("Mod.addCustomEvent", { ...objectParams, name, eventSchema: null }));
         hooks.onCustomEvent?.(name, eventSchema);
         return response;
       },
       addMiddleware: async (params?: unknown) => {
         const parsed = Mod.AddMiddlewareParams.parse(params ?? {});
-        const name = parsed.name == null ? undefined : normalizeCDPModName(parsed.name);
+        const name = parsed.name == null ? undefined : normalizeModCDPName(parsed.name);
         return Mod.AddMiddlewareResponse.parse(await send("Mod.addMiddleware", { ...parsed, name }));
       },
       configure: async (params?: unknown) => {

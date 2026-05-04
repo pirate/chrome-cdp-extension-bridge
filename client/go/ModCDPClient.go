@@ -1,23 +1,23 @@
-// CDPModClient (Go): importable, no CLI, no demo code.
+// ModCDPClient (Go): importable, no CLI, no demo code.
 //
 // Field/option names mirror the JS / Python ports:
 //
 //	CDPURL          upstream CDP URL.
 //	ExtensionPath   extension directory.
 //	Routes          client-side routing map.
-//	Server          { LoopbackCDPURL?, Routes? } passed to CDPModServer.configure.
+//	Server          { LoopbackCDPURL?, Routes? } passed to ModCDPServer.configure.
 //
 // Public methods: Connect, Send(method, params), SendRaw, On, OnRaw, Close.
 // Synchronous; one background goroutine reads frames off the WS.
 //
-// Route and CDPMod wire translation lives in translate.go. This file owns
+// Route and ModCDP wire translation lives in translate.go. This file owns
 // websocket transport, request bookkeeping, extension discovery, and events.
 //
 // Transport: gobwas/ws is intentionally low-level. We hold the underlying
 // net.Conn ourselves and use wsutil.ReadServerText / WriteClientText to push
 // raw JSON []byte over the websocket -- no message types, no schema, no
 // dependency on chromedp/cdproto's static method enumeration.
-package cdpmod
+package modcdp
 
 import (
 	"archive/zip"
@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -44,7 +45,7 @@ var (
 	extIDFromURL = regexp.MustCompile(`^chrome-extension://([a-z]+)/`)
 )
 
-const cdpmodReadyExpression = `Boolean(globalThis.CDPMod?.__CDPModServerVersion === 1 && globalThis.CDPMod?.handleCommand && globalThis.CDPMod?.addCustomEvent)`
+const modcdpReadyExpression = `Boolean(globalThis.ModCDP?.__ModCDPServerVersion === 1 && globalThis.ModCDP?.handleCommand && globalThis.ModCDP?.addCustomEvent)`
 
 func websocketURLFor(endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
@@ -136,7 +137,14 @@ type Options struct {
 
 type Handler func(data any)
 
-type CDPModClient struct {
+type CDPEvent struct {
+	Method       string         `json:"method"`
+	Params       map[string]any `json:"params,omitempty"`
+	CDPSessionID string         `json:"cdpSessionId,omitempty"`
+	SessionID    string         `json:"sessionId,omitempty"`
+}
+
+type ModCDPClient struct {
 	opts                 Options
 	CDPURL               string
 	conn                 net.Conn
@@ -147,6 +155,7 @@ type CDPModClient struct {
 	nextID               int64
 	pending              map[int64]chan map[string]any
 	handlers             map[string][]Handler
+	cdpHandlers          map[string][]func(CDPEvent)
 	handlersMu           sync.Mutex
 	targetSessions       map[string]string
 	sessionTargets       map[string]map[string]any
@@ -163,7 +172,7 @@ type CDPModClient struct {
 	preparedExtensionDir string
 }
 
-func New(opts Options) *CDPModClient {
+func New(opts Options) *ModCDPClient {
 	if opts.Routes == nil {
 		opts.Routes = DefaultClientRoutes()
 	} else {
@@ -179,18 +188,22 @@ func New(opts Options) *CDPModClient {
 	if opts.ServiceWorkerURLSuffixes == nil {
 		opts.ServiceWorkerURLSuffixes = []string{"/service_worker.js", "/background.js"}
 	}
-	return &CDPModClient{
+	return &ModCDPClient{
 		opts:           opts,
 		pending:        map[int64]chan map[string]any{},
 		handlers:       map[string][]Handler{},
+		cdpHandlers:    map[string][]func(CDPEvent){},
 		targetSessions: map[string]string{},
 		sessionTargets: map[string]map[string]any{},
 	}
 }
 
-func (c *CDPModClient) Connect() error {
+func (c *ModCDPClient) Connect() error {
 	connectStartedAt := time.Now().UnixMilli()
 	if c.opts.CDPURL == "" {
+		if err := c.prepareExtensionPath(); err != nil {
+			return err
+		}
 		cdpURL, err := c.launchChrome()
 		if err != nil {
 			return err
@@ -325,7 +338,7 @@ func (c *CDPModClient) Connect() error {
 	return nil
 }
 
-func (c *CDPModClient) Send(method string, params map[string]any) (any, error) {
+func (c *ModCDPClient) Send(method string, params map[string]any) (any, error) {
 	startedAt := time.Now().UnixMilli()
 	if params == nil {
 		params = map[string]any{}
@@ -346,7 +359,7 @@ func (c *CDPModClient) Send(method string, params map[string]any) (any, error) {
 	return result, err
 }
 
-func (c *CDPModClient) SendRaw(method string, params map[string]any, sessionID ...string) (map[string]any, error) {
+func (c *ModCDPClient) SendRaw(method string, params map[string]any, sessionID ...string) (map[string]any, error) {
 	startedAt := time.Now().UnixMilli()
 	if params == nil {
 		params = map[string]any{}
@@ -366,17 +379,23 @@ func (c *CDPModClient) SendRaw(method string, params map[string]any, sessionID .
 	return result, err
 }
 
-func (c *CDPModClient) OnRaw(event string, handler Handler) {
+func (c *ModCDPClient) OnRaw(event string, handler Handler) {
 	c.On(event, handler)
 }
 
-func (c *CDPModClient) On(event string, handler Handler) {
+func (c *ModCDPClient) OnCDP(event string, handler func(CDPEvent)) {
+	c.handlersMu.Lock()
+	defer c.handlersMu.Unlock()
+	c.cdpHandlers[event] = append(c.cdpHandlers[event], handler)
+}
+
+func (c *ModCDPClient) On(event string, handler Handler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
 	c.handlers[event] = append(c.handlers[event], handler)
 }
 
-func (c *CDPModClient) Close() {
+func (c *ModCDPClient) Close() {
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -398,7 +417,7 @@ func (c *CDPModClient) Close() {
 	}
 }
 
-func (c *CDPModClient) launchChrome() (string, error) {
+func (c *ModCDPClient) launchChrome() (string, error) {
 	executablePath := firstNonEmpty(c.opts.LaunchOptions.ExecutablePath, os.Getenv("CHROME_PATH"))
 	candidates := []string{
 		executablePath,
@@ -431,7 +450,7 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		}
 		port = nextPort
 	}
-	profileDir, err := os.MkdirTemp("", "cdpmod.")
+	profileDir, err := os.MkdirTemp("", "modcdp.")
 	if err != nil {
 		return "", err
 	}
@@ -446,6 +465,7 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		"--disable-backgrounding-occluded-windows",
 		"--disable-renderer-backgrounding",
 		"--disable-background-timer-throttling",
+		"--disable-dev-shm-usage",
 		"--disable-sync",
 		"--disable-features=DisableLoadExtensionCommandLineSwitch",
 		"--password-store=basic",
@@ -455,11 +475,18 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		"--remote-debugging-address=127.0.0.1",
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 	}
-	if c.opts.LaunchOptions.Headless != nil && *c.opts.LaunchOptions.Headless {
+	headless := runtime.GOOS == "linux" && os.Getenv("DISPLAY") == ""
+	if c.opts.LaunchOptions.Headless != nil {
+		headless = *c.opts.LaunchOptions.Headless
+	}
+	if headless {
 		args = append(args, "--headless=new")
 	}
 	if c.opts.LaunchOptions.Sandbox == nil || !*c.opts.LaunchOptions.Sandbox {
 		args = append(args, "--no-sandbox")
+	}
+	if c.opts.ExtensionPath != "" {
+		args = append(args, fmt.Sprintf("--load-extension=%s", c.opts.ExtensionPath))
 	}
 	args = append(args, c.opts.LaunchOptions.ExtraArgs...)
 	args = append(args, "about:blank")
@@ -487,11 +514,11 @@ func (c *CDPModClient) launchChrome() (string, error) {
 
 // --- internals -----------------------------------------------------------
 
-func (c *CDPModClient) prepareExtensionPath() error {
+func (c *ModCDPClient) prepareExtensionPath() error {
 	if c.opts.ExtensionPath == "" || !strings.HasSuffix(c.opts.ExtensionPath, ".zip") {
 		return nil
 	}
-	dir, err := os.MkdirTemp("", "cdpmod-extension.")
+	dir, err := os.MkdirTemp("", "modcdp-extension.")
 	if err != nil {
 		return err
 	}
@@ -546,7 +573,7 @@ func (c *CDPModClient) prepareExtensionPath() error {
 	return nil
 }
 
-func (c *CDPModClient) sendRaw(command rawCommand) (any, error) {
+func (c *ModCDPClient) sendRaw(command rawCommand) (any, error) {
 	if command.Target == "direct_cdp" {
 		step := command.Steps[0]
 		return c.sendFrame(step.Method, step.Params, "")
@@ -568,7 +595,7 @@ func (c *CDPModClient) sendRaw(command rawCommand) (any, error) {
 	return unwrapResponseIfNeeded(result, unwrap)
 }
 
-func (c *CDPModClient) measurePingLatency() error {
+func (c *ModCDPClient) measurePingLatency() error {
 	sentAt := time.Now().UnixMilli()
 	ch := make(chan any, 1)
 	c.On("Mod.pong", func(data any) {
@@ -618,11 +645,11 @@ func numberAsInt64(value any) (int64, bool) {
 	}
 }
 
-func (c *CDPModClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
+func (c *ModCDPClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
 	return c.sendFrameTimeout(method, params, sessionID, 0)
 }
 
-func (c *CDPModClient) sendFrameTimeout(method string, params map[string]any, sessionID string, timeout time.Duration) (map[string]any, error) {
+func (c *ModCDPClient) sendFrameTimeout(method string, params map[string]any, sessionID string, timeout time.Duration) (map[string]any, error) {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -671,31 +698,53 @@ func (c *CDPModClient) sendFrameTimeout(method string, params map[string]any, se
 	}
 }
 
-func (c *CDPModClient) cdpmodServerBootstrapExpression() (string, error) {
-	body, err := os.ReadFile(filepath.Join(c.opts.ExtensionPath, "CDPModServer.js"))
+func (c *ModCDPClient) modcdpServerBootstrapExpression() (string, error) {
+	serverPath, err := c.modcdpServerPath()
+	if err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(serverPath)
 	if err != nil {
 		return "", err
 	}
 	source := string(body)
-	start := strings.Index(source, "export function installCDPModServer")
-	end := strings.Index(source, "export const CDPModServer")
+	start := strings.Index(source, "export function installModCDPServer")
+	end := strings.Index(source, "export const ModCDPServer")
 	if start < 0 || end < start {
-		return "", fmt.Errorf("could not find installCDPModServer in CDPModServer.js")
+		return "", fmt.Errorf("could not find installModCDPServer in ModCDPServer.js")
 	}
 	installer := strings.Replace(source[start:end], "export function", "function", 1)
 	return fmt.Sprintf(`(() => {
 %s
-const CDPMod = installCDPModServer(globalThis);
+const ModCDP = installModCDPServer(globalThis);
 return {
-  ok: Boolean(CDPMod?.__CDPModServerVersion === 1 && CDPMod?.handleCommand && CDPMod?.addCustomEvent),
+  ok: Boolean(ModCDP?.__ModCDPServerVersion === 1 && ModCDP?.handleCommand && ModCDP?.addCustomEvent),
   extension_id: globalThis.chrome?.runtime?.id ?? null,
   has_tabs: Boolean(globalThis.chrome?.tabs?.query),
   has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
 };
-})()`, installer), nil
+	})()`, installer), nil
 }
 
-func (c *CDPModClient) reader() {
+func (c *ModCDPClient) modcdpServerPath() (string, error) {
+	candidates := []string{filepath.Join(c.opts.ExtensionPath, "ModCDPServer.js")}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		for dir := filepath.Dir(file); ; dir = filepath.Dir(dir) {
+			candidates = append(candidates, filepath.Join(dir, "dist", "extension", "ModCDPServer.js"))
+			if parent := filepath.Dir(dir); parent == dir {
+				break
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find ModCDPServer.js; checked %s", strings.Join(candidates, ", "))
+}
+
+func (c *ModCDPClient) reader() {
 	for {
 		data, err := wsutil.ReadServerText(c.conn)
 		if err != nil {
@@ -766,15 +815,23 @@ func (c *CDPModClient) reader() {
 		if method != "" {
 			c.handlersMu.Lock()
 			hs := append([]Handler(nil), c.handlers[method]...)
+			cdpHandlers := append([]func(CDPEvent){}, c.cdpHandlers["*"]...)
+			cdpHandlers = append(cdpHandlers, c.cdpHandlers[method]...)
 			c.handlersMu.Unlock()
 			for _, h := range hs {
 				go h(params)
+			}
+			if len(cdpHandlers) > 0 {
+				event := CDPEvent{Method: method, Params: params, CDPSessionID: sessionID, SessionID: sessionID}
+				for _, h := range cdpHandlers {
+					go h(event)
+				}
 			}
 		}
 	}
 }
 
-func (c *CDPModClient) ensureExtension() (map[string]any, error) {
+func (c *ModCDPClient) ensureExtension() (map[string]any, error) {
 	targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 	if err != nil {
 		return nil, err
@@ -811,7 +868,7 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 		if matcherText == "" {
 			matcherText = "no matcher"
 		}
-		return nil, fmt.Errorf("required CDPMod service worker target was not visible in the current CDP target snapshot (%s)", matcherText)
+		return nil, fmt.Errorf("required ModCDP service worker target was not visible in the current CDP target snapshot (%s)", matcherText)
 	}
 
 	loadResp, err := c.sendFrame("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
@@ -882,7 +939,7 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 	return nil, fmt.Errorf("timed out after 60s waiting for service worker target for extension %s", extID)
 }
 
-func (c *CDPModClient) trustServiceWorkerTarget() bool {
+func (c *ModCDPClient) trustServiceWorkerTarget() bool {
 	if c.opts.TrustServiceWorkerTarget || len(c.opts.ServiceWorkerURLIncludes) > 0 {
 		return true
 	}
@@ -900,7 +957,7 @@ func (c *CDPModClient) trustServiceWorkerTarget() bool {
 	return false
 }
 
-func (c *CDPModClient) serviceWorkerTargetMatches(target map[string]any) bool {
+func (c *ModCDPClient) serviceWorkerTargetMatches(target map[string]any) bool {
 	turl, _ := target["url"].(string)
 	ttype, _ := target["type"].(string)
 	if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
@@ -926,14 +983,14 @@ func (c *CDPModClient) serviceWorkerTargetMatches(target map[string]any) bool {
 	return len(c.opts.ServiceWorkerURLIncludes) > 0 || len(c.opts.ServiceWorkerURLSuffixes) > 0
 }
 
-func (c *CDPModClient) readyExpression() string {
+func (c *ModCDPClient) readyExpression() string {
 	if c.opts.ServiceWorkerReadyExpression == "" {
-		return cdpmodReadyExpression
+		return modcdpReadyExpression
 	}
-	return fmt.Sprintf("(%s) && Boolean(%s)", cdpmodReadyExpression, c.opts.ServiceWorkerReadyExpression)
+	return fmt.Sprintf("(%s) && Boolean(%s)", modcdpReadyExpression, c.opts.ServiceWorkerReadyExpression)
 }
 
-func (c *CDPModClient) sessionIDForTarget(targetID string, timeout time.Duration) string {
+func (c *ModCDPClient) sessionIDForTarget(targetID string, timeout time.Duration) string {
 	if timeout <= 0 {
 		c.targetSessionsMu.Lock()
 		sessionID := c.targetSessions[targetID]
@@ -953,7 +1010,7 @@ func (c *CDPModClient) sessionIDForTarget(targetID string, timeout time.Duration
 	return ""
 }
 
-func (c *CDPModClient) probeReadyTarget(target map[string]any, timeout time.Duration) (map[string]any, bool) {
+func (c *ModCDPClient) probeReadyTarget(target map[string]any, timeout time.Duration) (map[string]any, bool) {
 	targetID, _ := target["targetId"].(string)
 	targetURL, _ := target["url"].(string)
 	sessionID := c.sessionIDForTarget(targetID, timeout)
@@ -983,8 +1040,8 @@ func (c *CDPModClient) probeReadyTarget(target map[string]any, timeout time.Dura
 	}, true
 }
 
-func (c *CDPModClient) borrowExtensionWorker(loadError string) (map[string]any, error) {
-	bootstrap, err := c.cdpmodServerBootstrapExpression()
+func (c *ModCDPClient) borrowExtensionWorker(loadError string) (map[string]any, error) {
+	bootstrap, err := c.modcdpServerBootstrapExpression()
 	if err != nil {
 		return nil, err
 	}
@@ -1066,10 +1123,10 @@ func (c *CDPModClient) borrowExtensionWorker(loadError string) (map[string]any, 
 		return borrowed[0], nil
 	}
 	return nil, fmt.Errorf(
-		"cannot install or borrow CDPMod in the running browser:\n"+
-			"  - no service worker with globalThis.CDPMod found\n"+
+		"cannot install or borrow ModCDP in the running browser:\n"+
+			"  - no service worker with globalThis.ModCDP found\n"+
 			"  - Extensions.loadUnpacked unavailable (%s)\n"+
-			"  - no running chrome-extension:// service worker accepted the CDPMod bootstrap",
+			"  - no running chrome-extension:// service worker accepted the ModCDP bootstrap",
 		loadError,
 	)
 }

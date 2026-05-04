@@ -1,5 +1,5 @@
 node_modules/
 dist/
-client/go/cdpmod
-client/go/cdpmod-go
+client/go/modcdp
+client/go/modcdp-go
 __pycache__/

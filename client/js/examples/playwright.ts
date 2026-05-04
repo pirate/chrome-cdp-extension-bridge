@@ -1,4 +1,4 @@
-// Playwright through the standalone CDPMod proxy.
+// Playwright through the standalone ModCDP proxy.
 //
 // This is intentionally a normal Playwright connectOverCDP flow. The only
 // special piece is the CDP endpoint: Playwright connects to the proxy, and the

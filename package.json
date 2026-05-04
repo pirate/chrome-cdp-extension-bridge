@@ -1,23 +1,23 @@
 {
-  "name": "cdpmod",
+  "name": "modcdp",
   "version": "0.0.0",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pirate/cdpmod.git"
+    "url": "git+https://github.com/pirate/modcdp.git"
   },
   "type": "module",
   "exports": {
     ".": {
-      "types": "./client/js/CDPModClient.ts",
-      "import": "./dist/client/js/CDPModClient.js"
+      "types": "./client/js/ModCDPClient.ts",
+      "import": "./dist/client/js/ModCDPClient.js"
     },
     "./client": {
-      "types": "./client/js/CDPModClient.ts",
-      "import": "./dist/client/js/CDPModClient.js"
+      "types": "./client/js/ModCDPClient.ts",
+      "import": "./dist/client/js/ModCDPClient.js"
     },
     "./extension/service_worker.js": "./dist/extension/service_worker.js",
-    "./extension/CDPModServer.js": "./dist/extension/CDPModServer.js",
+    "./extension/ModCDPServer.js": "./dist/extension/ModCDPServer.js",
     "./extension/translate.js": "./dist/extension/translate.js",
     "./bridge/translate.js": "./dist/bridge/translate.js",
     "./types/*": "./dist/types/*",

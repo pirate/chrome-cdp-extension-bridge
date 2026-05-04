@@ -1,40 +1,40 @@
-// injector.js: inject the CDPMod extension service worker when needed in a
+// injector.js: inject the ModCDP extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //
 // The caller hands in a `send(method, params, session_id?)` function bound to
 // the upstream CDP websocket. The injector knows about Extensions.loadUnpacked,
-// service-worker URL pattern matching, and probe-by-globalThis.CDPMod, but
+// service-worker URL pattern matching, and probe-by-globalThis.ModCDP, but
 // nothing about chrome binaries, the proxy, or wrap/unwrap.
 //
 // Precedence (single source of truth — do not duplicate this in proxy/client):
 //   1. Look for an existing service-worker target whose JS context already has
-//      globalThis.CDPMod. Use it. (source: "discovered")
+//      globalThis.ModCDP. Use it. (source: "discovered")
 //   2. Otherwise call Extensions.loadUnpacked(extension_path) and wait for that
 //      extension's service worker to appear. (source: "injected")
-//   3. If Chrome refuses extension loading, bootstrap CDPMod into every
+//   3. If Chrome refuses extension loading, bootstrap ModCDP into every
 //      already-running extension service worker target and use the best one.
 //      (source: "borrowed")
 //   4. Otherwise throw with explicit instructions for all failure modes.
 
-import type { ProtocolParams, ProtocolResult } from "../types/cdpmod.js";
+import type { ProtocolParams, ProtocolResult } from "../types/modcdp.js";
 import { commands as RuntimeCommands } from "../types/zod/Runtime.js";
 import { commands as TargetCommands } from "../types/zod/Target.js";
-import { installCDPModServer } from "../extension/CDPModServer.js";
+import { installModCDPServer } from "../extension/ModCDPServer.js";
 
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
-const CDPMOD_READY_EXPRESSION =
-  "Boolean(globalThis.CDPMod?.__CDPModServerVersion === 1 && globalThis.CDPMod?.handleCommand && globalThis.CDPMod?.addCustomEvent)";
+const MODCDP_READY_EXPRESSION =
+  "Boolean(globalThis.ModCDP?.__ModCDPServerVersion === 1 && globalThis.ModCDP?.handleCommand && globalThis.ModCDP?.addCustomEvent)";
 
 type SendCDP = (method: string, params?: ProtocolParams, session_id?: string | null) => Promise<ProtocolResult>;
 type TargetInfo = { targetId: string; type?: string; url?: string };
 
-const bootstrap_cdpmod_server_expression = `
+const bootstrap_modcdp_server_expression = `
   (() => {
     const __name = (fn) => fn;
-    const installCDPModServer = ${installCDPModServer.toString()};
-    const CDPMod = installCDPModServer(globalThis);
+    const installModCDPServer = ${installModCDPServer.toString()};
+    const ModCDP = installModCDPServer(globalThis);
     return {
-      ok: Boolean(CDPMod?.__CDPModServerVersion === 1 && CDPMod?.handleCommand && CDPMod?.addCustomEvent),
+      ok: Boolean(ModCDP?.__ModCDPServerVersion === 1 && ModCDP?.handleCommand && ModCDP?.addCustomEvent),
       extension_id: globalThis.chrome?.runtime?.id ?? null,
       has_tabs: Boolean(globalThis.chrome?.tabs?.query),
       has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
@@ -64,15 +64,20 @@ export async function injectExtensionIfNeeded({
   if (typeof send !== "function") throw new Error("injectExtensionIfNeeded requires { send }");
   const ready_expression =
     service_worker_ready_expression == null || service_worker_ready_expression.length === 0
-      ? CDPMOD_READY_EXPRESSION
-      : `(${CDPMOD_READY_EXPRESSION}) && Boolean(${service_worker_ready_expression})`;
-  const sendWithTimeout = (method: string, params: ProtocolParams = {}, session_id: string | null = null, ms = 2_000) =>
+      ? MODCDP_READY_EXPRESSION
+      : `(${MODCDP_READY_EXPRESSION}) && Boolean(${service_worker_ready_expression})`;
+  const sendWithTimeout = (
+    method: string,
+    params: ProtocolParams = {},
+    session_id: string | null = null,
+    ms = 10_000,
+  ) =>
     Promise.race([
       send(method, params, session_id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${method} timed out after ${ms}ms`)), ms)),
     ]);
   // extension_path is only required as a fallback, when discovery does not turn
-  // up an already-loaded CDPMod service worker. Validate at the point of use
+  // up an already-loaded ModCDP service worker. Validate at the point of use
   // (step 2) so callers running against a browser that already has the
   // extension loaded don't have to provide a path at all.
 
@@ -108,7 +113,7 @@ export async function injectExtensionIfNeeded({
     };
   };
 
-  // 1. Discover an existing CDPMod service worker from the current CDP target
+  // 1. Discover an existing ModCDP service worker from the current CDP target
   // snapshot. If no already-ready worker is visible, move on to the explicit
   // injection path instead of waiting on a guessed preinstalled-extension budget.
   const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
@@ -133,7 +138,7 @@ export async function injectExtensionIfNeeded({
   }
   if (require_service_worker_target) {
     throw new Error(
-      `Required CDPMod service worker target was not visible in the current CDP target snapshot ` +
+      `Required ModCDP service worker target was not visible in the current CDP target snapshot ` +
         `(${[...service_worker_url_includes, ...service_worker_url_suffixes].join(", ") || "no matcher"}).`,
     );
   }
@@ -175,7 +180,7 @@ export async function injectExtensionIfNeeded({
       } else {
         throw new Error(
           `Extensions.loadUnpacked failed for ${extension_path}: ${load_error.message}\n` +
-            `If the path is correct and the manifest is valid, load the CDPMod extension manually in chrome://extensions and reconnect.`,
+            `If the path is correct and the manifest is valid, load the ModCDP extension manually in chrome://extensions and reconnect.`,
         );
       }
     }
@@ -241,7 +246,7 @@ export async function injectExtensionIfNeeded({
         await sendWithTimeout(
           "Runtime.evaluate",
           {
-            expression: bootstrap_cdpmod_server_expression,
+            expression: bootstrap_modcdp_server_expression,
             awaitPromise: true,
             returnByValue: true,
             allowUnsafeEvalBlockedByCSP: true,
@@ -252,7 +257,7 @@ export async function injectExtensionIfNeeded({
       );
       const value = bootstrap.result?.value || {};
       let ready = Boolean(value.ok);
-      if (ready && ready_expression !== CDPMOD_READY_EXPRESSION) {
+      if (ready && ready_expression !== MODCDP_READY_EXPRESSION) {
         const probe = RuntimeCommands["Runtime.evaluate"].result.parse(
           await sendWithTimeout(
             "Runtime.evaluate",
@@ -289,13 +294,13 @@ export async function injectExtensionIfNeeded({
   }
 
   throw new Error(
-    `Cannot install or borrow CDPMod in the running browser.\n\n` +
-      `  - No existing service worker with globalThis.CDPMod was found in the browser.\n` +
+    `Cannot install or borrow ModCDP in the running browser.\n\n` +
+      `  - No existing service worker with globalThis.ModCDP was found in the browser.\n` +
       `  - Extensions.loadUnpacked is unavailable ("${load_unpacked_unavailable_error.message}").\n` +
-      `  - No running chrome-extension:// service worker target accepted the CDPMod bootstrap.\n\n` +
+      `  - No running chrome-extension:// service worker target accepted the ModCDP bootstrap.\n\n` +
       `Fixes (any one of these):\n` +
       `  1. Open or wake an installed extension that has a service worker, then reconnect.\n` +
-      `  2. Load the CDPMod extension once at chrome://extensions and reconnect.\n` +
+      `  2. Load the ModCDP extension once at chrome://extensions and reconnect.\n` +
       (extension_path ? `  3. For automated/test browsers, relaunch with --load-extension=${extension_path}.\n` : ""),
   );
 

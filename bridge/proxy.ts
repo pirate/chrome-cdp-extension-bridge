@@ -3,7 +3,7 @@
 // and forwards to http://127.0.0.1:9222.
 //
 // Behavior on each client connection:
-//   - Connect a CDPModClient to the existing upstream so auto-attach,
+//   - Connect a ModCDPClient to the existing upstream so auto-attach,
 //     extension discovery, and injection stay in the main client implementation.
 //   - Reuse that client's upstream websocket + hidden extension session to
 //     rewrite Mod.* /
@@ -21,13 +21,13 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import type { RawData, WebSocket as ClientWebSocket } from "ws";
 
-import { CDPModClient } from "../client/js/CDPModClient.js";
+import { ModCDPClient } from "../client/js/ModCDPClient.js";
 import {
   bindingNameFor,
-  wrapCDPModEvaluate,
-  wrapCDPModAddCustomCommand,
-  wrapCDPModAddMiddleware,
-  wrapCDPModAddCustomEvent,
+  wrapModCDPEvaluate,
+  wrapModCDPAddCustomCommand,
+  wrapModCDPAddMiddleware,
+  wrapModCDPAddCustomEvent,
   wrapCustomCommand,
   unwrapResponseIfNeeded,
   unwrapEventIfNeeded,
@@ -38,17 +38,17 @@ import type {
   CdpResponseFrame,
   CdpFrame,
   ProxyConnectionState,
-} from "../types/cdpmod.js";
+} from "../types/modcdp.js";
 import {
   CdpCommandFrameSchema,
   CdpEventFrameSchema,
   CdpResponseFrameSchema,
-  CDPModAddCustomCommandParamsSchema,
-  CDPModAddCustomEventObjectParamsSchema,
-  CDPModAddMiddlewareParamsSchema,
-  CDPModEvaluateParamsSchema,
-  normalizeCDPModName,
-} from "../types/cdpmod.js";
+  ModCDPAddCustomCommandParamsSchema,
+  ModCDPAddCustomEventObjectParamsSchema,
+  ModCDPAddMiddlewareParamsSchema,
+  ModCDPEvaluateParamsSchema,
+  normalizeModCDPName,
+} from "../types/modcdp.js";
 import { events as RuntimeEvents } from "../types/zod/Runtime.js";
 import { events as TargetEvents } from "../types/zod/Target.js";
 
@@ -157,14 +157,14 @@ async function handleConnection(
   earlyHandler: (buf: RawData) => void,
   { upstream, extensionPath }: { upstream: string; extensionPath: string },
 ) {
-  const cdp = new CDPModClient({
+  const cdp = new ModCDPClient({
     cdp_url: upstream,
     extension_path: extensionPath,
     hydrate_aliases: false,
   });
   await cdp.connect();
   const upstream_socket = cdp.ws as unknown as WebSocket | null;
-  if (!upstream_socket) throw new Error("CDPModClient connected without an upstream websocket.");
+  if (!upstream_socket) throw new Error("ModCDPClient connected without an upstream websocket.");
 
   // per-connection state
   const state: ProxyConnectionState = {
@@ -244,12 +244,12 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
   // so the response can be steered back to the right Playwright CDPSession.
   if (MAGIC_METHODS.has(method) || ROUTE_TO_SW_RE.test(method)) {
     if (method === "Mod.addCustomEvent") {
-      const addEventParams = CDPModAddCustomEventObjectParamsSchema.parse(params ?? {});
-      const eventName = normalizeCDPModName(addEventParams.name);
+      const addEventParams = ModCDPAddCustomEventObjectParamsSchema.parse(params ?? {});
+      const eventName = normalizeModCDPName(addEventParams.name);
       // two-step: addBinding, then evaluate the addCustomEvent registration.
       const upId = state.nextUpstreamId++;
       state.pending.set(upId, {
-        kind: "cdpmod_add_event_step1",
+        kind: "modcdp_add_event_step1",
         clientId: id,
         clientSessionId: sessionId || null,
         eventName,
@@ -265,18 +265,18 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
       return;
     }
     const upId = state.nextUpstreamId++;
-    state.pending.set(upId, { kind: "cdpmod_eval", clientId: id, clientSessionId: sessionId || null });
+    state.pending.set(upId, { kind: "modcdp_eval", clientId: id, clientSessionId: sessionId || null });
     let runtimeParams;
     if (method === "Mod.evaluate") {
-      const evaluateParams = CDPModEvaluateParamsSchema.parse(params ?? {});
-      runtimeParams = wrapCDPModEvaluate({
+      const evaluateParams = ModCDPEvaluateParamsSchema.parse(params ?? {});
+      runtimeParams = wrapModCDPEvaluate({
         ...evaluateParams,
         cdpSessionId: evaluateParams.cdpSessionId ?? sessionId ?? null,
       });
     } else if (method === "Mod.addCustomCommand") {
-      runtimeParams = wrapCDPModAddCustomCommand(CDPModAddCustomCommandParamsSchema.parse(params ?? {}));
+      runtimeParams = wrapModCDPAddCustomCommand(ModCDPAddCustomCommandParamsSchema.parse(params ?? {}));
     } else if (method === "Mod.addMiddleware") {
-      runtimeParams = wrapCDPModAddMiddleware(CDPModAddMiddlewareParamsSchema.parse(params ?? {}));
+      runtimeParams = wrapModCDPAddMiddleware(ModCDPAddMiddlewareParamsSchema.parse(params ?? {}));
     } else {
       const cdpSessionId =
         params && typeof params === "object" && "cdpSessionId" in params && typeof params.cdpSessionId === "string"
@@ -318,7 +318,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
       sendToClient(state, out);
     };
 
-    if (p.kind === "cdpmod_eval") {
+    if (p.kind === "modcdp_eval") {
       try {
         replyToClient({ result: unwrapResponseIfNeeded(response.result || {}, "evaluate") ?? {} });
       } catch (e) {
@@ -326,18 +326,18 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
       }
       return;
     }
-    if (p.kind === "cdpmod_add_event_step1") {
+    if (p.kind === "modcdp_add_event_step1") {
       if (response.error) {
         replyToClient({ error: response.error });
         return;
       }
       const upId = state.nextUpstreamId++;
-      state.pending.set(upId, { kind: "cdpmod_eval", clientId: p.clientId, clientSessionId: p.clientSessionId });
+      state.pending.set(upId, { kind: "modcdp_eval", clientId: p.clientId, clientSessionId: p.clientSessionId });
       state.upstream.send(
         JSON.stringify({
           id: upId,
           method: "Runtime.evaluate",
-          params: wrapCDPModAddCustomEvent({ name: p.eventName ?? "" }),
+          params: wrapModCDPAddCustomEvent({ name: p.eventName ?? "" }),
           sessionId: state.extSessionId,
         }),
       );

@@ -12,40 +12,40 @@ ProtocolParams: TypeAlias = Mapping[str, JsonValue]
 ProtocolResult: TypeAlias = dict[str, JsonValue]
 ProtocolPayload: TypeAlias = dict[str, JsonValue]
 FrameParams: TypeAlias = Mapping[str, object]
-CDPModRoutes: TypeAlias = dict[str, str]
+ModCDPRoutes: TypeAlias = dict[str, str]
 
 
-class _CDPModAddCustomCommandRequired(TypedDict):
+class _ModCDPAddCustomCommandRequired(TypedDict):
     name: str
     expression: str
 
 
-class CDPModAddCustomCommandParams(_CDPModAddCustomCommandRequired, total=False):
+class ModCDPAddCustomCommandParams(_ModCDPAddCustomCommandRequired, total=False):
     paramsSchema: JsonValue
     resultSchema: JsonValue
 
 
-class _CDPModAddCustomEventObjectRequired(TypedDict):
+class _ModCDPAddCustomEventObjectRequired(TypedDict):
     name: str
 
 
-class CDPModAddCustomEventObjectParams(_CDPModAddCustomEventObjectRequired, total=False):
+class ModCDPAddCustomEventObjectParams(_ModCDPAddCustomEventObjectRequired, total=False):
     eventSchema: JsonValue
 
 
-CDPModAddCustomEventParams: TypeAlias = str | CDPModAddCustomEventObjectParams
+ModCDPAddCustomEventParams: TypeAlias = str | ModCDPAddCustomEventObjectParams
 
 
-class _CDPModAddMiddlewareRequired(TypedDict):
+class _ModCDPAddMiddlewareRequired(TypedDict):
     phase: Literal["request", "response", "event"]
     expression: str
 
 
-class CDPModAddMiddlewareParams(_CDPModAddMiddlewareRequired, total=False):
+class ModCDPAddMiddlewareParams(_ModCDPAddMiddlewareRequired, total=False):
     name: str
 
 
-class CDPModPingLatency(TypedDict):
+class ModCDPPingLatency(TypedDict):
     sentAt: int
     receivedAt: int | float | None
     returnedAt: int
@@ -54,7 +54,7 @@ class CDPModPingLatency(TypedDict):
     returnPathMs: int | float | None
 
 
-class CDPModConnectTiming(TypedDict):
+class ModCDPConnectTiming(TypedDict):
     started_at: int
     extension_source: str | None
     extension_started_at: int
@@ -64,7 +64,7 @@ class CDPModConnectTiming(TypedDict):
     duration_ms: int
 
 
-class CDPModCommandTiming(TypedDict):
+class ModCDPCommandTiming(TypedDict):
     method: str
     target: str
     started_at: int
@@ -72,20 +72,20 @@ class CDPModCommandTiming(TypedDict):
     duration_ms: int
 
 
-class CDPModRawTiming(TypedDict):
+class ModCDPRawTiming(TypedDict):
     method: str
     started_at: int
     completed_at: int
     duration_ms: int
 
 
-class CDPModServerConfig(TypedDict, total=False):
+class ModCDPServerConfig(TypedDict, total=False):
     loopback_cdp_url: str | None
-    routes: CDPModRoutes
+    routes: ModCDPRoutes
     browserToken: str | None
-    custom_commands: list[CDPModAddCustomCommandParams]
-    custom_events: list[CDPModAddCustomEventObjectParams]
-    custom_middlewares: list[CDPModAddMiddlewareParams]
+    custom_commands: list[ModCDPAddCustomCommandParams]
+    custom_events: list[ModCDPAddCustomEventObjectParams]
+    custom_middlewares: list[ModCDPAddMiddlewareParams]
 
 
 class LaunchOptions(TypedDict, total=False):
@@ -149,7 +149,7 @@ class BorrowedExtensionInfo(ExtensionInfo, total=False):
     has_debugger: bool
 
 
-class UnwrappedCDPModEvent(TypedDict):
+class UnwrappedModCDPEvent(TypedDict):
     event: str
     data: ProtocolPayload
     sessionId: str | None

@@ -1,4 +1,4 @@
-# CDPMod
+# ModCDP
 
 CDP is powerful but it's been stretched to many use-cases beyond its initial audience. It is difficult for agents and humans to use without a harness library, because:
 
@@ -12,33 +12,33 @@ CDP is powerful but it's been stretched to many use-cases beyond its initial aud
 
 While I had high hopes for WebDriver BiDi, unfortunately it solves almost none of these issues.
 
-CDPMod does not aim to solve all of these issues directly either. Instead it solves a simpler problem: allowing us to customize and extend CDP with new commands.
+ModCDP does not aim to solve all of these issues directly either. Instead it solves a simpler problem: allowing us to customize and extend CDP with new commands.
 Then we use those basic primitives to fix the shortcomings in CDP by implementing our own custom events (all sent over a normal CDP websocket to a stock Chromium browser).
 
 | Primitive                | What it does                                                                                            |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `Mod.evaluate`         | Run an expression in the CDPMod extension service worker, with `chrome.*` and a `cdp` bridge in scope |
+| `Mod.evaluate`         | Run an expression in the ModCDP extension service worker, with `chrome.*` and a `cdp` bridge in scope |
 | `Mod.addCustomCommand` | Register a `Custom.*` method handler that lives in the SW                                               |
 | `Mod.addCustomEvent`   | Register a `Custom.*` event your SW handlers can `emit()`                                               |
 | `Mod.addMiddleware`    | Intercept service-worker-routed requests, responses, or events by name or `*`                           |
 
-Instead of inventing yet another browser driver library, CDPMod fixes the issue at the root.
+Instead of inventing yet another browser driver library, ModCDP fixes the issue at the root.
 
 It's perfectly compatible with playwright, puppeteer, etc. with no modifications. You can do things like `patchright` does, but generically at the CDP layer instead of having to patch libraries.
 
-You can send `Mod.*`, `Custom.*`, etc. through standard Playwright/Puppeteer/other-driver-managed CDP sessions; `client/js/demo.ts`, `client/python/demo.py`, and `client/go/demo.go` demonstrate the flow in each language.
+You can send `Mod.*`, `Custom.*`, etc. through standard Playwright/Puppeteer/other-driver-managed CDP sessions; `client/js/demo.ts`, `client/python/demo.py`, and `client/go/demo/main.go` demonstrate the flow in each language.
 
 ## Use it
 
 ```ts
-import { CDPModClient } from "cdpmod";
+import { ModCDPClient } from "modcdp";
 import { z } from "zod";
 
 // In stock Google Chrome, visit chrome://inspect/#remote-debugging first to
 // expose the current browser at localhost:9222. Passing cdp_url is optional
 // when that endpoint is live.
 const cdp_url = "http://127.0.0.1:9222"; // ws://... URLs work too
-const cdp = new CDPModClient({
+const cdp = new ModCDPClient({
   cdp_url,
   routes: { "Target.getTargets": "service_worker" },
   server: { loopback_cdp_url: cdp_url, routes: { "*.*": "loopback_cdp" } },
@@ -132,7 +132,7 @@ pnpm run proxy -- --upstream http://127.0.0.1:9222 --port 9223
 # const browser = await playwright.chromium.connectOverCDP("http://127.0.0.1:9223")
 # const session = await browser.contexts()[0].newCDPSession(page)
 # await session.send("Mod.evaluate", { expression: "1 + 1" }) // -> 2
-# ✨ All CDPMod commands now work through playwright! you can modify/extend playwright behavior to your heart's content
+# ✨ All ModCDP commands now work through playwright! you can modify/extend playwright behavior to your heart's content
 ```
 
 ## Routing modes
@@ -143,32 +143,32 @@ pnpm run proxy -- --upstream http://127.0.0.1:9222 --port 9223
 | ------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | `--loopback`  | client → SW → SW dials its own WS back to localhost:9222 → CDP     | Default. You need the SW to intercept/inspect/rewrite normal traffic.           |
 | `--debugger`  | client → SW → `chrome.debugger.sendCommand` against the active tab | The browser exposes no remote CDP port and you only have extension permissions. |
-| `--direct`    | client → sends non-CDPMod commands to browser CDP directly      | You already have a CDP endpoint and don't need extension interception.          |
+| `--direct`    | client → sends non-ModCDP commands to browser CDP directly        | You already have a CDP endpoint and don't need extension interception.          |
 
 Pass via `routes: { "*.*": "direct_cdp" | "service_worker" }` on the client and `server: { routes: { "*.*": "loopback_cdp" | "chrome_debugger" } }` for the SW side. The demos default to `--loopback` (the most powerful mode).
 
 ## Repository layout
 
 ```
-extension/                MV3 extension; service worker registers CDPModServer
+extension/                MV3 extension; service worker registers ModCDPServer
   manifest.json
   service_worker.ts
-  CDPModServer.ts
+  ModCDPServer.ts
 bridge/
   translate.ts           Pure stateless wrap/unwrap (used by both Node + SW)
   launcher.ts            Find chrome/chromium binary, spawn with CDP enabled
   injector.ts            Discover existing SW or Extensions.loadUnpacked it
   proxy.ts               Local CDP proxy (upgrades any vanilla CDP client)
 client/
-  js/CDPModClient.ts + demo.ts
-  python/CDPModClient.py + demo.py
-  go/CDPModClient.go + demo.go
+  js/ModCDPClient.ts + demo.ts
+  python/ModCDPClient.py + demo.py
+  go/ModCDPClient.go + demo/main.go
 dist/                     Built JS output used by the extension and Node CLI scripts
 ```
 
 ## Requirements
 
-- Stock Google Chrome can be used without relaunch flags: visit `chrome://inspect/#remote-debugging` to expose the current browser at `http://127.0.0.1:9222`, and load/install the CDPMod extension in that profile. If no `cdp_url` is passed, the JS client probes that endpoint before auto-launching a test browser.
+- Stock Google Chrome can be used without relaunch flags: visit `chrome://inspect/#remote-debugging` to expose the current browser at `http://127.0.0.1:9222`, and load/install the ModCDP extension in that profile. If no `cdp_url` is passed, the JS client probes that endpoint before auto-launching a test browser.
 - Automated/test browsers can still preload the extension with `--load-extension=<path>`. `Extensions.loadUnpacked` is used as a fallback when the connected browser exposes it over CDP.
 - Node ≥ 22, Python ≥ 3.11 with `websocket-client`, Go ≥ 1.24 with `gobwas/ws`.
 
@@ -180,21 +180,21 @@ dist/                     Built JS output used by the extension and Node CLI scr
 ### Connect
 
 1. Open a raw CDP websocket to the browser. If no `cdp_url` is supplied, the JS client first tries the live stock-Chrome endpoint at `http://127.0.0.1:9222`, then auto-launches a test browser only if that is not reachable.
-2. `bridge/injector.js` either discovers an existing CDPMod service worker target or installs the extension via `Extensions.loadUnpacked` when the connected browser permits it.
+2. `bridge/injector.js` either discovers an existing ModCDP service worker target or installs the extension via `Extensions.loadUnpacked` when the connected browser permits it.
 3. Attach a session to that SW target and `Runtime.enable` on it.
-4. Call `globalThis.CDPMod.configure(...)` to push the resolved loopback websocket and any explicit server route overrides into the SW. The clients do this automatically by default.
+4. Call `globalThis.ModCDP.configure(...)` to push the resolved loopback websocket and any explicit server route overrides into the SW. The clients do this automatically by default.
 
 ### Send
 
-- `Mod.evaluate({ expression, params, cdpSessionId })` → `Runtime.evaluate` on the ext session, wrapping the expression with an IIFE that exposes `params` and `cdp = CDPMod.attachToSession(...)`.
-- `Mod.addCustomCommand({ name, expression, ... })` → `Runtime.evaluate` calling `globalThis.CDPMod.addCustomCommand({ ... })` with the user expression embedded as the handler.
-- `Mod.addCustomEvent(EventSchema.meta({ id }))` → `Runtime.addBinding({ name: "__CDPMod_<id>" })`, then a `Runtime.evaluate` registering the event in `globalThis.CDPMod`.
+- `Mod.evaluate({ expression, params, cdpSessionId })` → `Runtime.evaluate` on the ext session, wrapping the expression with an IIFE that exposes `params` and `cdp = ModCDP.attachToSession(...)`.
+- `Mod.addCustomCommand({ name, expression, ... })` → `Runtime.evaluate` calling `globalThis.ModCDP.addCustomCommand({ ... })` with the user expression embedded as the handler.
+- `Mod.addCustomEvent(EventSchema.meta({ id }))` → `Runtime.addBinding({ name: "__ModCDP_<id>" })`, then a `Runtime.evaluate` registering the event in `globalThis.ModCDP`.
 - `Mod.addMiddleware({ name, phase, expression })` → `Runtime.evaluate` registering a service-worker middleware for `phase: "request" | "response" | "event"`. Use `name: "*"` to match every method/event in that phase, or pass generated names like `cdp.Target.targetInfoChanged`.
-- `Custom.X(params)` → `Runtime.evaluate` calling `globalThis.CDPMod.handleCommand("Custom.X", params, cdpSessionId)`.
+- `Custom.X(params)` → `Runtime.evaluate` calling `globalThis.ModCDP.handleCommand("Custom.X", params, cdpSessionId)`.
 
 ### Receive
 
-When SW handlers `cdp.emit('Custom.X', payload)`, the SW invokes `globalThis.__CDPMod_Custom_X(JSON.stringify({ event, data, cdpSessionId }))`. CDP delivers `Runtime.bindingCalled` on the ext session; the client (or proxy) decodes the payload, filters by `cdpSessionId`, and re-dispatches as a normal `cdp.on('Custom.X', ...)` event.
+When SW handlers `cdp.emit('Custom.X', payload)`, the SW invokes `globalThis.__ModCDP_Custom_X(JSON.stringify({ event, data, cdpSessionId }))`. CDP delivers `Runtime.bindingCalled` on the ext session; the client (or proxy) decodes the payload, filters by `cdpSessionId`, and re-dispatches as a normal `cdp.on('Custom.X', ...)` event.
 
 ### Why this works
 
@@ -296,7 +296,7 @@ flowchart LR
   class SW idle;
 ```
 
-#### 3. CDPMod Custom Call / Response
+#### 3. ModCDP Custom Call / Response
 
 ```mermaid
 flowchart LR
@@ -311,7 +311,7 @@ flowchart LR
     direction LR
     ClientCDP["CDP Session for client<br/>localhost:9222"]
     LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
-    SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.CDPMod"]
+    SW["Extension service worker<br/>CDP target / JS context<br/>globalThis.ModCDP"]
     Page["Page target"]
     ClientCDP -->|"4. dispatch Runtime.evaluate(Mod.evaluate)"| SW
     LoopbackCDP -->|"7. Input.dispatchMouseEvent"| Page
@@ -334,9 +334,9 @@ flowchart LR
   ClientSocket -->|"13. => {ok, action, target}"| WS
 ```
 
-The same transport shape applies to `Mod.addCustomCommand`: the client installs a named command handler in the service worker, and later `cdp.send('Custom.someCommand', params)` is routed back through `globalThis.CDPMod.handleCommand(...)`.
+The same transport shape applies to `Mod.addCustomCommand`: the client installs a named command handler in the service worker, and later `cdp.send('Custom.someCommand', params)` is routed back through `globalThis.ModCDP.handleCommand(...)`.
 
-#### 4. CDPMod Custom Event Listener / Event
+#### 4. ModCDP Custom Event Listener / Event
 
 ```mermaid
 flowchart LR
@@ -352,7 +352,7 @@ flowchart LR
     direction LR
     ClientCDP["CDP Session for client<br/>localhost:9222"]
     LoopbackCDP["CDP Session for loopback<br/>localhost:9222"]
-    SW["Extension service worker<br/>CDP target / JS context<br/>CDPMod + bindings"]
+    SW["Extension service worker<br/>CDP target / JS context<br/>ModCDP + bindings"]
     Page["Page target"]
     ClientCDP -->|"5. dispatch Runtime.evaluate(Mod.addCustomEvent)<br/>9. dispatch Runtime.evaluate(Mod.evaluate)"| SW
     LoopbackCDP -->|"12. Input.dispatchMouseEvent"| Page
@@ -360,7 +360,7 @@ flowchart LR
     SW -. "<s>chrome.debugger</s><br/>not used" .-> Page
   end
 
-  ClientSocket["client CDP socket.<br/>carries CDPMod ..."]
+  ClientSocket["client CDP socket.<br/>carries ModCDP ..."]
   LoopbackSocket["loopback CDP socket.<br/>carries standard CDP only"]
 
   ClientSocket ~~~ LoopbackSocket
@@ -371,9 +371,9 @@ flowchart LR
   LoopbackSocket -->|"11. Input.dispatchMouseEvent"| LoopbackCDP
   LoopbackCDP -->|"14. Input.dispatchMouseEvent result"| LoopbackSocket
   LoopbackSocket -->|"15. Input.dispatchMouseEvent result<br/>service worker emits custom event"| SW
-  SW -->|"16. Runtime.bindingCalled<br/>{name:'__CDPMod_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| ClientCDP
-  ClientCDP -->|"17. Standard CDP event<br/>Runtime.bindingCalled {name:'__CDPMod_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| ClientSocket
-  ClientSocket -->|"18. Standard CDP event<br/>Runtime.bindingCalled {name:'__CDPMod_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| WS
+  SW -->|"16. Runtime.bindingCalled<br/>{name:'__ModCDP_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| ClientCDP
+  ClientCDP -->|"17. Standard CDP event<br/>Runtime.bindingCalled {name:'__ModCDP_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| ClientSocket
+  ClientSocket -->|"18. Standard CDP event<br/>Runtime.bindingCalled {name:'__ModCDP_Custom_demo', payload:'{event:Custom.demo,data:test}'}"| WS
   WS -->|"19. emit('Custom.demo', 'test')"| SDK
 ```
 
@@ -387,7 +387,7 @@ flowchart LR
 - This does not add real CDP methods to Chrome — the wire methods stay `Runtime.evaluate` + `Runtime.bindingCalled`. The `Mod.*` / `Custom.*` namespace is a client + SW convention.
 - Page JS does not see custom commands or event bindings.
 - Stock Google Chrome's `chrome://inspect/#remote-debugging` toggle can expose the current browser at `localhost:9222` without relaunching with `--remote-debugging-port`, `--enable-unsafe-extension-debugging`, or `--remote-allow-origins=*`.
-- If `Extensions.loadUnpacked` is unavailable in the connected browser, load/install the CDPMod extension in that Chrome profile once and reconnect; the injector will use the discovery path.
+- If `Extensions.loadUnpacked` is unavailable in the connected browser, load/install the ModCDP extension in that Chrome profile once and reconnect; the injector will use the discovery path.
 
 **Alternatives considered**
 
@@ -426,10 +426,10 @@ Tested browsers:
 
 Latency columns:
 
-- `direct` — CDPMod client to browser raw CDP `Page.getFrameTree` against an attached `about:blank` page target.
-- `pong` — CDPMod client to browser to extension service worker `Mod.pong` round trip.
-- `loopback` — CDPMod client to browser to extension service worker to loopback CDP to browser `Page.getFrameTree`.
-- `debugger` — CDPMod client to browser to extension service worker to `chrome.debugger.sendCommand` `Page.getFrameTree`.
+- `direct` — ModCDP client to browser raw CDP `Page.getFrameTree` against an attached `about:blank` page target.
+- `pong` — ModCDP client to browser to extension service worker `Mod.pong` round trip.
+- `loopback` — ModCDP client to browser to extension service worker to loopback CDP to browser `Page.getFrameTree`.
+- `debugger` — ModCDP client to browser to extension service worker to `chrome.debugger.sendCommand` `Page.getFrameTree`.
 
 The launched-browser rows used an isolated temporary user data dir. The live/default-profile row is separate because it depends on the user enabling Chrome's `chrome://inspect/#remote-debugging` flow and accepting Chrome's connection prompt.
 
@@ -454,7 +454,7 @@ The launched-browser rows used an isolated temporary user data dir. The live/def
 | Playwright Chrome for Testing 147 | headful          | `--loopback` | yes   | yes                 | yes\*             | yes                  | yes                 | no              |       2.4 |       1 |        12.5 |           - |
 | Playwright Chrome for Testing 147 | headful          | `--debugger` | yes   | yes                 | yes\*             | no                   | no                  | no              |       2.1 |       1 |           - |         1.2 |
 
-`*` Playwright Chrome for Testing exposes `chrome.debugger` when the CDPMod extension is launched with `--load-extension`. With auto-injection only, `--direct` and `--loopback` still work, but `chrome.debugger` is not available in the borrowed/injected service worker.
+`*` Playwright Chrome for Testing exposes `chrome.debugger` when the ModCDP extension is launched with `--load-extension`. With auto-injection only, `--direct` and `--loopback` still work, but `chrome.debugger` is not available in the borrowed/injected service worker.
 
 Live/default-profile status:
 

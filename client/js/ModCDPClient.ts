@@ -1,4 +1,4 @@
-// CDPModClient (JS): importable, no CLI, no demo code.
+// ModCDPClient (JS): importable, no CLI, no demo code.
 //
 // Constructor parameter names match across JS / Python / Go ports:
 //   cdp_url           upstream CDP URL (string, default null -> try localhost:9222,
@@ -6,7 +6,7 @@
 //   extension_path    extension directory (string, default ../../extension)
 //   routes            client-side routing dict (default { "Mod.*": "service_worker",
 //                       "Custom.*": "service_worker", "*.*": "direct_cdp" })
-//   server            { loopback_cdp_url?, routes? } passed to CDPModServer.configure
+//   server            { loopback_cdp_url?, routes? } passed to ModCDPServer.configure
 //   launch_options    forwarded to launcher.launchChrome when running in Node and autolaunching
 //
 // Public methods: connect, send(method, params), on(event, handler), close.
@@ -28,27 +28,27 @@ import type {
   CdpEventFrame,
   CdpResponseFrame,
   RuntimeBindingCalledEvent,
-  CDPModConfigureParams,
-  CDPModCustomPayload,
-  CDPModAddCustomCommandParams,
-  CDPModAddCustomEventObjectParams,
-  CDPModAddMiddlewareParams,
-  CDPModNamedValue,
-  CDPModPingLatency,
-  CDPModPongEvent,
-  CDPModRoutes,
+  ModCDPConfigureParams,
+  ModCDPCustomPayload,
+  ModCDPAddCustomCommandParams,
+  ModCDPAddCustomEventObjectParams,
+  ModCDPAddMiddlewareParams,
+  ModCDPNamedValue,
+  ModCDPPingLatency,
+  ModCDPPongEvent,
+  ModCDPRoutes,
   ProtocolPayload,
   ProtocolParams,
   ProtocolResult,
   TranslatedCommand,
-} from "../../types/cdpmod.js";
+} from "../../types/modcdp.js";
 import {
   CdpEventFrameSchema,
   CdpResponseFrameSchema,
   Mod,
-  normalizeCDPModName,
-  normalizeCDPModPayloadSchema,
-} from "../../types/cdpmod.js";
+  normalizeModCDPName,
+  normalizeModCDPPayloadSchema,
+} from "../../types/modcdp.js";
 
 const DEFAULT_LIVE_CDP_URL = "http://127.0.0.1:9222";
 
@@ -60,11 +60,11 @@ type PendingCommand = {
 type ClientOptions = {
   cdp_url?: string | null;
   extension_path?: string;
-  routes?: CDPModRoutes;
-  server?: CDPModConfigureParams | null;
-  custom_commands?: CDPModClientCustomCommandParams[];
-  custom_events?: CDPModAddCustomEventObjectParams[];
-  custom_middlewares?: CDPModAddMiddlewareParams[];
+  routes?: ModCDPRoutes;
+  server?: ModCDPConfigureParams | null;
+  custom_commands?: ModCDPClientCustomCommandParams[];
+  custom_events?: ModCDPAddCustomEventObjectParams[];
+  custom_middlewares?: ModCDPAddMiddlewareParams[];
   hydrate_aliases?: boolean;
   service_worker_url_includes?: string[];
   service_worker_url_suffixes?: string[] | null;
@@ -76,34 +76,34 @@ type ClientOptions = {
     addEventListener?: (
       listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void,
     ) => unknown;
-    configure?: (params: CDPModConfigureParams) => Promise<ProtocolResult>;
+    configure?: (params: ModCDPConfigureParams) => Promise<ProtocolResult>;
     handleCommand: (method: string, params?: ProtocolParams, cdpSessionId?: string | null) => Promise<ProtocolResult>;
   } | null;
 };
-type CDPModEventNameInput = string | symbol | (z.ZodType & CDPModNamedValue);
-type CDPModClientCustomCommandParams = Omit<CDPModAddCustomCommandParams, "expression"> & {
+type ModCDPEventNameInput = string | symbol | (z.ZodType & ModCDPNamedValue);
+type ModCDPClientCustomCommandParams = Omit<ModCDPAddCustomCommandParams, "expression"> & {
   expression?: string | null;
 };
 
-export type CDPModCommandSpec<Params = unknown, Result = unknown> = {
+export type ModCDPCommandSpec<Params = unknown, Result = unknown> = {
   params: Params;
   result: Result;
 };
-export type CDPModCommandMap = Record<string, CDPModCommandSpec>;
+export type ModCDPCommandMap = Record<string, ModCDPCommandSpec>;
 type MethodName<TName extends string> = TName extends `${string}.${infer TMethod}` ? TMethod : never;
 type DomainName<TName extends string> = TName extends `${infer TDomain}.${string}` ? TDomain : never;
-type CommandsForDomain<TCommands extends CDPModCommandMap, TDomain extends string> = {
+type CommandsForDomain<TCommands extends ModCDPCommandMap, TDomain extends string> = {
   [TName in keyof TCommands as TName extends `${TDomain}.${string}`
     ? MethodName<Extract<TName, string>>
     : never]: undefined extends TCommands[TName]["params"]
     ? (params?: TCommands[TName]["params"]) => Promise<TCommands[TName]["result"]>
     : (params: TCommands[TName]["params"]) => Promise<TCommands[TName]["result"]>;
 };
-export type CDPModClientInstance<TCommands extends CDPModCommandMap = Record<never, never>> = CDPModClient & {
+export type ModCDPClientInstance<TCommands extends ModCDPCommandMap = Record<never, never>> = ModCDPClient & {
   [TDomain in DomainName<Extract<keyof TCommands, string>>]: CommandsForDomain<TCommands, TDomain>;
 };
 
-class CDPModEventEmitter {
+class ModCDPEventEmitter {
   private listeners = new Map<string | symbol, Set<(...args: unknown[]) => void>>();
 
   on(event_name: string | symbol, listener: (...args: unknown[]) => void) {
@@ -132,7 +132,7 @@ class CDPModEventEmitter {
   }
 }
 
-function defineCustomCommandMethod(client: CDPModClient, name: string) {
+function defineCustomCommandMethod(client: ModCDPClient, name: string) {
   const parts = name.split(".");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(`Custom command must use Domain.method format, got ${name}`);
@@ -218,21 +218,32 @@ function runtimeModuleUrl(relative_path: string) {
   return new URL(relative_path, import.meta.url).href;
 }
 
+function launchOptionsWithExtension(
+  launch_options: Record<string, unknown>,
+  extension_path: string,
+): Record<string, unknown> {
+  const extra_args = Array.isArray(launch_options.extra_args) ? [...launch_options.extra_args] : [];
+  if (!extra_args.some((arg) => typeof arg === "string" && arg.startsWith("--load-extension="))) {
+    extra_args.push(`--load-extension=${extension_path}`);
+  }
+  return { ...launch_options, extra_args };
+}
+
 function hasCommandExpression(
-  command: CDPModClientCustomCommandParams,
-): command is CDPModClientCustomCommandParams & { expression: string } {
+  command: ModCDPClientCustomCommandParams,
+): command is ModCDPClientCustomCommandParams & { expression: string } {
   return typeof command.expression === "string" && command.expression.length > 0;
 }
 
-export class CDPModClient extends CDPModEventEmitter {
+export class ModCDPClient extends ModCDPEventEmitter {
   cdp_url: string | null;
   extension_path: string;
-  routes: CDPModRoutes;
-  server: CDPModConfigureParams | null;
+  routes: ModCDPRoutes;
+  server: ModCDPConfigureParams | null;
   launch_options: Record<string, unknown>;
-  custom_commands: CDPModClientCustomCommandParams[];
-  custom_events: CDPModAddCustomEventObjectParams[];
-  custom_middlewares: CDPModAddMiddlewareParams[];
+  custom_commands: ModCDPClientCustomCommandParams[];
+  custom_events: ModCDPAddCustomEventObjectParams[];
+  custom_middlewares: ModCDPAddMiddlewareParams[];
   hydrate_aliases: boolean;
   service_worker_url_includes: string[];
   service_worker_url_suffixes: string[] | null;
@@ -246,7 +257,7 @@ export class CDPModClient extends CDPModEventEmitter {
   ext_session_id: string | null;
   ext_target_id: string | null;
   extension_id: string | null;
-  latency: CDPModPingLatency | null;
+  latency: ModCDPPingLatency | null;
   connect_timing: Record<string, unknown> | null;
   last_command_timing: Record<string, unknown> | null;
   last_raw_timing: Record<string, unknown> | null;
@@ -261,8 +272,8 @@ export class CDPModClient extends CDPModEventEmitter {
   _prepared_extension: { path: string; close: () => Promise<void> } | null;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
-    on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModClient;
-    once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModClient;
+    on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => ModCDPClient;
+    once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => ModCDPClient;
   };
   _launched: { wsUrl: string; close: () => Promise<void> | void } | null;
 
@@ -348,14 +359,17 @@ export class CDPModClient extends CDPModEventEmitter {
       this.cdp_url = await liveWebSocketUrlFor();
       if (!this.cdp_url) {
         if (typeof process !== "object" || !process?.versions?.node) {
-          throw new Error("CDPModClient requires cdp_url when running outside Node.");
+          throw new Error("ModCDPClient requires cdp_url when running outside Node.");
         }
         const { launchChrome } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/launcher.js"))) as {
           launchChrome: (
             options: Record<string, unknown>,
           ) => Promise<{ wsUrl: string; close: () => Promise<void> | void }>;
         };
-        this._launched = await launchChrome(this.launch_options);
+        this._prepared_extension ??= await this._prepareExtensionPath();
+        this._launched = await launchChrome(
+          launchOptionsWithExtension(this.launch_options, this._prepared_extension.path),
+        );
         this.cdp_url = this._launched.wsUrl;
       }
     }
@@ -400,7 +414,7 @@ export class CDPModClient extends CDPModEventEmitter {
     const { injectExtensionIfNeeded } = (await import(
       /* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js")
     )) as typeof import("../../bridge/injector.js");
-    this._prepared_extension = await this._prepareExtensionPath();
+    this._prepared_extension ??= await this._prepareExtensionPath();
     ext = await injectExtensionIfNeeded({
       send: (method, params, session_id) => this._sendFrame(method, params, session_id) as Promise<ProtocolResult>,
       session_id_for_target: (target_id) => this.auto_target_sessions.get(target_id) ?? null,
@@ -487,7 +501,7 @@ export class CDPModClient extends CDPModEventEmitter {
 
   _hydrateCustomSurface() {
     for (const command of this.custom_commands) {
-      const name = normalizeCDPModName(command.name);
+      const name = normalizeModCDPName(command.name);
       const paramsSchema = command.paramsSchema ? Mod.PayloadSchemaSpec.parse(command.paramsSchema) : null;
       const resultSchema = command.resultSchema ? Mod.PayloadSchemaSpec.parse(command.resultSchema) : null;
       const normalized_params_schema = paramsSchema == null ? null : this._normalizePayloadSchema(paramsSchema);
@@ -497,14 +511,14 @@ export class CDPModClient extends CDPModEventEmitter {
       defineCustomCommandMethod(this, name);
     }
     for (const event of this.custom_events) {
-      const name = normalizeCDPModName(event.name);
+      const name = normalizeModCDPName(event.name);
       const eventSchema = event.eventSchema ? this._normalizePayloadSchema(event.eventSchema) : null;
       if (eventSchema) this.event_schemas.set(name, eventSchema);
     }
   }
 
   _normalizePayloadSchema(schema: unknown) {
-    return normalizeCDPModPayloadSchema(Mod.PayloadSchemaSpec.parse(schema));
+    return normalizeModCDPPayloadSchema(Mod.PayloadSchemaSpec.parse(schema));
   }
 
   async _serviceWorkerUrlSuffixes() {
@@ -516,18 +530,18 @@ export class CDPModClient extends CDPModEventEmitter {
     return {
       ...(this.server ?? {}),
       custom_commands: this.custom_commands.filter(hasCommandExpression).map((command) => ({
-        name: normalizeCDPModName(command.name),
+        name: normalizeModCDPName(command.name),
         expression: command.expression,
         paramsSchema: null,
         resultSchema: null,
       })),
       custom_events: this.custom_events.map((event) => ({
-        name: normalizeCDPModName(event.name),
-        bindingName: bindingNameFor(normalizeCDPModName(event.name)),
+        name: normalizeModCDPName(event.name),
+        bindingName: bindingNameFor(normalizeModCDPName(event.name)),
         eventSchema: null,
       })),
       custom_middlewares: this.custom_middlewares.map(({ name, phase, expression }) => ({
-        ...(name == null ? {} : { name: normalizeCDPModName(name) }),
+        ...(name == null ? {} : { name: normalizeModCDPName(name) }),
         phase,
         expression,
       })),
@@ -540,7 +554,7 @@ export class CDPModClient extends CDPModEventEmitter {
       const [{ execFileSync }, fs, os, path] = await Promise.all(
         ["node:child_process", "node:fs", "node:os", "node:path"].map(nodeImport),
       );
-      const unpacked_path = fs.mkdtempSync(path.join(os.tmpdir(), "cdpmod-extension-"));
+      const unpacked_path = fs.mkdtempSync(path.join(os.tmpdir(), "modcdp-extension-"));
       execFileSync("unzip", ["-q", this.extension_path, "-d", unpacked_path]);
       return {
         path: unpacked_path,
@@ -555,7 +569,7 @@ export class CDPModClient extends CDPModEventEmitter {
       this.custom_events.map((event) =>
         this._sendFrame(
           "Runtime.addBinding",
-          { name: bindingNameFor(normalizeCDPModName(event.name)) },
+          { name: bindingNameFor(normalizeModCDPName(event.name)) },
           this.ext_session_id,
         ),
       ),
@@ -573,32 +587,32 @@ export class CDPModClient extends CDPModEventEmitter {
     if (this._launched) await this._launched.close();
   }
 
-  on(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
+  on(event_name: ModCDPEventNameInput, listener: (...args: unknown[]) => void) {
     if (typeof event_name !== "string" && typeof event_name !== "symbol") {
-      const name = normalizeCDPModName(event_name);
+      const name = normalizeModCDPName(event_name);
       this.event_schemas.set(name, event_name);
       return super.on(name, listener);
     }
-    return super.on(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);
+    return super.on(typeof event_name === "symbol" ? event_name : normalizeModCDPName(event_name), listener);
   }
 
-  once(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
+  once(event_name: ModCDPEventNameInput, listener: (...args: unknown[]) => void) {
     if (typeof event_name !== "string" && typeof event_name !== "symbol") {
-      const name = normalizeCDPModName(event_name);
+      const name = normalizeModCDPName(event_name);
       this.event_schemas.set(name, event_name);
       return super.once(name, listener);
     }
-    return super.once(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);
+    return super.once(typeof event_name === "symbol" ? event_name : normalizeModCDPName(event_name), listener);
   }
 
-  off(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
+  off(event_name: ModCDPEventNameInput, listener: (...args: unknown[]) => void) {
     if (typeof event_name !== "string" && typeof event_name !== "symbol") {
-      return super.off(normalizeCDPModName(event_name), listener);
+      return super.off(normalizeModCDPName(event_name), listener);
     }
-    return super.off(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);
+    return super.off(typeof event_name === "symbol" ? event_name : normalizeModCDPName(event_name), listener);
   }
 
-  _waitForEvent(event_name: CDPModEventNameInput, { timeout_ms = 10_000 }: { timeout_ms?: number } = {}) {
+  _waitForEvent(event_name: ModCDPEventNameInput, { timeout_ms = 10_000 }: { timeout_ms?: number } = {}) {
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let cancel: () => void = () => {};
@@ -630,7 +644,7 @@ export class CDPModClient extends CDPModEventEmitter {
     const pong = this._waitForEvent("Mod.pong");
     try {
       await this.send("Mod.ping", { sentAt });
-      const payload = (await pong.promise) as CDPModPongEvent | null;
+      const payload = (await pong.promise) as ModCDPPongEvent | null;
       if (payload == null) return this.latency;
       const returnedAt = Date.now();
       this.latency = {
@@ -653,11 +667,11 @@ export class CDPModClient extends CDPModEventEmitter {
       return this._sendFrame(step.method, step.params ?? {}) as Promise<ProtocolResult>;
     }
     if (command.target === "self") {
-      if (!this.self) throw new Error(`CDPModClient self route requires a self server.`);
+      if (!this.self) throw new Error(`ModCDPClient self route requires a self server.`);
       this._ensureSelfEventListener();
       const [step] = command.steps;
       const cdp_session_id =
-        ((step.params as CDPModCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
+        ((step.params as ModCDPCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
       return await this.self.handleCommand(step.method, step.params ?? {}, cdp_session_id ?? null);
     }
     if (command.target !== "service_worker") {
@@ -784,4 +798,4 @@ export class CDPModClient extends CDPModEventEmitter {
   }
 }
 
-export interface CDPModClient extends CdpAliases {}
+export interface ModCDPClient extends CdpAliases {}

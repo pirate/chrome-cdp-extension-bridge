@@ -1,10 +1,10 @@
-"""CDPModClient (Python): importable, no CLI, no demo code.
+"""ModCDPClient (Python): importable, no CLI, no demo code.
 
 Constructor parameter names mirror the JS / Go ports:
     cdp_url           upstream CDP URL (str)
     extension_path    extension directory (str)
     routes            client-side routing dict
-    server            { 'loopback_cdp_url'?, 'routes'? } passed to CDPModServer.configure
+    server            { 'loopback_cdp_url'?, 'routes'? } passed to ModCDPServer.configure
 
 Public methods: connect(), send(method, params), on(event, handler), close(), _cdp.send(), _cdp.on().
 Synchronous (blocking) API; one background thread reads frames off the WS.
@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import tempfile
@@ -35,16 +36,16 @@ from .translate import (
     unwrap_response_if_needed,
 )
 from .types import (
-    CDPModAddCustomCommandParams,
-    CDPModAddCustomEventObjectParams,
-    CDPModAddCustomEventParams,
-    CDPModAddMiddlewareParams,
-    CDPModCommandTiming,
-    CDPModConnectTiming,
-    CDPModPingLatency,
-    CDPModRawTiming,
-    CDPModRoutes,
-    CDPModServerConfig,
+    ModCDPAddCustomCommandParams,
+    ModCDPAddCustomEventObjectParams,
+    ModCDPAddCustomEventParams,
+    ModCDPAddMiddlewareParams,
+    ModCDPCommandTiming,
+    ModCDPConnectTiming,
+    ModCDPPingLatency,
+    ModCDPRawTiming,
+    ModCDPRoutes,
+    ModCDPServerConfig,
     BorrowedExtensionInfo,
     CdpFrame,
     ExtensionInfo,
@@ -63,15 +64,15 @@ from .types import (
 )
 
 EXT_ID_FROM_URL_RE = re.compile(r"^chrome-extension://([a-z]+)/")
-CDPMOD_READY_EXPRESSION = (
-    "Boolean(globalThis.CDPMod?.__CDPModServerVersion === 1 && "
-    "globalThis.CDPMod?.handleCommand && globalThis.CDPMod?.addCustomEvent)"
+MODCDP_READY_EXPRESSION = (
+    "Boolean(globalThis.ModCDP?.__ModCDPServerVersion === 1 && "
+    "globalThis.ModCDP?.handleCommand && globalThis.ModCDP?.addCustomEvent)"
 )
 DEFAULT_SERVER = object()
 
 
 class _DomainMethods:
-    def __init__(self, client: "CDPModClient", domain: str) -> None:
+    def __init__(self, client: "ModCDPClient", domain: str) -> None:
         self._client = client
         self._domain = domain
 
@@ -87,7 +88,7 @@ class _DomainMethods:
 
 
 class _RawCDP:
-    def __init__(self, client: "CDPModClient") -> None:
+    def __init__(self, client: "ModCDPClient") -> None:
         self._client = client
 
     def send(
@@ -98,7 +99,7 @@ class _RawCDP:
     ) -> ProtocolResult:
         return self._client._send_frame(method, params or {}, session_id=session_id, record_raw_timing=True)
 
-    def on(self, event: str, handler: Handler) -> "CDPModClient":
+    def on(self, event: str, handler: Handler) -> "ModCDPClient":
         return self._client.on(event, handler)
 
 
@@ -128,18 +129,29 @@ def _json_object(value: JsonValue | None) -> ProtocolResult:
     return value if isinstance(value, dict) else {}
 
 
-def cdpmod_server_bootstrap_expression(extension_path: str) -> str:
-    server_path = Path(extension_path) / "CDPModServer.js"
+def modcdp_server_path(extension_path: str) -> Path:
+    candidates = [Path(extension_path) / "ModCDPServer.js"]
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / "dist" / "extension" / "ModCDPServer.js")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    checked = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Unable to locate ModCDPServer.js; checked: {checked}")
+
+
+def modcdp_server_bootstrap_expression(extension_path: str) -> str:
+    server_path = modcdp_server_path(extension_path)
     source = server_path.read_text()
-    start = source.index("export function installCDPModServer")
-    end = source.index("export const CDPModServer")
+    start = source.index("export function installModCDPServer")
+    end = source.index("export const ModCDPServer")
     installer = source[start:end].replace("export function", "function", 1)
     return (
         "(() => {\n"
         f"{installer}\n"
-        "const CDPMod = installCDPModServer(globalThis);\n"
+        "const ModCDP = installModCDPServer(globalThis);\n"
         "return {\n"
-        "  ok: Boolean(CDPMod?.__CDPModServerVersion === 1 && CDPMod?.handleCommand && CDPMod?.addCustomEvent),\n"
+        "  ok: Boolean(ModCDP?.__ModCDPServerVersion === 1 && ModCDP?.handleCommand && ModCDP?.addCustomEvent),\n"
         "  extension_id: globalThis.chrome?.runtime?.id ?? null,\n"
         "  has_tabs: Boolean(globalThis.chrome?.tabs?.query),\n"
         "  has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),\n"
@@ -148,16 +160,16 @@ def cdpmod_server_bootstrap_expression(extension_path: str) -> str:
     )
 
 
-class CDPModClient:
+class ModCDPClient:
     def __init__(
         self,
         cdp_url: str | None = None,
         extension_path: str | None = None,
         routes: Mapping[str, str] | None = None,
         server: Mapping[str, JsonValue] | None | object = DEFAULT_SERVER,
-        custom_commands: Sequence[CDPModAddCustomCommandParams] | None = None,
-        custom_events: Sequence[CDPModAddCustomEventParams] | None = None,
-        custom_middlewares: Sequence[CDPModAddMiddlewareParams] | None = None,
+        custom_commands: Sequence[ModCDPAddCustomCommandParams] | None = None,
+        custom_events: Sequence[ModCDPAddCustomEventParams] | None = None,
+        custom_middlewares: Sequence[ModCDPAddMiddlewareParams] | None = None,
         service_worker_url_includes: Sequence[str] | None = None,
         service_worker_url_suffixes: Sequence[str] | None = None,
         trust_service_worker_target: bool = False,
@@ -167,18 +179,18 @@ class CDPModClient:
     ) -> None:
         self.cdp_url: str | None = cdp_url
         self.extension_path: str | None = extension_path
-        self.routes: CDPModRoutes = {**DEFAULT_CLIENT_ROUTES, **dict(routes or {})}
+        self.routes: ModCDPRoutes = {**DEFAULT_CLIENT_ROUTES, **dict(routes or {})}
         if server is DEFAULT_SERVER:
-            self.server: CDPModServerConfig | None = {}
+            self.server: ModCDPServerConfig | None = {}
         elif server is None:
             self.server = None
         elif isinstance(server, Mapping):
-            self.server = cast(CDPModServerConfig, dict(server))
+            self.server = cast(ModCDPServerConfig, dict(server))
         else:
             raise TypeError("server must be a mapping, None, or omitted")
-        self.custom_commands: list[CDPModAddCustomCommandParams] = list(custom_commands or [])
-        self.custom_events: list[CDPModAddCustomEventParams] = list(custom_events or [])
-        self.custom_middlewares: list[CDPModAddMiddlewareParams] = list(custom_middlewares or [])
+        self.custom_commands: list[ModCDPAddCustomCommandParams] = list(custom_commands or [])
+        self.custom_events: list[ModCDPAddCustomEventParams] = list(custom_events or [])
+        self.custom_middlewares: list[ModCDPAddMiddlewareParams] = list(custom_middlewares or [])
         self.service_worker_url_includes: list[str] = list(service_worker_url_includes or [])
         self.service_worker_url_suffixes: list[str] = list(service_worker_url_suffixes or ["/service_worker.js", "/background.js"])
         self.trust_service_worker_target = trust_service_worker_target
@@ -189,10 +201,10 @@ class CDPModClient:
         self.extension_id: str | None = None
         self.ext_target_id: str | None = None
         self.ext_session_id: str | None = None
-        self.latency: CDPModPingLatency | None = None
-        self.connect_timing: CDPModConnectTiming | None = None
-        self.last_command_timing: CDPModCommandTiming | None = None
-        self.last_raw_timing: CDPModRawTiming | None = None
+        self.latency: ModCDPPingLatency | None = None
+        self.connect_timing: ModCDPConnectTiming | None = None
+        self.last_command_timing: ModCDPCommandTiming | None = None
+        self.last_raw_timing: ModCDPRawTiming | None = None
 
         self._ws: WebSocketLike | None = None
         self._next_id = 0
@@ -208,9 +220,10 @@ class CDPModClient:
         self._prepared_extension_dir: tempfile.TemporaryDirectory[str] | None = None
         self._cdp = _RawCDP(self)
 
-    def connect(self) -> "CDPModClient":
+    def connect(self) -> "ModCDPClient":
         connect_started_at = int(time.time() * 1000)
         if self.cdp_url is None:
+            self._prepare_extension_path()
             launched = self._launch_chrome()
             self.cdp_url = launched["cdp_url"]
         input_cdp_url = self.cdp_url
@@ -247,16 +260,16 @@ class CDPModClient:
                 self._send_frame("Runtime.addBinding", {"name": binding_name_for(name)}, self.ext_session_id)
 
         if self.server is not None:
-            custom_events: list[CDPModAddCustomEventObjectParams] = []
+            custom_events: list[ModCDPAddCustomEventObjectParams] = []
             for event in self.custom_events:
                 custom_events.append({"name": event} if isinstance(event, str) else event)
-            custom_commands: list[CDPModAddCustomCommandParams] = [
+            custom_commands: list[ModCDPAddCustomCommandParams] = [
                 command
                 for command in self.custom_commands
                 if isinstance(command.get("expression"), str) and command.get("expression")
             ]
-            custom_middlewares: list[CDPModAddMiddlewareParams] = list(self.custom_middlewares)
-            configure_params: CDPModServerConfig = {
+            custom_middlewares: list[ModCDPAddMiddlewareParams] = list(self.custom_middlewares)
+            configure_params: ModCDPServerConfig = {
                 **self.server,
                 "custom_events": custom_events,
                 "custom_commands": custom_commands,
@@ -300,8 +313,13 @@ class CDPModClient:
         }
         return result
 
-    def on(self, event: str, handler: Handler) -> "CDPModClient":
+    def raw_send(self, method: str, params: ProtocolParams | None = None) -> ProtocolResult:
+        return self._send_frame(method, params or {}, record_raw_timing=True)
+
+    def on(self, event: str, handler: Handler) -> "ModCDPClient":
         self._handlers.setdefault(event, []).append(handler)
+        if self.ext_session_id is not None and "." in event:
+            self._send_frame("Runtime.addBinding", {"name": binding_name_for(event)}, self.ext_session_id)
         return self
 
     def __getattr__(self, domain: str) -> _DomainMethods:
@@ -332,8 +350,8 @@ class CDPModClient:
 
     def _ready_expression(self) -> str:
         if not self.service_worker_ready_expression:
-            return CDPMOD_READY_EXPRESSION
-        return f"({CDPMOD_READY_EXPRESSION}) && Boolean({self.service_worker_ready_expression})"
+            return MODCDP_READY_EXPRESSION
+        return f"({MODCDP_READY_EXPRESSION}) && Boolean({self.service_worker_ready_expression})"
 
     def _session_id_for_target(self, target_id: str, timeout: float = 0) -> str | None:
         if timeout <= 0:
@@ -362,13 +380,14 @@ class CDPModClient:
         if executable_path is None:
             raise RuntimeError("No Chrome/Chromium binary found. Set CHROME_PATH or pass launch_options.executable_path.")
         port = int(self.launch_options.get("port") or _free_port())
-        self._profile_dir = tempfile.TemporaryDirectory(prefix="cdpmod.")
+        self._profile_dir = tempfile.TemporaryDirectory(prefix="modcdp.")
         args = [
             "--enable-unsafe-extension-debugging",
             "--remote-allow-origins=*",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-default-apps",
+            "--disable-dev-shm-usage",
             "--disable-background-networking",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
@@ -382,16 +401,20 @@ class CDPModClient:
             "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={port}",
         ]
-        if self.launch_options.get("headless", False):
+        default_headless = sys.platform.startswith("linux") and not os.environ.get("DISPLAY")
+        if self.launch_options.get("headless", default_headless):
             args.append("--headless=new")
         if self.launch_options.get("sandbox", False) is False:
             args.append("--no-sandbox")
+        if self.extension_path:
+            args.append(f"--load-extension={self.extension_path}")
         extra_args = self.launch_options.get("extra_args") or []
         args.extend(extra_args)
         args.append("about:blank")
         self._launched_process = subprocess.Popen([executable_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cdp_url = f"http://127.0.0.1:{port}"
-        deadline = time.time() + 15
+        chrome_ready_timeout_s = 45
+        deadline = time.time() + chrome_ready_timeout_s
         while time.time() < deadline:
             try:
                 with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=0.5) as response:
@@ -400,14 +423,14 @@ class CDPModClient:
             except Exception:
                 time.sleep(0.1)
         self.close()
-        raise RuntimeError(f"Chrome at {cdp_url} did not become ready within 15s")
+        raise RuntimeError(f"Chrome at {cdp_url} did not become ready within {chrome_ready_timeout_s}s")
 
     # --- internals ---------------------------------------------------------
 
     def _prepare_extension_path(self) -> None:
         if not self.extension_path or not self.extension_path.endswith(".zip"):
             return
-        self._prepared_extension_dir = tempfile.TemporaryDirectory(prefix="cdpmod-extension.")
+        self._prepared_extension_dir = tempfile.TemporaryDirectory(prefix="modcdp-extension.")
         with zipfile.ZipFile(self.extension_path) as archive:
             archive.extractall(self._prepared_extension_dir.name)
         self.extension_path = self._prepared_extension_dir.name
@@ -426,7 +449,7 @@ class CDPModClient:
             unwrap = step.get("unwrap")
         return unwrap_response_if_needed(result, unwrap)
 
-    def _measure_ping_latency(self) -> CDPModPingLatency:
+    def _measure_ping_latency(self) -> ModCDPPingLatency:
         sent_at = int(time.time() * 1000)
         done: Queue[ProtocolPayload] = Queue()
 
@@ -447,7 +470,7 @@ class CDPModClient:
         returned_at = int(time.time() * 1000)
         raw_received_at = payload.get("receivedAt")
         received_at = raw_received_at if isinstance(raw_received_at, (int, float)) else None
-        latency: CDPModPingLatency = {
+        latency: ModCDPPingLatency = {
             "sentAt": sent_at,
             "receivedAt": received_at,
             "returnedAt": returned_at,
@@ -555,18 +578,18 @@ class CDPModClient:
                         for h in self._handlers.get(u["event"], []):
                             def run_wrapped_event(handler=h, payload=u["data"], event_name=u["event"]):
                                 try: handler(payload)
-                                except Exception as e: print(f"[CDPModClient] handler error for {event_name}: {e}")
+                                except Exception as e: print(f"[ModCDPClient] handler error for {event_name}: {e}")
                             threading.Thread(target=run_wrapped_event, daemon=True).start()
                     continue
                 if method:
                     for h in self._handlers.get(method, []):
                         def run_method_event(handler=h, payload=dict(params), event_name=method):
                             try: handler(payload)
-                            except Exception as e: print(f"[CDPModClient] handler error for {event_name}: {e}")
+                            except Exception as e: print(f"[ModCDPClient] handler error for {event_name}: {e}")
                         threading.Thread(target=run_method_event, daemon=True).start()
         except Exception as e:
             if not self._closed:
-                print(f"[CDPModClient] reader exited: {e}")
+                print(f"[ModCDPClient] reader exited: {e}")
         finally:
             with self._lock:
                 pending = list(self._pending.values())
@@ -621,7 +644,7 @@ class CDPModClient:
                 "session_id": session_id,
             }
 
-        # 1. Discover an existing CDPMod service worker from the current CDP
+        # 1. Discover an existing ModCDP service worker from the current CDP
         # target snapshot. If none is already ready, use explicit injection.
         target_infos = self._target_infos()
         if trust_service_worker_target:
@@ -641,11 +664,11 @@ class CDPModClient:
                 return {"source": "discovered", **result}
         if self.require_service_worker_target:
             raise RuntimeError(
-                "Required CDPMod service worker target was not visible in the current CDP target snapshot "
+                "Required ModCDP service worker target was not visible in the current CDP target snapshot "
                 f"({', '.join([*self.service_worker_url_includes, *self.service_worker_url_suffixes]) or 'no matcher'})."
             )
         if self.extension_path is None:
-            raise RuntimeError("extension_path is required when no existing CDPMod service worker can be discovered.")
+            raise RuntimeError("extension_path is required when no existing ModCDP service worker can be discovered.")
 
         # 2. Try Extensions.loadUnpacked.
         try:
@@ -704,7 +727,7 @@ class CDPModClient:
         if self.extension_path is None:
             raise RuntimeError("extension_path is required to bootstrap a borrowed extension worker.")
         borrowed: list[BorrowedExtensionInfo] = []
-        bootstrap = cdpmod_server_bootstrap_expression(self.extension_path)
+        bootstrap = modcdp_server_bootstrap_expression(self.extension_path)
         for t in self._target_infos():
             target_id = t.get("targetId")
             target_url = t.get("url") or ""
@@ -757,8 +780,8 @@ class CDPModClient:
             selected.pop("has_debugger", None)
             return selected
         raise RuntimeError(
-            "Cannot install or borrow CDPMod in the running browser.\n"
-            "  - No existing service worker with globalThis.CDPMod was found.\n"
+            "Cannot install or borrow ModCDP in the running browser.\n"
+            "  - No existing service worker with globalThis.ModCDP was found.\n"
             f"  - Extensions.loadUnpacked is unavailable ({load_error}).\n"
-            "  - No running chrome-extension:// service worker accepted the CDPMod bootstrap."
+            "  - No running chrome-extension:// service worker accepted the ModCDP bootstrap."
         )

@@ -1,4 +1,4 @@
-"""Python demo for CDPModClient. Mirrors client/js/demo.js.
+"""Python demo for ModCDPClient. Mirrors client/js/demo.js.
 
 Modes (mirror the JS / Go demos):
     --live        Use the running Google Chrome enabled via chrome://inspect.
@@ -19,8 +19,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdpmod import CDPModClient
-from cdpmod.types import JsonValue, ProtocolPayload
+from modcdp import ModCDPClient
+from modcdp.types import JsonValue, ProtocolPayload
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXTENSION_PATH = ROOT / "dist" / "extension"
@@ -120,7 +120,7 @@ def main():
                 "extra_args": [f"--load-extension={EXTENSION_PATH}"],
             }
 
-        cdp = CDPModClient(**client_options_for(mode, cdp_url, launch_options))
+        cdp = ModCDPClient(**client_options_for(mode, cdp_url, launch_options))
         foreground_events = []
         target_created_events = []
         events_lock = threading.Lock()
@@ -192,10 +192,10 @@ def main():
                 raise RuntimeError(f"unexpected Browser.getVersion result {version}")
             print(f"Browser.getVersion -> {version}")
 
-        cdpmod_eval = expect_object(cdp.send("Mod.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"}), "Mod.evaluate")
-        if cdpmod_eval.get("extensionId") != cdp.extension_id:
-            raise RuntimeError(f"unexpected Mod.evaluate result {cdpmod_eval}")
-        print(f"Mod.evaluate     -> {cdpmod_eval}")
+        modcdp_eval = expect_object(cdp.send("Mod.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"}), "Mod.evaluate")
+        if modcdp_eval.get("extensionId") != cdp.extension_id:
+            raise RuntimeError(f"unexpected Mod.evaluate result {modcdp_eval}")
+        print(f"Mod.evaluate     -> {modcdp_eval}")
 
         echo_registration = expect_object(cdp.send("Mod.addCustomCommand", {
             "name": "Custom.echo",
@@ -265,7 +265,7 @@ def main():
         if demo_event_registration.get("registered") is not True or demo_event_registration.get("name") != "Custom.demoEvent":
             raise RuntimeError(f"unexpected Custom.demoEvent registration {demo_event_registration}")
         cdp.on("Custom.demoEvent", on_demo_event)
-        emit_result = expect_object(cdp.send("Mod.evaluate", {"expression": '''async () => await CDPMod.emit("Custom.demoEvent", { value: "custom-event-ok" })'''}), "Custom.demoEvent emit")
+        emit_result = expect_object(cdp.send("Mod.evaluate", {"expression": '''async () => await ModCDP.emit("Custom.demoEvent", { value: "custom-event-ok" })'''}), "Custom.demoEvent emit")
         if emit_result.get("emitted") is not True:
             raise RuntimeError(f"unexpected Custom.demoEvent emit result {emit_result}")
         deadline = time.monotonic() + 3.0
@@ -356,7 +356,7 @@ def run_repl(cdp, mode):
     cmd_re = re.compile(r"^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$")
     while True:
         try:
-            line = input("CDPMod> ").strip()
+            line = input("ModCDP> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
