@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -200,6 +201,9 @@ func New(opts Options) *CDPModClient {
 func (c *CDPModClient) Connect() error {
 	connectStartedAt := time.Now().UnixMilli()
 	if c.opts.CDPURL == "" {
+		if err := c.prepareExtensionPath(); err != nil {
+			return err
+		}
 		cdpURL, err := c.launchChrome()
 		if err != nil {
 			return err
@@ -461,6 +465,7 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		"--disable-backgrounding-occluded-windows",
 		"--disable-renderer-backgrounding",
 		"--disable-background-timer-throttling",
+		"--disable-dev-shm-usage",
 		"--disable-sync",
 		"--disable-features=DisableLoadExtensionCommandLineSwitch",
 		"--password-store=basic",
@@ -470,11 +475,18 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		"--remote-debugging-address=127.0.0.1",
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 	}
-	if c.opts.LaunchOptions.Headless != nil && *c.opts.LaunchOptions.Headless {
+	headless := runtime.GOOS == "linux" && os.Getenv("DISPLAY") == ""
+	if c.opts.LaunchOptions.Headless != nil {
+		headless = *c.opts.LaunchOptions.Headless
+	}
+	if headless {
 		args = append(args, "--headless=new")
 	}
 	if c.opts.LaunchOptions.Sandbox == nil || !*c.opts.LaunchOptions.Sandbox {
 		args = append(args, "--no-sandbox")
+	}
+	if c.opts.ExtensionPath != "" {
+		args = append(args, fmt.Sprintf("--load-extension=%s", c.opts.ExtensionPath))
 	}
 	args = append(args, c.opts.LaunchOptions.ExtraArgs...)
 	args = append(args, "about:blank")
