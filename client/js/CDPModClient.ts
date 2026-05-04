@@ -62,7 +62,7 @@ type ClientOptions = {
   extension_path?: string;
   routes?: CDPModRoutes;
   server?: CDPModConfigureParams | null;
-  custom_commands?: CDPModAddCustomCommandParams[];
+  custom_commands?: CDPModClientCustomCommandParams[];
   custom_events?: CDPModAddCustomEventObjectParams[];
   custom_middlewares?: CDPModAddMiddlewareParams[];
   hydrate_aliases?: boolean;
@@ -81,6 +81,9 @@ type ClientOptions = {
   } | null;
 };
 type CDPModEventNameInput = string | symbol | (z.ZodType & CDPModNamedValue);
+type CDPModClientCustomCommandParams = Omit<CDPModAddCustomCommandParams, "expression"> & {
+  expression?: string | null;
+};
 
 export type CDPModCommandSpec<Params = unknown, Result = unknown> = {
   params: Params;
@@ -221,7 +224,7 @@ export class CDPModClient extends CDPModEventEmitter {
   routes: CDPModRoutes;
   server: CDPModConfigureParams | null;
   launch_options: Record<string, unknown>;
-  custom_commands: CDPModAddCustomCommandParams[];
+  custom_commands: CDPModClientCustomCommandParams[];
   custom_events: CDPModAddCustomEventObjectParams[];
   custom_middlewares: CDPModAddMiddlewareParams[];
   hydrate_aliases: boolean;
