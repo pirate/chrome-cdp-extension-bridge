@@ -172,7 +172,7 @@ class CDPModsClient:
         extension_started_at = int(time.time() * 1000)
         original_discovery_wait_ms = self.discovery_wait_ms
         if self._launched_process is not None:
-            self.discovery_wait_ms = min(self.discovery_wait_ms, 1000)
+            self.discovery_wait_ms = min(self.discovery_wait_ms, 600)
         try:
             ext = self._ensure_extension()
         finally:

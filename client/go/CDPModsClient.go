@@ -247,8 +247,8 @@ func (c *CDPModsClient) Connect() error {
 	// to tear it down; otherwise the goroutine + ws connection leak.
 	extensionStartedAt := time.Now().UnixMilli()
 	originalDiscoveryWaitMilliseconds := c.opts.DiscoveryWaitMilliseconds
-	if c.launchedProcess != nil && c.opts.DiscoveryWaitMilliseconds > 1000 {
-		c.opts.DiscoveryWaitMilliseconds = 1000
+	if c.launchedProcess != nil && c.opts.DiscoveryWaitMilliseconds > 600 {
+		c.opts.DiscoveryWaitMilliseconds = 600
 	}
 	ext, err := c.ensureExtension()
 	c.opts.DiscoveryWaitMilliseconds = originalDiscoveryWaitMilliseconds
