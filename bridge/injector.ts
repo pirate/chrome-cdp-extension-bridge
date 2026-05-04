@@ -77,12 +77,17 @@ export async function injectExtensionIfNeeded({
   // extension loaded don't have to provide a path at all.
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  const sessionIdForTarget = (target_id: string) => {
-    const session_id = session_id_for_target?.(target_id);
-    return typeof session_id === "string" && session_id.length > 0 ? session_id : null;
+  const sessionIdForTarget = async (target_id: string, timeout_ms = 0) => {
+    const deadline = Date.now() + timeout_ms;
+    while (true) {
+      const session_id = session_id_for_target?.(target_id);
+      if (typeof session_id === "string" && session_id.length > 0) return session_id;
+      if (Date.now() >= deadline) return null;
+      await sleep(20);
+    }
   };
-  const probeTarget = async (target: TargetInfo) => {
-    const session_id = sessionIdForTarget(target.targetId);
+  const probeTarget = async (target: TargetInfo, session_timeout_ms = 0) => {
+    const session_id = await sessionIdForTarget(target.targetId, session_timeout_ms);
     if (session_id == null) return null;
     const probe = RuntimeCommands["Runtime.evaluate"].result.parse(
       await sendWithTimeout(
@@ -108,9 +113,11 @@ export async function injectExtensionIfNeeded({
   // injection path instead of waiting on a guessed preinstalled-extension budget.
   const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
   if (trust_matched_service_worker) {
-    const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as TargetInfo | undefined;
+    const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as
+      | TargetInfo
+      | undefined;
     if (trusted_target) {
-      const probed = await probeTarget(trusted_target);
+      const probed = await probeTarget(trusted_target, 2_000);
       if (probed) return { source: "trusted", ...probed };
     }
   }
@@ -118,7 +125,7 @@ export async function injectExtensionIfNeeded({
     if (candidate.type !== "service_worker") continue;
     if (!candidate.url.startsWith("chrome-extension://")) continue;
     try {
-      const probed = await probeTarget(candidate as TargetInfo);
+      const probed = await probeTarget(candidate as TargetInfo, 2_000);
       if (probed) return { source: "discovered", ...probed };
     } catch {
       continue;
@@ -142,6 +149,28 @@ export async function injectExtensionIfNeeded({
     } catch (error) {
       if (/Method not available|Method.*not.*found|wasn't found/i.test(error.message)) {
         load_unpacked_unavailable_error = error;
+        const target_infos = TargetCommands["Target.getTargets"].result.parse(
+          await send("Target.getTargets"),
+        ).targetInfos;
+        if (trust_matched_service_worker) {
+          const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as
+            | TargetInfo
+            | undefined;
+          if (trusted_target) {
+            const probed = await probeTarget(trusted_target, 2_000);
+            if (probed) return { source: "trusted", ...probed };
+          }
+        }
+        for (const candidate of target_infos) {
+          if (candidate.type !== "service_worker") continue;
+          if (!candidate.url.startsWith("chrome-extension://")) continue;
+          try {
+            const probed = await probeTarget(candidate as TargetInfo, 2_000);
+            if (probed) return { source: "discovered", ...probed };
+          } catch {
+            continue;
+          }
+        }
       } else {
         throw new Error(
           `Extensions.loadUnpacked failed for ${extension_path}: ${error.message}\n` +
@@ -161,11 +190,22 @@ export async function injectExtensionIfNeeded({
       const sw_url_prefix = `chrome-extension://${extension_id}/`;
       const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
-        const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
-        const target = target_infos.find((candidate) => candidate.type === "service_worker" && candidate.url.startsWith(sw_url_prefix)) as TargetInfo | undefined;
+        const target_infos = TargetCommands["Target.getTargets"].result.parse(
+          await send("Target.getTargets"),
+        ).targetInfos;
+        const target = target_infos.find(
+          (candidate) => candidate.type === "service_worker" && candidate.url.startsWith(sw_url_prefix),
+        ) as TargetInfo | undefined;
         if (target) {
-          const probed = await probeTarget(target);
-          if (probed) return { source: "injected", extension_id, target_id: target.targetId, url: target.url, session_id: probed.session_id };
+          const probed = await probeTarget(target, 2_000);
+          if (probed)
+            return {
+              source: "injected",
+              extension_id,
+              target_id: target.targetId,
+              url: target.url,
+              session_id: probed.session_id,
+            };
         }
         await sleep(100);
       }
@@ -184,14 +224,16 @@ export async function injectExtensionIfNeeded({
     has_tabs?: boolean;
     has_debugger?: boolean;
   }[] = [];
-  const borrowed_target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+  const borrowed_target_infos = TargetCommands["Target.getTargets"].result.parse(
+    await send("Target.getTargets"),
+  ).targetInfos;
   for (const target of borrowed_target_infos) {
     if (target.type !== "service_worker") continue;
     if (!target.url.startsWith("chrome-extension://")) continue;
 
     let session_id: string | null = null;
     try {
-      session_id = sessionIdForTarget(target.targetId);
+      session_id = await sessionIdForTarget(target.targetId, 2_000);
       if (session_id == null) continue;
       await send("Runtime.enable", {}, session_id).catch(() => {});
       const bootstrap = RuntimeCommands["Runtime.evaluate"].result.parse(

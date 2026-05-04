@@ -705,7 +705,7 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 			if !c.serviceWorkerTargetMatches(ti) {
 				continue
 			}
-			if probed, ok := c.probeReadyTarget(ti, 0); ok {
+			if probed, ok := c.probeReadyTarget(ti, 2*time.Second); ok {
 				probed["source"] = "trusted"
 				return probed, nil
 			}
@@ -718,7 +718,7 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 		if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
 			continue
 		}
-		if probed, ok := c.probeReadyTarget(ti, 0); ok {
+		if probed, ok := c.probeReadyTarget(ti, 2*time.Second); ok {
 			probed["source"] = "discovered"
 			return probed, nil
 		}
@@ -735,6 +735,35 @@ func (c *CDPModClient) ensureExtension() (map[string]any, error) {
 	loadResp, err := c.sendFrame("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
 	if err != nil {
 		if strings.Contains(err.Error(), "Method not available") || strings.Contains(err.Error(), "wasn't found") {
+			targetsResp, getTargetsErr := c.sendFrame("Target.getTargets", map[string]any{}, "")
+			if getTargetsErr != nil {
+				return nil, getTargetsErr
+			}
+			targetsRaw, _ := targetsResp["targetInfos"].([]any)
+			if c.opts.TrustServiceWorkerTarget {
+				for _, t := range targetsRaw {
+					ti, _ := t.(map[string]any)
+					if !c.serviceWorkerTargetMatches(ti) {
+						continue
+					}
+					if probed, ok := c.probeReadyTarget(ti, 2*time.Second); ok {
+						probed["source"] = "trusted"
+						return probed, nil
+					}
+				}
+			}
+			for _, t := range targetsRaw {
+				ti, _ := t.(map[string]any)
+				ttype, _ := ti["type"].(string)
+				turl, _ := ti["url"].(string)
+				if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
+					continue
+				}
+				if probed, ok := c.probeReadyTarget(ti, 2*time.Second); ok {
+					probed["source"] = "discovered"
+					return probed, nil
+				}
+			}
 			return c.borrowExtensionWorker(err.Error())
 		}
 		return nil, err
@@ -873,7 +902,7 @@ func (c *CDPModClient) borrowExtensionWorker(loadError string) (map[string]any, 
 		if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
 			continue
 		}
-		sessionID := c.sessionIDForTarget(tid, 50*time.Millisecond)
+		sessionID := c.sessionIDForTarget(tid, 2*time.Second)
 		if sessionID == "" {
 			continue
 		}

@@ -484,8 +484,8 @@ class CDPModClient:
 
     def _ensure_extension(self):
         ready_expression = self._ready_expression()
-        def probe_target(target):
-            session_id = self._session_id_for_target(target["targetId"])
+        def probe_target(target, timeout=0):
+            session_id = self._session_id_for_target(target["targetId"], timeout=timeout)
             if not session_id:
                 return None
             probe = self._send_frame("Runtime.evaluate", {
@@ -506,14 +506,14 @@ class CDPModClient:
         if self.trust_service_worker_target:
             for t in target_infos:
                 if self._service_worker_target_matches(t):
-                    result = probe_target(t)
+                    result = probe_target(t, timeout=2)
                     if result:
                         return {"source": "trusted", **result}
         for t in target_infos:
             if t["type"] != "service_worker": continue
             if not t["url"].startswith("chrome-extension://"): continue
             try:
-                result = probe_target(t)
+                result = probe_target(t, timeout=2)
             except Exception:
                 continue
             if result:
@@ -530,6 +530,22 @@ class CDPModClient:
             extension_id = r.get("id") or r.get("extensionId")
         except RuntimeError as e:
             if "Method not available" in str(e) or "wasn't found" in str(e):
+                target_infos = self._send_frame("Target.getTargets")["targetInfos"]
+                if self.trust_service_worker_target:
+                    for t in target_infos:
+                        if self._service_worker_target_matches(t):
+                            result = probe_target(t, timeout=2)
+                            if result:
+                                return {"source": "trusted", **result}
+                for t in target_infos:
+                    if t["type"] != "service_worker": continue
+                    if not t["url"].startswith("chrome-extension://"): continue
+                    try:
+                        result = probe_target(t, timeout=2)
+                    except Exception:
+                        continue
+                    if result:
+                        return {"source": "discovered", **result}
                 return self._borrow_extension_worker(str(e))
             raise
         if not extension_id:
@@ -541,7 +557,7 @@ class CDPModClient:
         while time.monotonic() < deadline:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] == "service_worker" and t["url"].startswith(sw_url_prefix):
-                    result = probe_target(t)
+                    result = probe_target(t, timeout=2)
                     if result:
                         return {
                             "source": "injected", "extension_id": extension_id,
@@ -568,7 +584,7 @@ class CDPModClient:
             if not t["url"].startswith("chrome-extension://"): continue
             session_id = None
             try:
-                session_id = self._session_id_for_target(t["targetId"], timeout=0.05)
+                session_id = self._session_id_for_target(t["targetId"], timeout=2)
                 if not session_id:
                     continue
                 try: self._send_frame("Runtime.enable", {}, session_id, timeout=2)

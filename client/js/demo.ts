@@ -26,7 +26,6 @@ import { spawn } from "node:child_process";
 import { z } from "zod";
 
 import { CDPModClient } from "./CDPModClient.js";
-import { launchChrome } from "../../bridge/launcher.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH =
@@ -49,7 +48,7 @@ function parseArgs(argv) {
   return { mode, live };
 }
 
-function clientOptionsFor(mode, cdp_url) {
+function clientOptionsFor(mode, cdp_url, launch_options = {}) {
   const directNormalEventRoutes = {
     "Target.setDiscoverTargets": "direct_cdp",
     "Target.createTarget": "direct_cdp",
@@ -59,6 +58,7 @@ function clientOptionsFor(mode, cdp_url) {
     return {
       cdp_url,
       extension_path: EXTENSION_PATH,
+      launch_options,
       routes: {
         "Mod.*": "service_worker",
         "Custom.*": "service_worker",
@@ -70,6 +70,7 @@ function clientOptionsFor(mode, cdp_url) {
   return {
     cdp_url,
     extension_path: EXTENSION_PATH,
+    launch_options,
     routes: {
       "Mod.*": "service_worker",
       "Custom.*": "service_worker",
@@ -82,7 +83,7 @@ function clientOptionsFor(mode, cdp_url) {
         "Custom.*": "service_worker",
         "*.*": mode === "loopback" ? "loopback_cdp" : "chrome_debugger",
       },
-      loopback_cdp_url: mode === "loopback" ? cdp_url : null,
+      ...(mode === "loopback" && cdp_url ? { loopback_cdp_url: cdp_url } : {}),
     },
   };
 }
@@ -134,30 +135,26 @@ async function main() {
     throw new Error(`Built extension not found at ${EXTENSION_PATH}. Run pnpm run build first.`);
   }
 
-  let chrome = null;
   let cdpUrl;
+  let launch_options = {};
   if (live) {
     cdpUrl = await waitForLiveCdpUrl();
   } else {
-    // --load-extension is a workaround for builds where Extensions.loadUnpacked
-    // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
-    // can drop extra_args entirely and the injector will install the extension
-    // over CDP itself.
-    chrome = await launchChrome({
+    cdpUrl = null;
+    launch_options = {
       headless: process.platform === "linux",
       sandbox: process.platform !== "linux",
       extra_args: [`--load-extension=${EXTENSION_PATH}`],
-    });
-    cdpUrl = chrome.wsUrl;
+    };
   }
-  console.log("upstream cdp:", cdpUrl);
 
-  const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl));
+  const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl, launch_options));
   const foregroundEvents = [];
   const targetCreatedEvents = [];
 
   try {
     await cdp.connect();
+    console.log("upstream cdp:", cdp.cdp_url);
     cdp.on(cdp.Target.targetCreated, (payload) => {
       console.log("Target.targetCreated ->", payload?.targetInfo?.targetId);
       targetCreatedEvents.push(payload);
@@ -322,7 +319,6 @@ async function main() {
     }
   } finally {
     await cdp.close();
-    await chrome?.close();
   }
 }
 
