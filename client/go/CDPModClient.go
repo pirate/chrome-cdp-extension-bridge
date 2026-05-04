@@ -136,6 +136,13 @@ type Options struct {
 
 type Handler func(data any)
 
+type CDPEvent struct {
+	Method       string         `json:"method"`
+	Params       map[string]any `json:"params,omitempty"`
+	CDPSessionID string         `json:"cdpSessionId,omitempty"`
+	SessionID    string         `json:"sessionId,omitempty"`
+}
+
 type CDPModClient struct {
 	opts                 Options
 	CDPURL               string
@@ -147,6 +154,7 @@ type CDPModClient struct {
 	nextID               int64
 	pending              map[int64]chan map[string]any
 	handlers             map[string][]Handler
+	cdpHandlers          map[string][]func(CDPEvent)
 	handlersMu           sync.Mutex
 	targetSessions       map[string]string
 	sessionTargets       map[string]map[string]any
@@ -183,6 +191,7 @@ func New(opts Options) *CDPModClient {
 		opts:           opts,
 		pending:        map[int64]chan map[string]any{},
 		handlers:       map[string][]Handler{},
+		cdpHandlers:    map[string][]func(CDPEvent){},
 		targetSessions: map[string]string{},
 		sessionTargets: map[string]map[string]any{},
 	}
@@ -368,6 +377,12 @@ func (c *CDPModClient) SendRaw(method string, params map[string]any, sessionID .
 
 func (c *CDPModClient) OnRaw(event string, handler Handler) {
 	c.On(event, handler)
+}
+
+func (c *CDPModClient) OnCDP(event string, handler func(CDPEvent)) {
+	c.handlersMu.Lock()
+	defer c.handlersMu.Unlock()
+	c.cdpHandlers[event] = append(c.cdpHandlers[event], handler)
 }
 
 func (c *CDPModClient) On(event string, handler Handler) {
@@ -766,9 +781,17 @@ func (c *CDPModClient) reader() {
 		if method != "" {
 			c.handlersMu.Lock()
 			hs := append([]Handler(nil), c.handlers[method]...)
+			cdpHandlers := append([]func(CDPEvent){}, c.cdpHandlers["*"]...)
+			cdpHandlers = append(cdpHandlers, c.cdpHandlers[method]...)
 			c.handlersMu.Unlock()
 			for _, h := range hs {
 				go h(params)
+			}
+			if len(cdpHandlers) > 0 {
+				event := CDPEvent{Method: method, Params: params, CDPSessionID: sessionID, SessionID: sessionID}
+				for _, h := range cdpHandlers {
+					go h(event)
+				}
 			}
 		}
 	}
