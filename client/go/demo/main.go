@@ -12,16 +12,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,32 +26,7 @@ import (
 	"golang.org/x/term"
 )
 
-func freePort() int {
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
-}
-
-func waitForJSON(url string, deadline time.Time) (map[string]any, error) {
-	for time.Now().Before(deadline) {
-		resp, err := (&http.Client{Timeout: 500 * time.Millisecond}).Get(url)
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode < 500 {
-				var data map[string]any
-				if err := json.Unmarshal(body, &data); err != nil {
-					return nil, err
-				}
-				return data, nil
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("timeout waiting for %s", url)
-}
-
-func optionsFor(mode, cdpURL, extensionPath string) cdpmod.Options {
+func optionsFor(mode, cdpURL, extensionPath string, launchOptions cdpmod.LaunchOptions) cdpmod.Options {
 	directNormalEventRoutes := map[string]string{
 		"Target.setDiscoverTargets": "direct_cdp",
 		"Target.createTarget":       "direct_cdp",
@@ -71,6 +42,7 @@ func optionsFor(mode, cdpURL, extensionPath string) cdpmod.Options {
 		return cdpmod.Options{
 			CDPURL:        cdpURL,
 			ExtensionPath: extensionPath,
+			LaunchOptions: launchOptions,
 			Routes: routes(map[string]string{
 				"Mod.*":    "service_worker",
 				"Custom.*": "service_worker",
@@ -89,12 +61,13 @@ func optionsFor(mode, cdpURL, extensionPath string) cdpmod.Options {
 			"*.*":      serverRoute,
 		},
 	}
-	if mode == "loopback" {
+	if mode == "loopback" && cdpURL != "" {
 		server.LoopbackCDPURL = cdpURL
 	}
 	return cdpmod.Options{
 		CDPURL:        cdpURL,
 		ExtensionPath: extensionPath,
+		LaunchOptions: launchOptions,
 		Routes: routes(map[string]string{
 			"Mod.*":    "service_worker",
 			"Custom.*": "service_worker",
@@ -138,6 +111,7 @@ func main() {
 	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
 	extensionPath := filepath.Join(root, "dist", "extension")
 	var cdpURL string
+	launchOptions := cdpmod.LaunchOptions{}
 	if live {
 		var err error
 		cdpURL, err = waitForLiveCDPURL()
@@ -145,38 +119,21 @@ func main() {
 			log.Fatal(err)
 		}
 	} else {
-		profile, _ := os.MkdirTemp("", "cdpmod-go.")
-		defer os.RemoveAll(profile)
-
-		chromePort := freePort()
-		chromeFlags := []string{
-			"--disable-gpu",
-			"--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
-			"--no-first-run", "--no-default-browser-check",
-			"--remote-debugging-port=" + strconv.Itoa(chromePort),
-			"--user-data-dir=" + profile,
-			"--load-extension=" + extensionPath,
-			"about:blank",
-		}
+		headless := false
+		sandbox := true
 		if runtime.GOOS == "linux" {
-			chromeFlags = append([]string{"--headless=new", "--no-sandbox"}, chromeFlags...)
+			headless = true
+			sandbox = false
 		}
-		chrome := exec.Command(chromePath, chromeFlags...)
-		if err := chrome.Start(); err != nil {
-			log.Fatal(err)
+		launchOptions = cdpmod.LaunchOptions{
+			ExecutablePath: chromePath,
+			ExtraArgs:      []string{"--load-extension=" + extensionPath},
+			Headless:       &headless,
+			Sandbox:        &sandbox,
 		}
-		defer func() { _ = chrome.Process.Kill(); _, _ = chrome.Process.Wait() }()
-
-		httpURL := fmt.Sprintf("http://127.0.0.1:%d", chromePort)
-		version, err := waitForJSON(httpURL+"/json/version", time.Now().Add(10*time.Second))
-		if err != nil {
-			log.Fatal(err)
-		}
-		cdpURL, _ = version["webSocketDebuggerUrl"].(string)
 	}
-	fmt.Println("upstream cdp:", cdpURL)
 
-	cdp := cdpmod.New(optionsFor(mode, cdpURL, extensionPath))
+	cdp := cdpmod.New(optionsFor(mode, cdpURL, extensionPath, launchOptions))
 	var (
 		eventsMu            sync.Mutex
 		targetCreatedEvents []map[string]any
@@ -195,6 +152,7 @@ func main() {
 		log.Fatalf("connect: %v", err)
 	}
 	defer cdp.Close()
+	fmt.Println("upstream cdp:", cdp.CDPURL)
 	fmt.Printf("connected; ext %s session %s\n", cdp.ExtensionID, cdp.ExtSessionID)
 	if b, err := json.Marshal(cdp.Latency); err == nil {
 		fmt.Println("ping latency      ->", string(b))

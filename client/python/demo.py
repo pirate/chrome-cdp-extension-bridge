@@ -11,11 +11,8 @@ Modes (mirror the JS / Go demos):
 
 import json
 import os
-import shutil
-import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.request
@@ -40,26 +37,7 @@ CHROME = os.environ.get("CHROME_PATH") or (
 )
 
 
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-def wait_for_url(url, timeout_s=8.0):
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=0.5) as r:
-                return json.loads(r.read())
-        except Exception:
-            time.sleep(0.05)
-    raise RuntimeError(f"timeout waiting for {url}")
-
-
-def client_options_for(mode, cdp_url):
+def client_options_for(mode, cdp_url, launch_options=None):
     direct_normal_event_routes = {
         "Target.setDiscoverTargets": "direct_cdp",
         "Target.createTarget": "direct_cdp",
@@ -69,20 +47,24 @@ def client_options_for(mode, cdp_url):
         return {
             "cdp_url": cdp_url,
             "extension_path": str(EXTENSION_PATH),
+            "launch_options": launch_options or {},
             "routes": {"Mod.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp", **direct_normal_event_routes},
         }
+    server = {
+        "routes": {
+            "Mod.*": "service_worker",
+            "Custom.*": "service_worker",
+            "*.*": "loopback_cdp" if mode == "loopback" else "chrome_debugger",
+        },
+    }
+    if cdp_url and mode == "loopback":
+        server["loopback_cdp_url"] = cdp_url
     return {
         "cdp_url": cdp_url,
         "extension_path": str(EXTENSION_PATH),
+        "launch_options": launch_options or {},
         "routes": {"Mod.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker", **direct_normal_event_routes},
-        "server": {
-            "routes": {
-                "Mod.*": "service_worker",
-                "Custom.*": "service_worker",
-                "*.*": "loopback_cdp" if mode == "loopback" else "chrome_debugger",
-            },
-            "loopback_cdp_url": cdp_url if mode == "loopback" else None,
-        },
+        "server": server,
     }
 
 
@@ -111,37 +93,21 @@ def main():
     mode = "debugger" if "debugger" in flags else "direct" if "direct" in flags else "loopback" if "loopback" in flags else "direct" if live else "loopback"
     print(f"== mode: {'live/' if live else ''}{mode} ==")
 
-    # Allocate cleanup handles up front so an early failure (port allocation,
-    # mkdtemp, Popen, /json/version probe) still hits the try/finally and
-    # releases the temp profile dir + any partially-started Chrome.
-    chrome_proc = None
-    profile_dir = None
     cdp = None
     try:
         if live:
             cdp_url = wait_for_live_cdp_url()
+            launch_options = {}
         else:
-            chrome_port = free_port()
-            profile_dir = tempfile.mkdtemp(prefix="cdpmod-py.")
-            chrome_args = [
-                CHROME,
-                "--disable-gpu",
-                "--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
-                "--no-first-run", "--no-default-browser-check",
-                f"--remote-debugging-port={chrome_port}",
-                f"--user-data-dir={profile_dir}",
-                f"--load-extension={EXTENSION_PATH}",
-                "about:blank",
-            ]
-            if sys.platform.startswith("linux"):
-                chrome_args.insert(1, "--headless=new")
-                chrome_args.insert(2, "--no-sandbox")
-            chrome_proc = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            http_url = f"http://127.0.0.1:{chrome_port}"
-            cdp_url = wait_for_url(f"{http_url}/json/version")["webSocketDebuggerUrl"]
-        print(f"upstream cdp: {cdp_url}")
+            cdp_url = None
+            launch_options = {
+                "executable_path": CHROME,
+                "headless": sys.platform.startswith("linux"),
+                "sandbox": not sys.platform.startswith("linux"),
+                "extra_args": [f"--load-extension={EXTENSION_PATH}"],
+            }
 
-        cdp = CDPModClient(**client_options_for(mode, cdp_url))
+        cdp = CDPModClient(**client_options_for(mode, cdp_url, launch_options))
         foreground_events = []
         target_created_events = []
         events_lock = threading.Lock()
@@ -159,6 +125,7 @@ def main():
         cdp.on("Target.targetCreated", on_target_created)
 
         cdp.connect()
+        print(f"upstream cdp: {cdp.cdp_url}")
         print(f"connected; ext {cdp.extension_id} session {cdp.ext_session_id}")
         print(f"ping latency      -> {cdp.latency}")
 
@@ -266,12 +233,6 @@ def main():
         if cdp is not None:
             try: cdp.close()
             except Exception: pass
-        if chrome_proc is not None:
-            chrome_proc.terminate()
-            try: chrome_proc.wait(timeout=3)
-            except Exception: chrome_proc.kill()
-        if profile_dir is not None:
-            shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def run_repl(cdp, mode):
