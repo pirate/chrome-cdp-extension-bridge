@@ -109,8 +109,8 @@ async (payload, next) => {
 test("service-worker routed standard CDP commands and events can be transformed", { timeout: 45_000 }, async () => {
   const chrome = await launchChrome({
     headless: process.platform === "linux",
-    noSandbox: process.platform === "linux",
-    extraFlags: [`--load-extension=${EXTENSION_PATH}`],
+    sandbox: process.platform !== "linux",
+    extra_args: [`--load-extension=${EXTENSION_PATH}`],
   });
   const cdp = new CDPModsClient({
     cdp_url: chrome.cdpUrl,

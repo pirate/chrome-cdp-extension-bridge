@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -65,6 +66,24 @@ func websocketURLFor(endpoint string) (string, error) {
 	return wsURL, nil
 }
 
+func freePort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // --- public types --------------------------------------------------------
 
 type ServerConfig struct {
@@ -90,14 +109,29 @@ type CustomMiddleware struct {
 	Expression string `json:"expression"`
 }
 
+type LaunchOptions struct {
+	ExecutablePath string
+	ExtraArgs      []string
+	Headless       *bool
+	Port           int
+	Sandbox        *bool
+}
+
 type Options struct {
-	CDPURL            string
-	ExtensionPath     string
-	Routes            map[string]string
-	Server            *ServerConfig
-	CustomCommands    []CustomCommand
-	CustomEvents      []CustomEvent
-	CustomMiddlewares []CustomMiddleware
+	CDPURL                       string
+	ExtensionPath                string
+	Routes                       map[string]string
+	Server                       *ServerConfig
+	CustomCommands               []CustomCommand
+	CustomEvents                 []CustomEvent
+	CustomMiddlewares            []CustomMiddleware
+	ServiceWorkerURLIncludes     []string
+	ServiceWorkerURLSuffixes     []string
+	TrustServiceWorkerTarget     bool
+	RequireServiceWorkerTarget   bool
+	ServiceWorkerReadyExpression string
+	DiscoveryWaitMilliseconds    int
+	LaunchOptions                LaunchOptions
 }
 
 type Handler func(data any)
@@ -124,6 +158,9 @@ type CDPModsClient struct {
 	handlersMu        sync.Mutex
 	cdpHandlers       map[string][]CDPHandler
 	cdpHandlersMu     sync.Mutex
+	targetSessions    map[string]string
+	sessionTargets    map[string]map[string]any
+	targetSessionsMu  sync.Mutex
 	ExtensionID       string
 	ExtTargetID       string
 	ExtSessionID      string
@@ -131,6 +168,8 @@ type CDPModsClient struct {
 	ConnectTiming     map[string]any
 	LastCommandTiming map[string]any
 	LastRawTiming     map[string]any
+	launchedProcess   *exec.Cmd
+	profileDir        string
 }
 
 func New(opts Options) *CDPModsClient {
@@ -146,16 +185,31 @@ func New(opts Options) *CDPModsClient {
 	if opts.Server == nil {
 		opts.Server = &ServerConfig{}
 	}
+	if opts.ServiceWorkerURLSuffixes == nil {
+		opts.ServiceWorkerURLSuffixes = []string{"/service_worker.js", "/background.js"}
+	}
+	if opts.DiscoveryWaitMilliseconds <= 0 {
+		opts.DiscoveryWaitMilliseconds = 10000
+	}
 	return &CDPModsClient{
-		opts:        opts,
-		pending:     map[int64]chan map[string]any{},
-		handlers:    map[string][]Handler{},
-		cdpHandlers: map[string][]CDPHandler{},
+		opts:           opts,
+		pending:        map[int64]chan map[string]any{},
+		handlers:       map[string][]Handler{},
+		cdpHandlers:    map[string][]CDPHandler{},
+		targetSessions: map[string]string{},
+		sessionTargets: map[string]map[string]any{},
 	}
 }
 
 func (c *CDPModsClient) Connect() error {
 	connectStartedAt := time.Now().UnixMilli()
+	if c.opts.CDPURL == "" {
+		cdpURL, err := c.launchChrome()
+		if err != nil {
+			return err
+		}
+		c.opts.CDPURL = cdpURL
+	}
 	inputCDPURL := c.opts.CDPURL
 	wsURL, err := websocketURLFor(c.opts.CDPURL)
 	if err != nil {
@@ -191,11 +245,18 @@ func (c *CDPModsClient) Connect() error {
 
 	// once the reader goroutine is running, any further error must call Close
 	// to tear it down; otherwise the goroutine + ws connection leak.
+	extensionStartedAt := time.Now().UnixMilli()
+	originalDiscoveryWaitMilliseconds := c.opts.DiscoveryWaitMilliseconds
+	if c.launchedProcess != nil && c.opts.DiscoveryWaitMilliseconds > 1000 {
+		c.opts.DiscoveryWaitMilliseconds = 1000
+	}
 	ext, err := c.ensureExtension()
+	c.opts.DiscoveryWaitMilliseconds = originalDiscoveryWaitMilliseconds
 	if err != nil {
 		c.Close()
 		return err
 	}
+	extensionCompletedAt := time.Now().UnixMilli()
 	c.ExtensionID = ext["extension_id"].(string)
 	c.ExtTargetID = ext["target_id"].(string)
 	c.ExtSessionID = ext["session_id"].(string)
@@ -270,9 +331,13 @@ func (c *CDPModsClient) Connect() error {
 	}
 	connectedAt := time.Now().UnixMilli()
 	c.ConnectTiming = map[string]any{
-		"started_at":   connectStartedAt,
-		"connected_at": connectedAt,
-		"duration_ms":  connectedAt - connectStartedAt,
+		"started_at":             connectStartedAt,
+		"extension_source":       ext["source"],
+		"extension_started_at":   extensionStartedAt,
+		"extension_completed_at": extensionCompletedAt,
+		"extension_duration_ms":  extensionCompletedAt - extensionStartedAt,
+		"connected_at":           connectedAt,
+		"duration_ms":            connectedAt - connectStartedAt,
 	}
 	return nil
 }
@@ -324,15 +389,107 @@ func (c *CDPModsClient) OnCDP(event string, handler CDPHandler) {
 }
 
 func (c *CDPModsClient) Close() {
-	if c.ExtSessionID != "" {
-		_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": c.ExtSessionID}, "")
-	}
 	if c.cancel != nil {
 		c.cancel()
 	}
 	if c.conn != nil {
 		_ = c.conn.Close()
 	}
+	if c.launchedProcess != nil && c.launchedProcess.Process != nil {
+		_ = c.launchedProcess.Process.Kill()
+		_, _ = c.launchedProcess.Process.Wait()
+		c.launchedProcess = nil
+	}
+	if c.profileDir != "" {
+		_ = os.RemoveAll(c.profileDir)
+		c.profileDir = ""
+	}
+}
+
+func (c *CDPModsClient) launchChrome() (string, error) {
+	executablePath := firstNonEmpty(c.opts.LaunchOptions.ExecutablePath, os.Getenv("CHROME_PATH"))
+	candidates := []string{
+		executablePath,
+		"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+		"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/usr/bin/google-chrome-canary",
+		"/usr/bin/chromium",
+		"/usr/bin/chromium-browser",
+		"/usr/bin/google-chrome",
+	}
+	executablePath = ""
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			executablePath = candidate
+			break
+		}
+	}
+	if executablePath == "" {
+		return "", fmt.Errorf("no Chrome/Chromium binary found; set CHROME_PATH or pass LaunchOptions.ExecutablePath")
+	}
+	port := c.opts.LaunchOptions.Port
+	if port == 0 {
+		nextPort, err := freePort()
+		if err != nil {
+			return "", err
+		}
+		port = nextPort
+	}
+	profileDir, err := os.MkdirTemp("", "cdpmods.")
+	if err != nil {
+		return "", err
+	}
+	c.profileDir = profileDir
+	args := []string{
+		"--enable-unsafe-extension-debugging",
+		"--remote-allow-origins=*",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-default-apps",
+		"--disable-background-networking",
+		"--disable-backgrounding-occluded-windows",
+		"--disable-renderer-backgrounding",
+		"--disable-background-timer-throttling",
+		"--disable-sync",
+		"--disable-features=DisableLoadExtensionCommandLineSwitch",
+		"--password-store=basic",
+		"--use-mock-keychain",
+		"--disable-gpu",
+		fmt.Sprintf("--user-data-dir=%s", profileDir),
+		"--remote-debugging-address=127.0.0.1",
+		fmt.Sprintf("--remote-debugging-port=%d", port),
+	}
+	if c.opts.LaunchOptions.Headless != nil && *c.opts.LaunchOptions.Headless {
+		args = append(args, "--headless=new")
+	}
+	if c.opts.LaunchOptions.Sandbox == nil || !*c.opts.LaunchOptions.Sandbox {
+		args = append(args, "--no-sandbox")
+	}
+	args = append(args, c.opts.LaunchOptions.ExtraArgs...)
+	args = append(args, "about:blank")
+	c.launchedProcess = exec.Command(executablePath, args...)
+	if err := c.launchedProcess.Start(); err != nil {
+		_ = os.RemoveAll(profileDir)
+		return "", err
+	}
+	cdpURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(cdpURL + "/json/version")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return cdpURL, nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	c.Close()
+	return "", fmt.Errorf("Chrome at %s did not become ready within 15s", cdpURL)
 }
 
 // --- internals -----------------------------------------------------------
@@ -410,7 +567,7 @@ func numberAsInt64(value any) (int64, bool) {
 }
 
 func (c *CDPModsClient) sendFrame(method string, params map[string]any, sessionID string) (map[string]any, error) {
-	return c.sendFrameTimeout(method, params, sessionID, 10*time.Second)
+	return c.sendFrameTimeout(method, params, sessionID, 0)
 }
 
 func (c *CDPModsClient) sendFrameTimeout(method string, params map[string]any, sessionID string, timeout time.Duration) (map[string]any, error) {
@@ -434,6 +591,16 @@ func (c *CDPModsClient) sendFrameTimeout(method string, params map[string]any, s
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, err
+	}
+	if timeout <= 0 {
+		resp := <-ch
+		if errObj, ok := resp["error"].(map[string]any); ok {
+			return nil, fmt.Errorf("%s failed: %v", method, errObj["message"])
+		}
+		if r, ok := resp["result"].(map[string]any); ok {
+			return r, nil
+		}
+		return map[string]any{}, nil
 	}
 	select {
 	case <-time.After(timeout):
@@ -506,6 +673,29 @@ func (c *CDPModsClient) reader() {
 		}
 		method, _ := msg["method"].(string)
 		sessionID, _ := msg["sessionId"].(string)
+		params, _ := msg["params"].(map[string]any)
+		if method == "Target.attachedToTarget" {
+			attachedSessionID, _ := params["sessionId"].(string)
+			targetInfo, _ := params["targetInfo"].(map[string]any)
+			targetID, _ := targetInfo["targetId"].(string)
+			if attachedSessionID != "" && targetID != "" {
+				c.targetSessionsMu.Lock()
+				c.targetSessions[targetID] = attachedSessionID
+				c.sessionTargets[attachedSessionID] = targetInfo
+				c.targetSessionsMu.Unlock()
+			}
+		} else if method == "Target.detachedFromTarget" {
+			detachedSessionID, _ := params["sessionId"].(string)
+			if detachedSessionID != "" {
+				c.targetSessionsMu.Lock()
+				targetInfo := c.sessionTargets[detachedSessionID]
+				delete(c.sessionTargets, detachedSessionID)
+				if targetID, _ := targetInfo["targetId"].(string); targetID != "" {
+					delete(c.targetSessions, targetID)
+				}
+				c.targetSessionsMu.Unlock()
+			}
+		}
 		// IMPORTANT: handlers run on their own goroutine, not on the reader.
 		// A handler that calls c.Send() would otherwise deadlock waiting on
 		// a response that this same goroutine is supposed to deliver.
@@ -522,7 +712,6 @@ func (c *CDPModsClient) reader() {
 			continue
 		}
 		if method != "" {
-			params, _ := msg["params"].(map[string]any)
 			c.handlersMu.Lock()
 			hs := append([]Handler(nil), c.handlers[method]...)
 			c.handlersMu.Unlock()
@@ -558,61 +747,35 @@ func targetIDFromEventParams(params map[string]any) string {
 }
 
 func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
-	type attached struct{ TargetID, URL, SessionID string }
-	var seen []attached
-
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(time.Duration(c.opts.DiscoveryWaitMilliseconds) * time.Millisecond)
 	for time.Now().Before(deadline.Add(time.Millisecond)) {
 		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 		if err != nil {
 			return nil, err
 		}
 		targetsRaw, _ := targetsResp["targetInfos"].([]any)
+		if c.opts.TrustServiceWorkerTarget {
+			for _, t := range targetsRaw {
+				ti, _ := t.(map[string]any)
+				if !c.serviceWorkerTargetMatches(ti) {
+					continue
+				}
+				if probed, ok := c.probeReadyTarget(ti, time.Second); ok {
+					probed["source"] = "trusted"
+					return probed, nil
+				}
+			}
+		}
 		for _, t := range targetsRaw {
 			ti, _ := t.(map[string]any)
 			ttype, _ := ti["type"].(string)
 			turl, _ := ti["url"].(string)
-			tid, _ := ti["targetId"].(string)
 			if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
 				continue
 			}
-			already := false
-			for _, a := range seen {
-				if a.TargetID == tid {
-					already = true
-					break
-				}
-			}
-			if already {
-				continue
-			}
-			a, err := c.sendFrameTimeout("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "", 2*time.Second)
-			if err != nil {
-				continue
-			}
-			sid, _ := a["sessionId"].(string)
-			seen = append(seen, attached{TargetID: tid, URL: turl, SessionID: sid})
-		}
-		for _, a := range seen {
-			probe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
-				"expression":    cdpmodsReadyExpression,
-				"returnByValue": true,
-			}, a.SessionID, 2*time.Second)
-			if err != nil {
-				continue
-			}
-			result, _ := probe["result"].(map[string]any)
-			if v, _ := result["value"].(bool); v {
-				for _, o := range seen {
-					if o.SessionID != a.SessionID {
-						_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": o.SessionID}, "")
-					}
-				}
-				m := extIDFromURL.FindStringSubmatch(a.URL)
-				return map[string]any{
-					"source": "discovered", "extension_id": m[1],
-					"target_id": a.TargetID, "url": a.URL, "session_id": a.SessionID,
-				}, nil
+			if probed, ok := c.probeReadyTarget(ti, 50*time.Millisecond); ok {
+				probed["source"] = "discovered"
+				return probed, nil
 			}
 		}
 		if !time.Now().Before(deadline) {
@@ -620,8 +783,13 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	for _, a := range seen {
-		_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": a.SessionID}, "")
+	if c.opts.RequireServiceWorkerTarget {
+		matchers := append(append([]string{}, c.opts.ServiceWorkerURLIncludes...), c.opts.ServiceWorkerURLSuffixes...)
+		matcherText := strings.Join(matchers, ", ")
+		if matcherText == "" {
+			matcherText = "no matcher"
+		}
+		return nil, fmt.Errorf("required CDPMods service worker target was not ready within %dms (%s)", c.opts.DiscoveryWaitMilliseconds, matcherText)
 	}
 
 	loadResp, err := c.sendFrame("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
@@ -651,33 +819,93 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 			ti, _ := t.(map[string]any)
 			turl, _ := ti["url"].(string)
 			if ti["type"] == "service_worker" && strings.HasPrefix(turl, swURLPrefix) {
-				tid, _ := ti["targetId"].(string)
-				a, err := c.sendFrame("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "")
-				if err != nil {
-					return nil, err
+				if probed, ok := c.probeReadyTarget(ti, time.Second); ok {
+					probed["source"] = "injected"
+					probed["extension_id"] = extID
+					return probed, nil
 				}
-				sid, _ := a["sessionId"].(string)
-				probe, err := c.sendFrame("Runtime.evaluate", map[string]any{
-					"expression":    cdpmodsReadyExpression,
-					"returnByValue": true,
-				}, sid)
-				if err != nil {
-					_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
-					continue
-				}
-				result, _ := probe["result"].(map[string]any)
-				if v, _ := result["value"].(bool); v {
-					return map[string]any{
-						"source": "injected", "extension_id": extID,
-						"target_id": tid, "url": turl, "session_id": sid,
-					}, nil
-				}
-				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("Extensions.loadUnpacked installed %s but its SW did not appear", extID)
+}
+
+func (c *CDPModsClient) serviceWorkerTargetMatches(target map[string]any) bool {
+	turl, _ := target["url"].(string)
+	ttype, _ := target["type"].(string)
+	if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
+		return false
+	}
+	for _, part := range c.opts.ServiceWorkerURLIncludes {
+		if !strings.Contains(turl, part) {
+			return false
+		}
+	}
+	if len(c.opts.ServiceWorkerURLSuffixes) > 0 {
+		matched := false
+		for _, suffix := range c.opts.ServiceWorkerURLSuffixes {
+			if strings.HasSuffix(turl, suffix) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return len(c.opts.ServiceWorkerURLIncludes) > 0 || len(c.opts.ServiceWorkerURLSuffixes) > 0
+}
+
+func (c *CDPModsClient) readyExpression() string {
+	if c.opts.ServiceWorkerReadyExpression == "" {
+		return cdpmodsReadyExpression
+	}
+	return fmt.Sprintf("(%s) && Boolean(%s)", cdpmodsReadyExpression, c.opts.ServiceWorkerReadyExpression)
+}
+
+func (c *CDPModsClient) sessionIDForTarget(targetID string, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline.Add(time.Millisecond)) {
+		c.targetSessionsMu.Lock()
+		sessionID := c.targetSessions[targetID]
+		c.targetSessionsMu.Unlock()
+		if sessionID != "" {
+			return sessionID
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return ""
+}
+
+func (c *CDPModsClient) probeReadyTarget(target map[string]any, timeout time.Duration) (map[string]any, bool) {
+	targetID, _ := target["targetId"].(string)
+	targetURL, _ := target["url"].(string)
+	sessionID := c.sessionIDForTarget(targetID, timeout)
+	if sessionID == "" {
+		return nil, false
+	}
+	probe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
+		"expression":    c.readyExpression(),
+		"returnByValue": true,
+	}, sessionID, 2*time.Second)
+	if err != nil {
+		return nil, false
+	}
+	result, _ := probe["result"].(map[string]any)
+	if ready, _ := result["value"].(bool); !ready {
+		return nil, false
+	}
+	extensionID := ""
+	if m := extIDFromURL.FindStringSubmatch(targetURL); len(m) > 1 {
+		extensionID = m[1]
+	}
+	return map[string]any{
+		"extension_id": extensionID,
+		"target_id":    targetID,
+		"url":          targetURL,
+		"session_id":   sessionID,
+	}, true
 }
 
 func (c *CDPModsClient) borrowExtensionWorker(loadError string) (map[string]any, error) {
@@ -699,12 +927,10 @@ func (c *CDPModsClient) borrowExtensionWorker(loadError string) (map[string]any,
 		if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
 			continue
 		}
-		sessionID := ""
-		a, err := c.sendFrameTimeout("Target.attachToTarget", map[string]any{"targetId": tid, "flatten": true}, "", 2*time.Second)
-		if err != nil {
+		sessionID := c.sessionIDForTarget(tid, 50*time.Millisecond)
+		if sessionID == "" {
 			continue
 		}
-		sessionID, _ = a["sessionId"].(string)
 		_, _ = c.sendFrameTimeout("Runtime.enable", map[string]any{}, sessionID, 2*time.Second)
 		probe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
 			"expression":                  bootstrap,
@@ -713,14 +939,25 @@ func (c *CDPModsClient) borrowExtensionWorker(loadError string) (map[string]any,
 			"allowUnsafeEvalBlockedByCSP": true,
 		}, sessionID, 3*time.Second)
 		if err != nil {
-			_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sessionID}, "")
 			continue
 		}
 		result, _ := probe["result"].(map[string]any)
 		value, _ := result["value"].(map[string]any)
 		if ok, _ := value["ok"].(bool); !ok {
-			_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sessionID}, "")
 			continue
+		}
+		if c.opts.ServiceWorkerReadyExpression != "" {
+			readyProbe, err := c.sendFrameTimeout("Runtime.evaluate", map[string]any{
+				"expression":    c.readyExpression(),
+				"returnByValue": true,
+			}, sessionID, 2*time.Second)
+			if err != nil {
+				continue
+			}
+			readyResult, _ := readyProbe["result"].(map[string]any)
+			if ready, _ := readyResult["value"].(bool); !ready {
+				continue
+			}
 		}
 		extensionID, _ := value["extension_id"].(string)
 		if extensionID == "" {
@@ -749,11 +986,6 @@ func (c *CDPModsClient) borrowExtensionWorker(loadError string) (map[string]any,
 		return iTabs && !jTabs
 	})
 	if len(borrowed) > 0 {
-		for _, other := range borrowed[1:] {
-			if sid, _ := other["session_id"].(string); sid != "" {
-				_, _ = c.sendFrame("Target.detachFromTarget", map[string]any{"sessionId": sid}, "")
-			}
-		}
 		delete(borrowed[0], "has_tabs")
 		delete(borrowed[0], "has_debugger")
 		return borrowed[0], nil

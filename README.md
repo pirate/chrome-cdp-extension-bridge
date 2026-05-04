@@ -270,8 +270,8 @@ flowchart LR
     direction LR
     SDK["SDK"]
     WS["WS client"]
-    SDK -->|"1. cdp.on('Target.attachedToTarget', ...)"| WS
-    SDK -->|"2. cdp.send('Target.attachToTarget', ...)"| WS
+    SDK -->|"1. cdp.on('Target.targetCreated', ...)"| WS
+    SDK -->|"2. cdp.Target.createTarget({url})"| WS
   end
 
   subgraph Browser["Browser"]
@@ -284,13 +284,13 @@ flowchart LR
 
   Socket["CDP socket"]
 
-  WS -->|"3. CDP Target.attachToTarget"| Socket
+  WS -->|"3. CDP Target.createTarget"| Socket
   Socket -->|"4. Standard CDP"| CDP
-  CDP -->|"6. attach session"| Page
-  Page -->|"7. Target.attachedToTarget<br/>{sessionId, targetInfo}"| CDP
-  CDP -->|"8. Target.attachedToTarget<br/>{sessionId, targetInfo}"| Socket
-  Socket -->|"9. Target.attachedToTarget<br/>{sessionId, targetInfo}"| WS
-  WS -->|"10. emit('Target.attachedToTarget', {sessionId, targetInfo})"| SDK
+  CDP -->|"6. create page target"| Page
+  Page -->|"7. Target.targetCreated<br/>{targetInfo}"| CDP
+  CDP -->|"8. Target.targetCreated<br/>{targetInfo}"| Socket
+  Socket -->|"9. Target.targetCreated<br/>{targetInfo}"| WS
+  WS -->|"10. emit('Target.targetCreated', {targetInfo})"| SDK
 
   classDef idle fill:#f7f7f7,stroke:#bbb,color:#777;
   class SW idle;

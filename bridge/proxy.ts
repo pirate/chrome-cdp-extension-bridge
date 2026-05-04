@@ -291,22 +291,22 @@ async function handleConnection(
   // Bootstrap: ensure the CDPMods extension is present and attach a hidden
   // session to it. All single-source-of-truth precedence + error messaging
   // lives in injector.js; the proxy just consumes its result.
-  const sendInternal = (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
+  const sendInternal = (method: string, params: ProtocolParams = {}, session_id: string | null = null) =>
     new Promise<ProtocolResult>((resolve, reject) => {
       const id = state.nextUpstreamId++;
       state.pending.set(id, { kind: "internal", resolve, reject });
       const message: CdpCommandFrame = { id, method, params };
-      if (sessionId) message.sessionId = sessionId;
+      if (session_id) message.sessionId = session_id;
       upstream.send(JSON.stringify(message));
     });
 
-  const ext = await injectExtensionIfNeeded({ send: sendInternal, extensionPath });
-  state.extSessionId = ext.sessionId;
-  state.extTargetId = ext.targetId;
-  state.hiddenSessionIds.add(ext.sessionId);
-  state.hiddenTargetIds.add(ext.targetId);
-  await sendInternal("Runtime.enable", {}, ext.sessionId);
-  log(`extension ${ext.source} (${ext.extensionId}); ext session ${ext.sessionId}`);
+  const ext = await injectExtensionIfNeeded({ send: sendInternal, extension_path: extensionPath });
+  state.extSessionId = ext.session_id;
+  state.extTargetId = ext.target_id;
+  state.hiddenSessionIds.add(ext.session_id);
+  state.hiddenTargetIds.add(ext.target_id);
+  await sendInternal("Runtime.enable", {}, ext.session_id);
+  log(`extension ${ext.source} (${ext.extension_id}); ext session ${ext.session_id}`);
 
   // Swap the early-buffer handler for the real one. Drain anything that
   // arrived before we got here.

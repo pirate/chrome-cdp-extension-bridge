@@ -2,7 +2,7 @@
 // injector.js: inject the CDPMods extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //
-// The caller hands in a `send(method, params, sessionId?)` function bound to
+// The caller hands in a `send(method, params, session_id?)` function bound to
 // the upstream CDP websocket. The injector knows about Extensions.loadUnpacked,
 // service-worker URL pattern matching, and probe-by-globalThis.CDPMods, but
 // nothing about chrome binaries, the proxy, or wrap/unwrap.
@@ -10,7 +10,7 @@
 // Precedence (single source of truth — do not duplicate this in proxy/client):
 //   1. Look for an existing service-worker target whose JS context already has
 //      globalThis.CDPMods. Use it. (source: "discovered")
-//   2. Otherwise call Extensions.loadUnpacked(extensionPath) and wait for that
+//   2. Otherwise call Extensions.loadUnpacked(extension_path) and wait for that
 //      extension's service worker to appear. (source: "injected")
 //   3. If Chrome refuses extension loading, bootstrap CDPMods into every
 //      already-running extension service worker target and use the best one.
@@ -22,182 +22,171 @@ import { commands } from "../types/zod.js";
 import { installCDPModsServer } from "../extension/CDPModsServer.js";
 
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
+const CDPMODS_READY_EXPRESSION =
+  "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)";
 
-type SendCDP = (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
+type SendCDP = (method: string, params?: ProtocolParams, session_id?: string | null) => Promise<ProtocolResult>;
+type TargetInfo = { targetId: string; type?: string; url?: string };
 
-const bootstrapCDPModsServerExpression = `
+const bootstrap_cdpmods_server_expression = `
   (() => {
     const __name = (fn) => fn;
     const installCDPModsServer = ${installCDPModsServer.toString()};
     const CDPMods = installCDPModsServer(globalThis);
     return {
       ok: Boolean(CDPMods?.__CDPModsServerVersion === 1 && CDPMods?.handleCommand && CDPMods?.addCustomEvent),
-      extensionId: globalThis.chrome?.runtime?.id ?? null,
-      hasTabs: Boolean(globalThis.chrome?.tabs?.query),
-      hasDebugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
+      extension_id: globalThis.chrome?.runtime?.id ?? null,
+      has_tabs: Boolean(globalThis.chrome?.tabs?.query),
+      has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
     };
   })()
 `;
 
 export async function injectExtensionIfNeeded({
   send,
-  extensionPath,
-  serviceWorkerUrlIncludes = [],
-  serviceWorkerUrlSuffixes = [],
-  trustMatchedServiceWorker = false,
-  timeoutMs = 10_000,
-  discoveryWaitMs = 10_000,
+  session_id_for_target = null,
+  extension_path,
+  service_worker_url_includes = [],
+  service_worker_url_suffixes = [],
+  trust_matched_service_worker = false,
+  require_service_worker_target = false,
+  service_worker_ready_expression = null,
+  timeout_ms = 10_000,
+  discovery_wait_ms = 10_000,
 }: {
   send: SendCDP;
-  extensionPath?: string | null;
-  serviceWorkerUrlIncludes?: string[];
-  serviceWorkerUrlSuffixes?: string[];
-  trustMatchedServiceWorker?: boolean;
-  timeoutMs?: number;
-  discoveryWaitMs?: number;
+  session_id_for_target?: ((target_id: string) => string | null | undefined) | null;
+  extension_path?: string | null;
+  service_worker_url_includes?: string[];
+  service_worker_url_suffixes?: string[];
+  trust_matched_service_worker?: boolean;
+  require_service_worker_target?: boolean;
+  service_worker_ready_expression?: string | null;
+  timeout_ms?: number;
+  discovery_wait_ms?: number;
 }) {
   if (typeof send !== "function") throw new Error("injectExtensionIfNeeded requires { send }");
-  const sendWithTimeout = (method: string, params: ProtocolParams = {}, sessionId: string | null = null, ms = 2_000) =>
+  const ready_expression =
+    service_worker_ready_expression == null || service_worker_ready_expression.length === 0
+      ? CDPMODS_READY_EXPRESSION
+      : `(${CDPMODS_READY_EXPRESSION}) && Boolean(${service_worker_ready_expression})`;
+  const sendWithTimeout = (method: string, params: ProtocolParams = {}, session_id: string | null = null, ms = 2_000) =>
     Promise.race([
-      send(method, params, sessionId),
+      send(method, params, session_id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${method} timed out after ${ms}ms`)), ms)),
     ]);
-  // extensionPath is only required as a fallback, when discovery does not turn
+  // extension_path is only required as a fallback, when discovery does not turn
   // up an already-loaded CDPMods service worker. Validate at the point of use
   // (step 2) so callers running against a browser that already has the
   // extension loaded don't have to provide a path at all.
 
-  // 1. Discover an existing CDPMods service worker. Extensions loaded with
-  // --load-extension at browser launch take a moment to spin their SW *and*
-  // for the SW's top-level module init to run, so we attach to each candidate
-  // and re-probe its globalThis until either CDPMods appears or we time out.
-  const attached: { targetId: string; url: string; sessionId: string }[] = [];
-  const discoveryDeadline = Date.now() + discoveryWaitMs;
-  while (Date.now() <= discoveryDeadline) {
-    const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
-    if (trustMatchedServiceWorker) {
-      const trustedTarget = targetInfos.find((candidate) => serviceWorkerTargetMatches(candidate));
-      if (trustedTarget) {
-        const { sessionId } = commands["Target.attachToTarget"].result.parse(
-          await sendWithTimeout("Target.attachToTarget", { targetId: trustedTarget.targetId, flatten: true }),
-        );
-        return {
-          source: "trusted",
-          extensionId: trustedTarget.url.match(EXT_ID_FROM_URL)?.[1],
-          targetId: trustedTarget.targetId,
-          url: trustedTarget.url,
-          sessionId,
-        };
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const sessionIdForTarget = async (target_id: string, wait_ms = 1_000) => {
+    const deadline = Date.now() + wait_ms;
+    while (Date.now() <= deadline) {
+      const session_id = session_id_for_target?.(target_id);
+      if (typeof session_id === "string" && session_id.length > 0) return session_id;
+      await sleep(20);
+    }
+    return null;
+  };
+  const probeTarget = async (target: TargetInfo, wait_ms = 1_000) => {
+    const session_id = await sessionIdForTarget(target.targetId, wait_ms);
+    if (session_id == null) return null;
+    const probe = commands["Runtime.evaluate"].result.parse(
+      await sendWithTimeout(
+        "Runtime.evaluate",
+        {
+          expression: ready_expression,
+          returnByValue: true,
+        },
+        session_id,
+      ),
+    );
+    if (probe.result?.value !== true) return null;
+    return {
+      extension_id: target.url?.match(EXT_ID_FROM_URL)?.[1],
+      target_id: target.targetId,
+      url: target.url,
+      session_id,
+    };
+  };
+
+  // 1. Discover an existing CDPMods service worker. Preinstalled extensions
+  // can take a moment to spin their SW *and*
+  // for the SW's top-level module init to run. The client has already enabled
+  // flattened auto-attach, so probing uses the existing target->session map.
+  const discovery_deadline = Date.now() + discovery_wait_ms;
+  while (Date.now() <= discovery_deadline) {
+    const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+    if (trust_matched_service_worker) {
+      const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as TargetInfo | undefined;
+      if (trusted_target) {
+        const probed = await probeTarget(trusted_target);
+        if (probed) return { source: "trusted", ...probed };
       }
     }
-    for (const candidate of targetInfos) {
+    for (const candidate of target_infos) {
       if (candidate.type !== "service_worker") continue;
       if (!candidate.url.startsWith("chrome-extension://")) continue;
-      if (attached.some((a) => a.targetId === candidate.targetId)) continue;
       try {
-        const { sessionId } = commands["Target.attachToTarget"].result.parse(
-          await sendWithTimeout("Target.attachToTarget", { targetId: candidate.targetId, flatten: true }),
-        );
-        attached.push({ targetId: candidate.targetId, url: candidate.url, sessionId });
-      } catch {}
-    }
-    for (const a of attached) {
-      let probe;
-      try {
-        probe = commands["Runtime.evaluate"].result.parse(
-          await sendWithTimeout(
-            "Runtime.evaluate",
-            {
-              expression:
-                "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)",
-              returnByValue: true,
-            },
-            a.sessionId,
-          ),
-        );
+        const probed = await probeTarget(candidate as TargetInfo, 50);
+        if (probed) return { source: "discovered", ...probed };
       } catch {
         continue;
       }
-      if (probe.result?.value === true) {
-        // detach every other speculative session before returning
-        for (const other of attached) {
-          if (other.sessionId === a.sessionId) continue;
-          await send("Target.detachFromTarget", { sessionId: other.sessionId }).catch(() => {});
-        }
-        return {
-          source: "discovered",
-          extensionId: a.url.match(EXT_ID_FROM_URL)?.[1],
-          targetId: a.targetId,
-          url: a.url,
-          sessionId: a.sessionId,
-        };
-      }
     }
-    if (Date.now() >= discoveryDeadline) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (Date.now() >= discovery_deadline) break;
+    await sleep(100);
   }
-  for (const a of attached) await send("Target.detachFromTarget", { sessionId: a.sessionId }).catch(() => {});
+  if (require_service_worker_target) {
+    throw new Error(
+      `Required CDPMods service worker target was not ready within ${discovery_wait_ms}ms ` +
+        `(${[...service_worker_url_includes, ...service_worker_url_suffixes].join(", ") || "no matcher"}).`,
+    );
+  }
 
   // 2. Try Extensions.loadUnpacked.
-  let loadUnpackedUnavailableError: Error | null = null;
-  if (!extensionPath) {
-    loadUnpackedUnavailableError = new Error("No extensionPath was provided.");
+  let load_unpacked_unavailable_error: Error | null = null;
+  if (!extension_path) {
+    load_unpacked_unavailable_error = new Error("No extension_path was provided.");
   } else {
-    let loadResult;
+    let load_result;
     try {
-      loadResult = await send("Extensions.loadUnpacked", { path: extensionPath });
+      load_result = await send("Extensions.loadUnpacked", { path: extension_path });
     } catch (error) {
       if (/Method not available|Method.*not.*found|wasn't found/i.test(error.message)) {
-        loadUnpackedUnavailableError = error;
+        load_unpacked_unavailable_error = error;
       } else {
         throw new Error(
-          `Extensions.loadUnpacked failed for ${extensionPath}: ${error.message}\n` +
+          `Extensions.loadUnpacked failed for ${extension_path}: ${error.message}\n` +
             `If the path is correct and the manifest is valid, load the CDPMods extension manually in chrome://extensions and reconnect.`,
         );
       }
     }
 
-    if (!loadUnpackedUnavailableError) {
-      const extensionId = loadResult?.id || loadResult?.extensionId;
-      if (!extensionId) {
-        throw new Error(`Extensions.loadUnpacked returned no extension id (got ${JSON.stringify(loadResult)})`);
+    if (!load_unpacked_unavailable_error) {
+      const extension_id = load_result?.id || load_result?.extensionId;
+      if (!extension_id) {
+        throw new Error(`Extensions.loadUnpacked returned no extension id (got ${JSON.stringify(load_result)})`);
       }
 
       // 3. Wait for the loaded extension's service worker target. Custom extensions
       // can name the worker bundle anything; WXT uses background.js.
-      const swUrlPrefix = `chrome-extension://${extensionId}/`;
-      const deadline = Date.now() + timeoutMs;
+      const sw_url_prefix = `chrome-extension://${extension_id}/`;
+      const deadline = Date.now() + timeout_ms;
       while (Date.now() < deadline) {
-        const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
-        const target = targetInfos.find((t) => t.type === "service_worker" && t.url.startsWith(swUrlPrefix));
+        const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+        const target = target_infos.find((candidate) => candidate.type === "service_worker" && candidate.url.startsWith(sw_url_prefix)) as TargetInfo | undefined;
         if (target) {
-          const { sessionId } = commands["Target.attachToTarget"].result.parse(
-            await send("Target.attachToTarget", { targetId: target.targetId, flatten: true }),
-          );
-          if (trustMatchedServiceWorker && serviceWorkerTargetMatches(target)) {
-            return { source: "injected", extensionId, targetId: target.targetId, url: target.url, sessionId };
-          }
-          const probe = commands["Runtime.evaluate"].result.parse(
-            await send(
-              "Runtime.evaluate",
-              {
-                expression:
-                  "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)",
-                returnByValue: true,
-              },
-              sessionId,
-            ),
-          );
-          if (probe.result?.value === true) {
-            return { source: "injected", extensionId, targetId: target.targetId, url: target.url, sessionId };
-          }
-          await send("Target.detachFromTarget", { sessionId }).catch(() => {});
+          const probed = await probeTarget(target);
+          if (probed) return { source: "injected", extension_id, target_id: target.targetId, url: target.url, session_id: probed.session_id };
         }
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await sleep(100);
       }
       throw new Error(
-        `Extensions.loadUnpacked installed extension ${extensionId} but its service worker target ` +
-          `under ${swUrlPrefix} did not appear within ${timeoutMs}ms.`,
+        `Extensions.loadUnpacked installed extension ${extension_id} but its service worker target ` +
+          `under ${sw_url_prefix} did not appear within ${timeout_ms}ms.`,
       );
     }
   }
@@ -206,90 +195,95 @@ export async function injectExtensionIfNeeded({
   // exposing Extensions.loadUnpacked. In that case, inject the same server into
   // every currently running extension service worker and keep the best session.
   const borrowed: {
-    targetId: string;
+    target_id: string;
     url: string;
-    sessionId: string;
-    extensionId?: string | null;
-    hasTabs?: boolean;
-    hasDebugger?: boolean;
+    session_id: string;
+    extension_id?: string | null;
+    has_tabs?: boolean;
+    has_debugger?: boolean;
   }[] = [];
-  const { targetInfos } = commands["Target.getTargets"].result.parse(await send("Target.getTargets"));
-  for (const target of targetInfos) {
+  const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+  for (const target of target_infos) {
     if (target.type !== "service_worker") continue;
     if (!target.url.startsWith("chrome-extension://")) continue;
 
-    let sessionId: string | null = null;
+    let session_id: string | null = null;
     try {
-      sessionId = commands["Target.attachToTarget"].result.parse(
-        await sendWithTimeout("Target.attachToTarget", { targetId: target.targetId, flatten: true }),
-      ).sessionId;
-      await send("Runtime.enable", {}, sessionId).catch(() => {});
+      session_id = await sessionIdForTarget(target.targetId, 50);
+      if (session_id == null) continue;
+      await send("Runtime.enable", {}, session_id).catch(() => {});
       const bootstrap = commands["Runtime.evaluate"].result.parse(
         await sendWithTimeout(
           "Runtime.evaluate",
           {
-            expression: bootstrapCDPModsServerExpression,
+            expression: bootstrap_cdpmods_server_expression,
             awaitPromise: true,
             returnByValue: true,
             allowUnsafeEvalBlockedByCSP: true,
           },
-          sessionId,
+          session_id,
           3_000,
         ),
       );
       const value = bootstrap.result?.value || {};
-      if (value.ok) {
-        borrowed.push({
-          targetId: target.targetId,
-          url: target.url,
-          sessionId,
-          extensionId: value.extensionId || target.url.match(EXT_ID_FROM_URL)?.[1] || null,
-          hasTabs: Boolean(value.hasTabs),
-          hasDebugger: Boolean(value.hasDebugger),
-        });
-      } else {
-        await send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      let ready = Boolean(value.ok);
+      if (ready && ready_expression !== CDPMODS_READY_EXPRESSION) {
+        const probe = commands["Runtime.evaluate"].result.parse(
+          await sendWithTimeout(
+            "Runtime.evaluate",
+            { expression: ready_expression, returnByValue: true },
+            session_id,
+            2_000,
+          ),
+        );
+        ready = probe.result?.value === true;
       }
-    } catch {
-      if (sessionId) await send("Target.detachFromTarget", { sessionId }).catch(() => {});
-    }
+      if (ready) {
+        borrowed.push({
+          target_id: target.targetId,
+          url: target.url,
+          session_id,
+          extension_id: value.extension_id || target.url.match(EXT_ID_FROM_URL)?.[1] || null,
+          has_tabs: Boolean(value.has_tabs),
+          has_debugger: Boolean(value.has_debugger),
+        });
+      }
+    } catch {}
   }
 
-  borrowed.sort((a, b) => Number(b.hasDebugger) - Number(a.hasDebugger) || Number(b.hasTabs) - Number(a.hasTabs));
+  borrowed.sort((a, b) => Number(b.has_debugger) - Number(a.has_debugger) || Number(b.has_tabs) - Number(a.has_tabs));
   const selected = borrowed[0];
-  for (const other of borrowed.slice(1))
-    await send("Target.detachFromTarget", { sessionId: other.sessionId }).catch(() => {});
   if (selected) {
     return {
       source: "borrowed",
-      extensionId: selected.extensionId,
-      targetId: selected.targetId,
+      extension_id: selected.extension_id,
+      target_id: selected.target_id,
       url: selected.url,
-      sessionId: selected.sessionId,
+      session_id: selected.session_id,
     };
   }
 
   throw new Error(
     `Cannot install or borrow CDPMods in the running browser.\n\n` +
       `  - No existing service worker with globalThis.CDPMods was found in the browser.\n` +
-      `  - Extensions.loadUnpacked is unavailable ("${loadUnpackedUnavailableError.message}").\n` +
+      `  - Extensions.loadUnpacked is unavailable ("${load_unpacked_unavailable_error.message}").\n` +
       `  - No running chrome-extension:// service worker target accepted the CDPMods bootstrap.\n\n` +
       `Fixes (any one of these):\n` +
       `  1. Open or wake an installed extension that has a service worker, then reconnect.\n` +
       `  2. Load the CDPMods extension once at chrome://extensions and reconnect.\n` +
-      (extensionPath ? `  3. For automated/test browsers, relaunch with --load-extension=${extensionPath}.\n` : ""),
+      (extension_path ? `  3. For automated/test browsers, relaunch with --load-extension=${extension_path}.\n` : ""),
   );
 
   function serviceWorkerTargetMatches(candidate: { type?: string; url?: string }) {
     const url = candidate.url ?? "";
     if (candidate.type !== "service_worker") return false;
     if (!url.startsWith("chrome-extension://")) return false;
-    if (serviceWorkerUrlIncludes.length > 0 && !serviceWorkerUrlIncludes.every((part) => url.includes(part))) {
+    if (service_worker_url_includes.length > 0 && !service_worker_url_includes.every((part) => url.includes(part))) {
       return false;
     }
-    if (serviceWorkerUrlSuffixes.length > 0 && !serviceWorkerUrlSuffixes.some((suffix) => url.endsWith(suffix))) {
+    if (service_worker_url_suffixes.length > 0 && !service_worker_url_suffixes.some((suffix) => url.endsWith(suffix))) {
       return false;
     }
-    return serviceWorkerUrlIncludes.length > 0 || serviceWorkerUrlSuffixes.length > 0;
+    return service_worker_url_includes.length > 0 || service_worker_url_suffixes.length > 0;
   }
 }

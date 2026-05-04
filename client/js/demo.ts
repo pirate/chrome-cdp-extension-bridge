@@ -141,12 +141,12 @@ async function main() {
   } else {
     // --load-extension is a workaround for builds where Extensions.loadUnpacked
     // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
-    // can drop extraFlags entirely and the injector will install the extension
+    // can drop extra_args entirely and the injector will install the extension
     // over CDP itself.
     chrome = await launchChrome({
       headless: process.platform === "linux",
-      noSandbox: process.platform === "linux",
-      extraFlags: [`--load-extension=${EXTENSION_PATH}`],
+      sandbox: process.platform !== "linux",
+      extra_args: [`--load-extension=${EXTENSION_PATH}`],
     });
     cdpUrl = chrome.wsUrl;
   }

@@ -11,10 +11,14 @@ Synchronous (blocking) API; one background thread reads frames off the WS.
 """
 
 import json
+import os
 import re
+import subprocess
 import threading
 import time
+import tempfile
 import urllib.request
+import socket
 from pathlib import Path
 from queue import Queue, Empty
 
@@ -29,7 +33,7 @@ from translate import (
 )
 
 EXT_ID_FROM_URL_RE = re.compile(r"^chrome-extension://([a-z]+)/")
-MAGIC_READY_EXPRESSION = (
+CDPMODS_READY_EXPRESSION = (
     "Boolean(globalThis.CDPMods?.__CDPModsServerVersion === 1 && "
     "globalThis.CDPMods?.handleCommand && globalThis.CDPMods?.addCustomEvent)"
 )
@@ -62,6 +66,12 @@ def websocket_url_for(endpoint: str) -> str:
     return ws_url
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 def cdpmods_server_bootstrap_expression(extension_path: str) -> str:
     server_path = Path(extension_path) / "CDPModsServer.js"
     source = server_path.read_text()
@@ -85,13 +95,20 @@ def cdpmods_server_bootstrap_expression(extension_path: str) -> str:
 class CDPModsClient:
     def __init__(
         self,
-        cdp_url,
-        extension_path,
+        cdp_url=None,
+        extension_path=None,
         routes=None,
         server=DEFAULT_SERVER,
         custom_commands=None,
         custom_events=None,
         custom_middlewares=None,
+        service_worker_url_includes=None,
+        service_worker_url_suffixes=None,
+        trust_service_worker_target=False,
+        require_service_worker_target=False,
+        service_worker_ready_expression=None,
+        discovery_wait_ms=10000,
+        launch_options=None,
     ):
         self.cdp_url = cdp_url
         self.extension_path = extension_path
@@ -100,6 +117,13 @@ class CDPModsClient:
         self.custom_commands = list(custom_commands or [])
         self.custom_events = list(custom_events or [])
         self.custom_middlewares = list(custom_middlewares or [])
+        self.service_worker_url_includes = list(service_worker_url_includes or [])
+        self.service_worker_url_suffixes = list(service_worker_url_suffixes or ["/service_worker.js", "/background.js"])
+        self.trust_service_worker_target = trust_service_worker_target
+        self.require_service_worker_target = require_service_worker_target
+        self.service_worker_ready_expression = service_worker_ready_expression
+        self.discovery_wait_ms = discovery_wait_ms
+        self.launch_options = dict(launch_options or {})
 
         self.extension_id = None
         self.ext_target_id = None
@@ -114,11 +138,18 @@ class CDPModsClient:
         self._pending = {}
         self._handlers = {}
         self._lock = threading.Lock()
+        self._target_sessions = {}
+        self._session_targets = {}
         self._reader_thread = None
         self._closed = False
+        self._launched_process = None
+        self._profile_dir = None
 
     def connect(self):
         connect_started_at = int(time.time() * 1000)
+        if self.cdp_url is None:
+            launched = self._launch_chrome()
+            self.cdp_url = launched["cdp_url"]
         input_cdp_url = self.cdp_url
         self.cdp_url = websocket_url_for(self.cdp_url)
         if self.server is not None and "loopback_cdp_url" not in self.server:
@@ -138,7 +169,15 @@ class CDPModsClient:
         })
         self._send_frame("Target.setDiscoverTargets", {"discover": True})
 
-        ext = self._ensure_extension()
+        extension_started_at = int(time.time() * 1000)
+        original_discovery_wait_ms = self.discovery_wait_ms
+        if self._launched_process is not None:
+            self.discovery_wait_ms = min(self.discovery_wait_ms, 1000)
+        try:
+            ext = self._ensure_extension()
+        finally:
+            self.discovery_wait_ms = original_discovery_wait_ms
+        extension_completed_at = int(time.time() * 1000)
         self.extension_id = ext["extension_id"]
         self.ext_target_id = ext["target_id"]
         self.ext_session_id = ext["session_id"]
@@ -187,6 +226,10 @@ class CDPModsClient:
         connected_at = int(time.time() * 1000)
         self.connect_timing = {
             "started_at": connect_started_at,
+            "extension_source": ext.get("source"),
+            "extension_started_at": extension_started_at,
+            "extension_completed_at": extension_completed_at,
+            "extension_duration_ms": extension_completed_at - extension_started_at,
             "connected_at": connected_at,
             "duration_ms": connected_at - connect_started_at,
         }
@@ -226,15 +269,90 @@ class CDPModsClient:
     def close(self):
         self._closed = True
         try:
-            if self.ext_session_id:
-                self._send_frame("Target.detachFromTarget", {"sessionId": self.ext_session_id})
-        except Exception:
-            pass
-        try:
             if self._ws:
                 self._ws.close()
         except Exception:
             pass
+        if self._launched_process is not None:
+            self._launched_process.terminate()
+            try:
+                self._launched_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._launched_process.kill()
+            self._launched_process = None
+        if self._profile_dir is not None:
+            self._profile_dir.cleanup()
+            self._profile_dir = None
+
+    def _ready_expression(self):
+        if not self.service_worker_ready_expression:
+            return CDPMODS_READY_EXPRESSION
+        return f"({CDPMODS_READY_EXPRESSION}) && Boolean({self.service_worker_ready_expression})"
+
+    def _session_id_for_target(self, target_id, timeout=1.0):
+        deadline = time.time() + timeout
+        while time.time() <= deadline:
+            session_id = self._target_sessions.get(target_id)
+            if session_id:
+                return session_id
+            time.sleep(0.02)
+        return None
+
+    def _launch_chrome(self):
+        executable_path = self.launch_options.get("executable_path") or os.environ.get("CHROME_PATH")
+        candidates = [
+            executable_path,
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/usr/bin/google-chrome-canary",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+        ]
+        executable_path = next((candidate for candidate in candidates if candidate and Path(candidate).exists()), None)
+        if executable_path is None:
+            raise RuntimeError("No Chrome/Chromium binary found. Set CHROME_PATH or pass launch_options.executable_path.")
+        port = int(self.launch_options.get("port") or _free_port())
+        self._profile_dir = tempfile.TemporaryDirectory(prefix="cdpmods.")
+        args = [
+            "--enable-unsafe-extension-debugging",
+            "--remote-allow-origins=*",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-default-apps",
+            "--disable-background-networking",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+            "--disable-sync",
+            "--disable-features=DisableLoadExtensionCommandLineSwitch",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--disable-gpu",
+            f"--user-data-dir={self._profile_dir.name}",
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={port}",
+        ]
+        if self.launch_options.get("headless", False):
+            args.append("--headless=new")
+        if self.launch_options.get("sandbox", False) is False:
+            args.append("--no-sandbox")
+        extra_args = self.launch_options.get("extra_args") or []
+        args.extend(extra_args)
+        args.append("about:blank")
+        self._launched_process = subprocess.Popen([executable_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cdp_url = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=0.5) as response:
+                    json.loads(response.read())
+                    return {"cdp_url": cdp_url}
+            except Exception:
+                time.sleep(0.1)
+        self.close()
+        raise RuntimeError(f"Chrome at {cdp_url} did not become ready within 15s")
 
     # --- internals ---------------------------------------------------------
 
@@ -282,7 +400,7 @@ class CDPModsClient:
         }
         return self.latency
 
-    def _send_frame(self, method, params=None, session_id=None, timeout=10, record_raw_timing=False):
+    def _send_frame(self, method, params=None, session_id=None, timeout=None, record_raw_timing=False):
         with self._lock:
             self._next_id += 1
             msg_id = self._next_id
@@ -330,6 +448,21 @@ class CDPModsClient:
                     if entry:
                         entry[1].put(msg)
                     continue
+                method = msg.get("method")
+                params = msg.get("params") or {}
+                if method == "Target.attachedToTarget":
+                    session_id = params.get("sessionId")
+                    target_info = params.get("targetInfo") or {}
+                    target_id = target_info.get("targetId")
+                    if session_id and target_id:
+                        self._target_sessions[target_id] = session_id
+                        self._session_targets[session_id] = target_info
+                elif method == "Target.detachedFromTarget":
+                    session_id = params.get("sessionId")
+                    target_info = self._session_targets.pop(session_id, {}) if session_id else {}
+                    target_id = target_info.get("targetId")
+                    if target_id:
+                        self._target_sessions.pop(target_id, None)
                 if msg.get("sessionId") == self.ext_session_id:
                     u = unwrap_event_if_needed(msg.get("method"), msg.get("params") or {}, msg.get("sessionId"), self.ext_session_id)
                     if u:
@@ -337,7 +470,6 @@ class CDPModsClient:
                             try: h(u["data"])
                             except Exception as e: print(f"[CDPModsClient] handler error for {u['event']}: {e}")
                     continue
-                method = msg.get("method")
                 if method:
                     event = {"method": method, "params": msg.get("params") or {}, "cdp_session_id": msg.get("sessionId")}
                     for h in self._handlers.get(method, []):
@@ -354,43 +486,50 @@ class CDPModsClient:
                 done.put({"error": {"message": "connection closed"}})
 
     def _ensure_extension(self):
+        ready_expression = self._ready_expression()
+        def probe_target(target, wait=1.0):
+            session_id = self._session_id_for_target(target["targetId"], wait)
+            if not session_id:
+                return None
+            probe = self._send_frame("Runtime.evaluate", {
+                "expression": ready_expression,
+                "returnByValue": True,
+            }, session_id, timeout=2)
+            if (probe.get("result") or {}).get("value") is not True:
+                return None
+            return {
+                "extension_id": EXT_ID_FROM_URL_RE.match(target["url"]).group(1),
+                "target_id": target["targetId"],
+                "url": target["url"],
+                "session_id": session_id,
+            }
         # 1. Discover an existing CDPMods service worker. Poll briefly because
-        # extensions loaded with --load-extension take a moment to spin up.
-        attached = []
-        deadline = time.time() + 10.0
+        # preinstalled service workers can take a moment to spin up.
+        deadline = time.time() + (self.discovery_wait_ms / 1000)
         while time.time() <= deadline:
-            for t in (self._send_frame("Target.getTargets")["targetInfos"]):
+            target_infos = self._send_frame("Target.getTargets")["targetInfos"]
+            if self.trust_service_worker_target:
+                for t in target_infos:
+                    if self._service_worker_target_matches(t):
+                        result = probe_target(t)
+                        if result:
+                            return {"source": "trusted", **result}
+            for t in target_infos:
                 if t["type"] != "service_worker": continue
                 if not t["url"].startswith("chrome-extension://"): continue
-                if any(a["target_id"] == t["targetId"] for a in attached): continue
                 try:
-                    a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True}, timeout=2)
+                    result = probe_target(t, wait=0.05)
                 except Exception:
                     continue
-                attached.append({"target_id": t["targetId"], "url": t["url"], "session_id": a["sessionId"]})
-            for a in attached:
-                try:
-                    probe = self._send_frame("Runtime.evaluate", {
-                        "expression": MAGIC_READY_EXPRESSION,
-                        "returnByValue": True,
-                    }, a["session_id"], timeout=2)
-                except Exception:
-                    continue
-                if (probe.get("result") or {}).get("value") is True:
-                    for o in attached:
-                        if o["session_id"] != a["session_id"]:
-                            try: self._send_frame("Target.detachFromTarget", {"sessionId": o["session_id"]})
-                            except Exception: pass
-                    return {
-                        "source": "discovered",
-                        "extension_id": EXT_ID_FROM_URL_RE.match(a["url"]).group(1),
-                        "target_id": a["target_id"], "url": a["url"], "session_id": a["session_id"],
-                    }
+                if result:
+                    return {"source": "discovered", **result}
             if time.time() >= deadline: break
             time.sleep(0.1)
-        for a in attached:
-            try: self._send_frame("Target.detachFromTarget", {"sessionId": a["session_id"]})
-            except Exception: pass
+        if self.require_service_worker_target:
+            raise RuntimeError(
+                f"Required CDPMods service worker target was not ready within {self.discovery_wait_ms}ms "
+                f"({', '.join([*self.service_worker_url_includes, *self.service_worker_url_suffixes]) or 'no matcher'})."
+            )
 
         # 2. Try Extensions.loadUnpacked.
         try:
@@ -409,19 +548,24 @@ class CDPModsClient:
         while time.time() < deadline:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] == "service_worker" and t["url"].startswith(sw_url_prefix):
-                    a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
-                    probe = self._send_frame("Runtime.evaluate", {
-                        "expression": MAGIC_READY_EXPRESSION,
-                        "returnByValue": True,
-                    }, a["sessionId"])
-                    if (probe.get("result") or {}).get("value") is True:
+                    result = probe_target(t)
+                    if result:
                         return {
                             "source": "injected", "extension_id": extension_id,
-                            "target_id": t["targetId"], "url": t["url"], "session_id": a["sessionId"],
+                            "target_id": t["targetId"], "url": t["url"], "session_id": result["session_id"],
                         }
-                    self._send_frame("Target.detachFromTarget", {"sessionId": a["sessionId"]})
             time.sleep(0.1)
         raise RuntimeError(f"Extensions.loadUnpacked installed {extension_id} but its SW did not appear")
+
+    def _service_worker_target_matches(self, target):
+        url = target.get("url") or ""
+        if target.get("type") != "service_worker" or not url.startswith("chrome-extension://"):
+            return False
+        if self.service_worker_url_includes and not all(part in url for part in self.service_worker_url_includes):
+            return False
+        if self.service_worker_url_suffixes and not any(url.endswith(suffix) for suffix in self.service_worker_url_suffixes):
+            return False
+        return bool(self.service_worker_url_includes or self.service_worker_url_suffixes)
 
     def _borrow_extension_worker(self, load_error):
         borrowed = []
@@ -431,8 +575,9 @@ class CDPModsClient:
             if not t["url"].startswith("chrome-extension://"): continue
             session_id = None
             try:
-                a = self._send_frame("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True}, timeout=2)
-                session_id = a["sessionId"]
+                session_id = self._session_id_for_target(t["targetId"], timeout=0.05)
+                if not session_id:
+                    continue
                 try: self._send_frame("Runtime.enable", {}, session_id, timeout=2)
                 except Exception: pass
                 result = self._send_frame("Runtime.evaluate", {
@@ -442,7 +587,14 @@ class CDPModsClient:
                     "allowUnsafeEvalBlockedByCSP": True,
                 }, session_id, timeout=3)
                 value = (result.get("result") or {}).get("value") or {}
-                if value.get("ok"):
+                ready = bool(value.get("ok"))
+                if ready and self.service_worker_ready_expression:
+                    probe = self._send_frame("Runtime.evaluate", {
+                        "expression": self._ready_expression(),
+                        "returnByValue": True,
+                    }, session_id, timeout=2)
+                    ready = (probe.get("result") or {}).get("value") is True
+                if ready:
                     m = EXT_ID_FROM_URL_RE.match(t["url"])
                     borrowed.append({
                         "source": "borrowed",
@@ -453,17 +605,10 @@ class CDPModsClient:
                         "has_tabs": bool(value.get("has_tabs")),
                         "has_debugger": bool(value.get("has_debugger")),
                     })
-                else:
-                    self._send_frame("Target.detachFromTarget", {"sessionId": session_id})
             except Exception:
-                if session_id:
-                    try: self._send_frame("Target.detachFromTarget", {"sessionId": session_id})
-                    except Exception: pass
+                pass
         borrowed.sort(key=lambda item: (item.get("has_debugger", False), item.get("has_tabs", False)), reverse=True)
         if borrowed:
-            for other in borrowed[1:]:
-                try: self._send_frame("Target.detachFromTarget", {"sessionId": other["session_id"]})
-                except Exception: pass
             selected = borrowed[0]
             selected.pop("has_tabs", None)
             selected.pop("has_debugger", None)

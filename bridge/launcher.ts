@@ -1,8 +1,7 @@
 // @ts-nocheck
 // launcher.js: find a Chrome/Chromium binary and launch it with CDP enabled.
-// Knows nothing about CDPMods, the extension, or wrap/unwrap. NEVER passes
-// --load-extension; the caller (or injector.js over CDP) is responsible for
-// getting the extension into the running browser.
+// Knows nothing about CDPMods, the extension, or wrap/unwrap. Extra launch args
+// are passed through verbatim; extension discovery/injection is owned elsewhere.
 
 import { spawn } from "node:child_process";
 import type { StdioOptions } from "node:child_process";
@@ -12,8 +11,6 @@ import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import WebSocket from "ws";
-import type { RawData } from "ws";
 
 const CANDIDATE_PATHS = [
   process.env.CHROME_PATH,
@@ -39,50 +36,18 @@ const DEFAULT_FLAGS = [
   "--disable-renderer-backgrounding",
   "--disable-background-timer-throttling",
   "--disable-sync",
+  "--disable-features=DisableLoadExtensionCommandLineSwitch",
   "--password-store=basic",
   "--use-mock-keychain",
 ];
-
-async function wakePreloadedExtension(wsUrl: string) {
-  const ws = new WebSocket(wsUrl);
-  await new Promise<void>((resolve, reject) => {
-    ws.once("open", resolve);
-    ws.once("error", reject);
-  });
-
-  let nextId = 1;
-  const send = (method: string, params: Record<string, unknown> = {}) =>
-    new Promise<Record<string, unknown>>((resolve, reject) => {
-      const id = nextId++;
-      const onMessage = (raw: RawData) => {
-        const msg = JSON.parse(raw.toString());
-        if (msg.id !== id) return;
-        ws.off("message", onMessage);
-        if (msg.error) reject(new Error(msg.error.message));
-        else resolve(msg.result || {});
-      };
-      ws.on("message", onMessage);
-      ws.send(JSON.stringify({ id, method, params }));
-    });
-
-  try {
-    const { targetId } = await send("Target.createTarget", {
-      url: `about:blank#cdpmods-extension-wakeup-${Date.now()}`,
-      newWindow: false,
-    });
-    if (typeof targetId === "string") await send("Target.closeTarget", { targetId }).catch(() => ({}));
-  } finally {
-    ws.close();
-  }
-}
 
 export function findChromeBinary(explicit?: string | null) {
   for (const candidate of [explicit, ...CANDIDATE_PATHS]) {
     if (candidate && existsSync(candidate)) return candidate;
   }
   throw new Error(
-    `No Chrome/Chromium binary found. Tried: ${[explicit, ...CANDIDATE_PATHS].filter(Boolean).join(", ")}. ` +
-      `Set CHROME_PATH or pass executablePath.`,
+      `No Chrome/Chromium binary found. Tried: ${[explicit, ...CANDIDATE_PATHS].filter(Boolean).join(", ")}. ` +
+      `Set CHROME_PATH or pass executable_path.`,
   );
 }
 
@@ -100,32 +65,32 @@ export async function freePort() {
 // Launch Chrome with CDP enabled on 127.0.0.1:<port>. Resolves once
 // /json/version responds. Returns { proc, port, cdpUrl, profileDir, close }.
 export async function launchChrome({
-  executablePath,
+  executable_path,
   port,
-  headless = true,
-  noSandbox = true,
-  extraFlags = [],
+  headless = false,
+  sandbox = false,
+  extra_args = [],
   stdio = "ignore",
 }: {
-  executablePath?: string | null;
+  executable_path?: string | null;
   port?: number | null;
   headless?: boolean;
-  noSandbox?: boolean;
-  extraFlags?: string[];
+  sandbox?: boolean;
+  extra_args?: string[];
   stdio?: StdioOptions;
 } = {}) {
-  const exe = findChromeBinary(executablePath);
+  const exe = findChromeBinary(executable_path);
   const usePort = port || (await freePort());
   const profileDir = await mkdtemp(path.join(tmpdir(), "cdpmods."));
   const flags = [
     ...DEFAULT_FLAGS,
     headless ? "--headless=new" : null,
     "--disable-gpu",
-    noSandbox ? "--no-sandbox" : null,
+    sandbox === false ? "--no-sandbox" : null,
     `--user-data-dir=${profileDir}`,
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${usePort}`,
-    ...extraFlags,
+    ...extra_args,
     "about:blank",
   ].filter(Boolean);
 
@@ -144,9 +109,6 @@ export async function launchChrome({
       const response = await fetch(`${cdpUrl}/json/version`);
       if (response.ok) {
         const version = await response.json();
-        if (extraFlags.some((flag) => flag.startsWith("--load-extension="))) {
-          await wakePreloadedExtension(version.webSocketDebuggerUrl).catch(() => {});
-        }
         return { proc, port: usePort, cdpUrl, wsUrl: version.webSocketDebuggerUrl, profileDir, close };
       }
     } catch {}

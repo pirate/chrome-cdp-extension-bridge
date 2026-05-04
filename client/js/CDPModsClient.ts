@@ -64,6 +64,9 @@ type ClientOptions = {
   service_worker_url_includes?: string[];
   service_worker_url_suffixes?: string[] | null;
   trust_service_worker_target?: boolean;
+  require_service_worker_target?: boolean;
+  service_worker_ready_expression?: string | null;
+  discovery_wait_ms?: number;
   launch_options?: Record<string, unknown>;
   self?: {
     addEventListener?: (listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void) => unknown;
@@ -213,6 +216,9 @@ export class CDPModsClient extends CDPModsEventEmitter {
   service_worker_url_includes: string[];
   service_worker_url_suffixes: string[] | null;
   trust_service_worker_target: boolean;
+  require_service_worker_target: boolean;
+  service_worker_ready_expression: string | null;
+  discovery_wait_ms: number;
   ws: WebSocket | null;
   self: ClientOptions["self"];
   next_id: number;
@@ -230,6 +236,8 @@ export class CDPModsClient extends CDPModsEventEmitter {
   self_event_listener_registered: boolean;
   cdp_aliases_hydrated: boolean;
   event_wait_cleanups: Set<() => void>;
+  auto_target_sessions: Map<string, string>;
+  auto_session_targets: Map<string, Record<string, unknown>>;
   _prepared_extension: { path: string; close: () => Promise<void> } | null;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
@@ -250,6 +258,9 @@ export class CDPModsClient extends CDPModsEventEmitter {
     service_worker_url_includes = [],
     service_worker_url_suffixes = null,
     trust_service_worker_target = false,
+    require_service_worker_target = false,
+    service_worker_ready_expression = null,
+    discovery_wait_ms = 10_000,
     launch_options = {},
     self = null,
   }: ClientOptions = {}) {
@@ -265,6 +276,9 @@ export class CDPModsClient extends CDPModsEventEmitter {
     this.service_worker_url_includes = service_worker_url_includes;
     this.service_worker_url_suffixes = service_worker_url_suffixes;
     this.trust_service_worker_target = trust_service_worker_target;
+    this.require_service_worker_target = require_service_worker_target;
+    this.service_worker_ready_expression = service_worker_ready_expression;
+    this.discovery_wait_ms = discovery_wait_ms;
     this.launch_options = launch_options;
     this.self = self;
 
@@ -284,6 +298,8 @@ export class CDPModsClient extends CDPModsEventEmitter {
     this.self_event_listener_registered = false;
     this.cdp_aliases_hydrated = false;
     this.event_wait_cleanups = new Set();
+    this.auto_target_sessions = new Map();
+    this.auto_session_targets = new Map();
     this._prepared_extension = null;
     this._launched = null;
 
@@ -358,40 +374,25 @@ export class CDPModsClient extends CDPModsEventEmitter {
       service_worker_url_suffixes.some((suffix) => suffix.split("/").filter(Boolean).length > 1);
 
     let ext;
+    const extension_started_at = Date.now();
     try {
       const { injectExtensionIfNeeded } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js"))) as typeof import("../../bridge/injector.js");
       this._prepared_extension = await this._prepareExtensionPath();
       ext = await injectExtensionIfNeeded({
         send: (method, params, session_id) => this._sendFrame(method, params, session_id),
+        session_id_for_target: (target_id) => this.auto_target_sessions.get(target_id) ?? null,
         extension_path: this._prepared_extension.path,
         service_worker_url_includes: this.service_worker_url_includes,
         service_worker_url_suffixes,
         trust_matched_service_worker: trust_service_worker_target,
+        require_service_worker_target: this.require_service_worker_target,
+        service_worker_ready_expression: this.service_worker_ready_expression,
+        discovery_wait_ms: this._launched != null ? Math.min(this.discovery_wait_ms, 1_000) : this.discovery_wait_ms,
       });
     } catch (error) {
-      const html = `<!doctype html><title>Enable CDPMods</title><main style="font:16px system-ui;margin:40px;max-width:820px"><h1>Enable CDPMods</h1><p>A CDPMods client has connected, but was unable to set up the extra Mods.* commands because extension installation over CDP is only allowed in Chrome Canary or Chromium. Google Chrome users must install the extension manually and use chrome://inspect/#remote-debugging to open CDP.</p><ol><li>Download Chrome Canary or Chromium instead. CDPMods can auto-launch these for you.</li><li>Connect to any remote Chrome launched with:<pre>--remote-debugging-address=127.0.0.1
---remote-debugging-port=9222
---enable-unsafe-extension-debugging
---remote-allow-origins=*</pre></li><li>Install the extension manually via chrome://extensions &gt; Developer mode &gt; Load unpacked &gt; cdpmods.zip<br><code>${this.extension_path}</code></li></ol></main>`;
-      try {
-        const { targetId: target_id } = (await this._sendFrame("Target.createTarget", { url: "about:blank" })) as any;
-        const { sessionId: session_id } = (await this._sendFrame("Target.attachToTarget", {
-          targetId: target_id,
-          flatten: true,
-        })) as any;
-        await this._sendFrame(
-          "Runtime.evaluate",
-          {
-            expression: `document.open();document.write(${JSON.stringify(html)});document.close();`,
-            returnByValue: true,
-          },
-          session_id as string,
-        );
-        await this._sendFrame("Page.bringToFront", {}, session_id as string);
-        await this._sendFrame("Target.detachFromTarget", { sessionId: session_id });
-      } catch {}
       throw error;
     }
+    const extension_completed_at = Date.now();
     this.extension_id = ext.extension_id;
     this.ext_target_id = ext.target_id;
     this.ext_session_id = ext.session_id;
@@ -415,6 +416,10 @@ export class CDPModsClient extends CDPModsEventEmitter {
     const connected_at = Date.now();
     this.connect_timing = {
       started_at: connect_started_at,
+      extension_source: ext.source,
+      extension_started_at,
+      extension_completed_at,
+      extension_duration_ms: extension_completed_at - extension_started_at,
       connected_at,
       duration_ms: connected_at - connect_started_at,
     };
@@ -533,9 +538,6 @@ export class CDPModsClient extends CDPModsEventEmitter {
   async close() {
     for (const cleanup of this.event_wait_cleanups) cleanup();
     this.event_wait_cleanups.clear();
-    try {
-      await this._sendFrame("Target.detachFromTarget", { sessionId: this.ext_session_id });
-    } catch {}
     try {
       this.ws?.close();
     } catch {}
@@ -711,6 +713,25 @@ export class CDPModsClient extends CDPModsEventEmitter {
       return;
     }
     const event = CdpEventFrameSchema.parse(msg);
+    if (event.method === "Target.attachedToTarget") {
+      const params = event.params || {};
+      const session_id = typeof params.sessionId === "string" ? params.sessionId : null;
+      const target_info = params.targetInfo && typeof params.targetInfo === "object" ? params.targetInfo : null;
+      const target_id = typeof target_info?.targetId === "string" ? target_info.targetId : null;
+      if (session_id && target_id) {
+        this.auto_target_sessions.set(target_id, session_id);
+        this.auto_session_targets.set(session_id, target_info as Record<string, unknown>);
+      }
+    } else if (event.method === "Target.detachedFromTarget") {
+      const params = event.params || {};
+      const session_id = typeof params.sessionId === "string" ? params.sessionId : null;
+      if (session_id) {
+        const target_info = this.auto_session_targets.get(session_id);
+        const target_id = typeof target_info?.targetId === "string" ? target_info.targetId : null;
+        if (target_id) this.auto_target_sessions.delete(target_id);
+        this.auto_session_targets.delete(session_id);
+      }
+    }
     if (event.sessionId === this.ext_session_id) {
       if (event.method !== "Runtime.bindingCalled") return;
       const u = unwrapEventIfNeeded(
