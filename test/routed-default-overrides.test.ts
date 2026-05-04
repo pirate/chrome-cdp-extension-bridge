@@ -10,6 +10,12 @@ import { commands, events } from "../types/zod.js";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH = path.resolve(HERE, "..", "extension");
 
+function hasTargetInfo(value: unknown): value is { targetInfo: Record<string, unknown> } {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const targetInfo = (value as Record<string, unknown>).targetInfo;
+  return targetInfo != null && typeof targetInfo === "object" && !Array.isArray(targetInfo);
+}
+
 const getTargetsOverride = String.raw`
 async (params) => {
   const [upstream, tabs] = await Promise.all([
@@ -191,6 +197,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
         10_000,
       );
       cdp.on("Target.targetCreated", (params) => {
+        if (!hasTargetInfo(params)) return;
         if (!Object.hasOwn(params.targetInfo || {}, "tabId")) return;
         clearTimeout(timeout);
         resolve(params);

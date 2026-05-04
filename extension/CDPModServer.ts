@@ -21,8 +21,16 @@ import type {
 } from "../types/cdpmod.js";
 
 type MiddlewarePhase = "request" | "response" | "event";
+type CDPModGlobalScope = typeof globalThis &
+  Record<string, unknown> & {
+    CDPMod?: {
+      __CDPModServerVersion?: number;
+      addCustomEvent?: unknown;
+      handleCommand?: unknown;
+    };
+  };
 
-export function installCDPModServer(globalScope: typeof globalThis = globalThis) {
+export function installCDPModServer(globalScope: CDPModGlobalScope = globalThis as CDPModGlobalScope) {
   const CDPMOD_SERVER_VERSION = 1;
   if (
     globalScope.CDPMod?.__CDPModServerVersion === CDPMOD_SERVER_VERSION &&
@@ -46,11 +54,11 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
   const commandHandlers = new Map<string, CDPModCustomCommandRegistration>();
   const eventBindings = new Map<string, CDPModCustomEventRegistration>();
   const eventListeners = new Set<(event: string, data: ProtocolPayload, cdpSessionId: string | null) => void>();
-  const middlewares = {
+  const middlewares: Record<MiddlewarePhase, CDPModMiddlewareRegistration[]> = {
     request: [],
     response: [],
     event: [],
-  } satisfies Record<MiddlewarePhase, CDPModMiddlewareRegistration[]>;
+  };
   const attachedDebuggees = new Set<string>();
   let runtime_types_promise: Promise<unknown> | null = null;
 
@@ -121,6 +129,22 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
       value?.name;
     if (typeof name !== "string" || !name) throw new Error("Expected a CDP name string or a named CDP schema/alias.");
     return name;
+  }
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function compactDebuggee(input: {
+    extensionId?: string | null;
+    tabId?: number | null;
+    targetId?: string | null;
+  }): chrome.debugger.Debuggee {
+    return {
+      ...(typeof input.tabId === "number" ? { tabId: input.tabId } : {}),
+      ...(typeof input.targetId === "string" ? { targetId: input.targetId } : {}),
+      ...(typeof input.extensionId === "string" ? { extensionId: input.extensionId } : {}),
+    };
   }
 
   async function resolveCDPEndpoint(endpoint: string | null) {
@@ -306,18 +330,18 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
       await creatingOffscreenKeepAlive;
       return { started: true };
     } catch (error) {
-      return { started: false, reason: error?.message || String(error) };
+      return { started: false, reason: errorMessage(error) };
     }
   }
 
   const CDPModServer = {
     __CDPModServerVersion: CDPMOD_SERVER_VERSION,
     routes: { ...defaultRoutes },
-    loopback_cdp_url: null,
-    browserToken: null,
-    types: null,
-    commands: null,
-    events: null,
+    loopback_cdp_url: null as string | null,
+    browserToken: null as string | null,
+    types: null as (typeof import("../types/zod.js"))["types"] | null,
+    commands: null as (typeof import("../types/zod.js"))["commands"] | null,
+    events: null as (typeof import("../types/zod.js"))["events"] | null,
     startOffscreenKeepAlive,
     ensureOffscreenKeepAlive,
 
@@ -457,7 +481,9 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
 
     async handleCommand(method: string, params: ProtocolParams = {}, cdpSessionId: string | null = null) {
       const request = { method, params, cdpSessionId };
-      params = await this.runMiddleware("request", method, params, { cdpSessionId, request });
+      const middlewareParams = await this.runMiddleware("request", method, params, { cdpSessionId, request });
+      if (middlewareParams == null) throw new Error(`Request middleware for ${method} returned no params.`);
+      params = middlewareParams as ProtocolParams;
 
       const command = registryMatch(commandHandlers, method);
       let result;
@@ -608,10 +634,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
         extensionId = null,
         ...commandParams
       } = params as CdpDebuggeeCommandParams;
-      const resolvedDebuggee = debuggee || { tabId, targetId, extensionId };
-      for (const key of Object.keys(resolvedDebuggee)) {
-        if (resolvedDebuggee[key] === null || resolvedDebuggee[key] === undefined) delete resolvedDebuggee[key];
-      }
+      const resolvedDebuggee = debuggee ?? compactDebuggee({ tabId, targetId, extensionId });
 
       const chromeApi = globalScope.chrome;
       let resolvedTargetId = resolvedDebuggee.targetId || null;
@@ -674,10 +697,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
         extensionId = null,
         ...commandParams
       } = params as CdpDebuggeeCommandParams;
-      const resolvedDebuggee = debuggee || { tabId, targetId, extensionId };
-      for (const key of Object.keys(resolvedDebuggee)) {
-        if (resolvedDebuggee[key] === null || resolvedDebuggee[key] === undefined) delete resolvedDebuggee[key];
-      }
+      const resolvedDebuggee = debuggee ?? compactDebuggee({ tabId, targetId, extensionId });
       if (Object.keys(resolvedDebuggee).length === 0) {
         let [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab?.id) [tab] = await chromeApi.tabs.query({});
@@ -686,7 +706,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
             tab = await chromeApi.tabs.create({ url: "https://example.com/#cdpmod", active: true });
           } catch {
             const win = await chromeApi.windows.create({ url: "https://example.com/#cdpmod", focused: true });
-            tab = win.tabs?.[0] || null;
+            tab = win.tabs?.[0];
           }
         }
         if (!tab?.id) throw new Error(`chrome_debugger route for ${method} could not find an active tab.`);
@@ -704,7 +724,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
             }),
           );
         } catch (error) {
-          if (!error.message.includes("Another debugger is already attached")) throw error;
+          if (!errorMessage(error).includes("Another debugger is already attached")) throw error;
         }
         await new Promise<void>((resolve, reject) =>
           chromeApi.debugger.sendCommand(resolvedDebuggee, "Target.setAutoAttach", targetAutoAttachParams, () => {
@@ -735,7 +755,8 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
 
   CDPModServer.addCustomCommand({
     name: "Mod.ping",
-    handler: async (params: CDPModPingParams = {}, cdpSessionId: string | null = null) => {
+    handler: async (raw_params: ProtocolParams = {}, cdpSessionId: string | null = null) => {
+      const params = raw_params as CDPModPingParams;
       const receivedAt = Date.now();
       await CDPModServer.emit(
         "Mod.pong",
@@ -752,7 +773,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
 
   CDPModServer.addCustomCommand({
     name: "Mod.configure",
-    handler: async (params: CDPModConfigureParams = {}) => CDPModServer.configure(params),
+    handler: async (params: ProtocolParams = {}) => CDPModServer.configure(params as CDPModConfigureParams),
   });
 
   CDPModServer.addCustomCommand({

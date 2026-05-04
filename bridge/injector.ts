@@ -147,8 +147,9 @@ export async function injectExtensionIfNeeded({
     try {
       load_result = await send("Extensions.loadUnpacked", { path: extension_path });
     } catch (error) {
-      if (/Method not available|Method.*not.*found|wasn't found/i.test(error.message)) {
-        load_unpacked_unavailable_error = error;
+      const load_error = error instanceof Error ? error : new Error(String(error));
+      if (/Method not available|Method.*not.*found|wasn't found/i.test(load_error.message)) {
+        load_unpacked_unavailable_error = load_error;
         const target_infos = TargetCommands["Target.getTargets"].result.parse(
           await send("Target.getTargets"),
         ).targetInfos;
@@ -173,7 +174,7 @@ export async function injectExtensionIfNeeded({
         }
       } else {
         throw new Error(
-          `Extensions.loadUnpacked failed for ${extension_path}: ${error.message}\n` +
+          `Extensions.loadUnpacked failed for ${extension_path}: ${load_error.message}\n` +
             `If the path is correct and the manifest is valid, load the CDPMod extension manually in chrome://extensions and reconnect.`,
         );
       }

@@ -33,6 +33,7 @@ import type {
   CDPModAddCustomCommandParams,
   CDPModAddCustomEventObjectParams,
   CDPModAddMiddlewareParams,
+  CDPModNamedValue,
   CDPModPingLatency,
   CDPModPongEvent,
   CDPModRoutes,
@@ -79,6 +80,7 @@ type ClientOptions = {
     handleCommand: (method: string, params?: ProtocolParams, cdpSessionId?: string | null) => Promise<ProtocolResult>;
   } | null;
 };
+type CDPModEventNameInput = string | symbol | (z.ZodType & CDPModNamedValue);
 
 export type CDPModCommandSpec<Params = unknown, Result = unknown> = {
   params: Params;
@@ -349,7 +351,8 @@ export class CDPModClient extends CDPModEventEmitter {
       }
     }
     const input_cdp_url = this.cdp_url;
-    this.cdp_url = await webSocketUrlFor(this.cdp_url);
+    const websocket_url = await webSocketUrlFor(this.cdp_url);
+    this.cdp_url = websocket_url;
     if (this.server !== null && !Object.hasOwn(this.server, "loopback_cdp_url")) {
       this.server = { ...this.server, loopback_cdp_url: this.cdp_url };
     } else if (this.server?.loopback_cdp_url) {
@@ -359,13 +362,14 @@ export class CDPModClient extends CDPModEventEmitter {
       }
     }
 
-    this.ws = new WebSocket(this.cdp_url);
-    this.ws.addEventListener("message", (event) => this._onMessage(event.data));
-    this.ws.addEventListener("close", () => this._rejectAll(new Error("CDP websocket closed")));
-    this.ws.addEventListener("error", () => this._rejectAll(new Error(`CDP websocket error`)));
+    const ws = new WebSocket(websocket_url);
+    this.ws = ws;
+    ws.addEventListener("message", (event) => this._onMessage(event.data));
+    ws.addEventListener("close", () => this._rejectAll(new Error("CDP websocket closed")));
+    ws.addEventListener("error", () => this._rejectAll(new Error(`CDP websocket error`)));
     await new Promise<void>((resolve, reject) => {
-      this.ws.addEventListener("open", () => resolve(), { once: true });
-      this.ws.addEventListener("error", reject, { once: true });
+      ws.addEventListener("open", () => resolve(), { once: true });
+      ws.addEventListener("error", reject, { once: true });
     });
     await Promise.all([
       this._sendFrame("Target.setAutoAttach", {
@@ -399,7 +403,7 @@ export class CDPModClient extends CDPModEventEmitter {
       service_worker_ready_expression: this.service_worker_ready_expression,
     });
     const extension_completed_at = Date.now();
-    this.extension_id = ext.extension_id;
+    this.extension_id = typeof ext.extension_id === "string" ? ext.extension_id : null;
     this.ext_target_id = ext.target_id;
     this.ext_session_id = ext.session_id;
     this.event_schemas.set("Mod.pong", Mod.PongEvent);
@@ -490,7 +494,7 @@ export class CDPModClient extends CDPModEventEmitter {
     }
   }
 
-  _normalizePayloadSchema(schema) {
+  _normalizePayloadSchema(schema: unknown) {
     return normalizeCDPModPayloadSchema(Mod.PayloadSchemaSpec.parse(schema));
   }
 
@@ -562,7 +566,7 @@ export class CDPModClient extends CDPModEventEmitter {
     if (this._launched) await this._launched.close();
   }
 
-  on(event_name, listener) {
+  on(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
     if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
       const name = normalizeCDPModName(event_name);
       this.event_schemas.set(name, event_name);
@@ -571,7 +575,7 @@ export class CDPModClient extends CDPModEventEmitter {
     return super.on(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);
   }
 
-  once(event_name, listener) {
+  once(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
     if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
       const name = normalizeCDPModName(event_name);
       this.event_schemas.set(name, event_name);
@@ -580,14 +584,14 @@ export class CDPModClient extends CDPModEventEmitter {
     return super.once(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);
   }
 
-  off(event_name, listener) {
+  off(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
     if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
       return super.off(normalizeCDPModName(event_name), listener);
     }
     return super.off(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);
   }
 
-  _waitForEvent(event_name, { timeout_ms = 10_000 } = {}) {
+  _waitForEvent(event_name: CDPModEventNameInput, { timeout_ms = 10_000 }: { timeout_ms?: number } = {}) {
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let cancel: () => void = () => {};
@@ -599,7 +603,7 @@ export class CDPModClient extends CDPModEventEmitter {
         this.off(event_name, listener);
         this.event_wait_cleanups.delete(cancel);
       };
-      const finish = (value) => {
+      const finish = (value: unknown) => {
         if (settled) return;
         settled = true;
         cleanup();

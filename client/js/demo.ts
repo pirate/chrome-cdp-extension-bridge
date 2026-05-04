@@ -27,6 +27,10 @@ import { z } from "zod";
 
 import { CDPModClient } from "./CDPModClient.js";
 
+type TargetCreatedPayload = {
+  targetInfo?: { targetId?: string } & Record<string, unknown>;
+};
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH =
   [path.resolve(HERE, "..", "..", "extension"), path.resolve(HERE, "..", "..", "dist", "extension")].find((candidate) =>
@@ -97,6 +101,12 @@ function assertObject(value, label) {
     throw new Error(`${label} returned non-object value ${JSON.stringify(value)}`);
   }
   return value;
+}
+
+function isTargetCreatedPayload(value: unknown): value is TargetCreatedPayload {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const targetInfo = (value as Record<string, unknown>).targetInfo;
+  return targetInfo == null || (typeof targetInfo === "object" && !Array.isArray(targetInfo));
 }
 
 async function waitForEvent(cdp, eventName, predicate = (_payload) => true, timeoutMs = 3000) {
@@ -177,14 +187,15 @@ async function main() {
 
   const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl, launch_options));
   const foregroundEvents = [];
-  const targetCreatedEvents = [];
+  const targetCreatedEvents: TargetCreatedPayload[] = [];
 
   try {
     await cdp.connect();
     console.log("upstream cdp:", cdp.cdp_url);
     cdp.on(cdp.Target.targetCreated, (payload) => {
-      console.log("Target.targetCreated ->", payload?.targetInfo?.targetId);
-      targetCreatedEvents.push(payload);
+      const event = isTargetCreatedPayload(payload) ? payload : {};
+      console.log("Target.targetCreated ->", event.targetInfo?.targetId);
+      targetCreatedEvents.push(event);
     });
     console.log("connected; ext", cdp.extension_id, "session", cdp.ext_session_id);
     console.log("ping latency      ->", cdp.latency);
