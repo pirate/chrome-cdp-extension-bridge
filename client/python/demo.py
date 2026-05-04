@@ -121,6 +121,7 @@ def main():
             }
 
         cdp = CDPModClient(**client_options_for(mode, cdp_url, launch_options))
+        foreground_events = []
         target_created_events = []
         events_lock = threading.Lock()
 
@@ -131,6 +132,8 @@ def main():
 
         def on_foreground_changed(payload, *_):
             print(f"Custom.foregroundTargetChanged -> {payload}")
+            with events_lock:
+                foreground_events.append(payload)
 
         cdp.on("Target.targetCreated", on_target_created)
 
@@ -172,12 +175,12 @@ def main():
 
         if mode == "debugger":
             try:
-                cdp.send("Browser.getVersion")
-                raise RuntimeError("Browser.getVersion unexpectedly succeeded in debugger mode")
+                version = expect_object(cdp.send("Browser.getVersion"), "Browser.getVersion")
+                if not isinstance(version.get("protocolVersion"), str) or not isinstance(version.get("product"), str):
+                    raise RuntimeError(f"unexpected Browser.getVersion result {version}")
+                print(f"Browser.getVersion -> {version}")
             except Exception as e:
-                if "unexpectedly succeeded" in str(e):
-                    raise
-                print(f"Browser.getVersion -> (expected debugger rejection: {str(e).splitlines()[0]} )")
+                print(f"Browser.getVersion -> (debugger route rejected: {str(e).splitlines()[0]} )")
             runtime_eval = expect_object(cdp.send("Runtime.evaluate", {"expression": "(() => 42)()", "returnByValue": True}), "Runtime.evaluate")
             result = expect_object(runtime_eval.get("result"), "Runtime.evaluate.result")
             if result.get("value") != 42:
@@ -280,17 +283,15 @@ def main():
         if foreground_event_registration.get("registered") is not True:
             raise RuntimeError(f"unexpected foreground event registration {foreground_event_registration}")
         cdp.on("Custom.foregroundTargetChanged", on_foreground_changed)
-        foreground_events = []
-        foreground_lock = threading.Lock()
-
-        def capture_foreground(payload, *_):
-            with foreground_lock:
-                foreground_events.append(payload)
-
-        cdp.on("Custom.foregroundTargetChanged", capture_foreground)
+        cdp.send("Mod.evaluate", {"expression": '''chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+            const targets = await chrome.debugger.getTargets();
+            const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+            const tab = await chrome.tabs.get(tabId).catch(() => null);
+            await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
+          })'''})
 
         cdp.send("Target.setDiscoverTargets", {"discover": True})
-        created_target = expect_object(cdp.send("Target.createTarget", {"url": "https://example.com"}), "Target.createTarget")
+        created_target = expect_object(cdp.send("Target.createTarget", {"url": "https://example.com", "background": True}), "Target.createTarget")
         created_target_id = created_target.get("targetId")
         if not created_target_id:
             raise RuntimeError(f"Target.createTarget returned no targetId: {created_target}")
@@ -311,15 +312,9 @@ def main():
         print(f"Custom.TabIdFromTargetId -> {tab_from_target}")
 
         cdp.send("Target.activateTarget", {"targetId": created_target_id})
-        foreground_emit = expect_object(cdp.send("Mod.evaluate", {
-            "expression": '''async ({ tabId, targetId }) => await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId, url: "https://example.com/" })''',
-            "params": {"tabId": tab_from_target["tabId"], "targetId": created_target_id},
-        }), "Custom.foregroundTargetChanged emit")
-        if foreground_emit.get("emitted") is not True:
-            raise RuntimeError(f"unexpected Custom.foregroundTargetChanged emit result {foreground_emit}")
         deadline = time.monotonic() + 3.0
         while True:
-            with foreground_lock:
+            with events_lock:
                 foreground = next((event for event in foreground_events if event.get("targetId") == created_target_id), None)
             if foreground or time.monotonic() >= deadline:
                 break

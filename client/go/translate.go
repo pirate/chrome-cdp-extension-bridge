@@ -99,7 +99,7 @@ func wrapCDPModAddCustomCommand(params map[string]any) map[string]any {
 	pSchema, _ := json.Marshal(params["paramsSchema"])
 	rSchema, _ := json.Marshal(params["resultSchema"])
 	return evalParams(fmt.Sprintf(
-		`(() => { return globalThis.CDPMod.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, cdpSessionId) => { const cdp = globalThis.CDPMod.attachToSession(cdpSessionId); const CDPMod = globalThis.CDPMod; const chrome = globalThis.chrome; const handler = (%s); return await handler(params || {}); }, }); })()`,
+		`(() => { return globalThis.CDPMod.addCustomCommand({ name: %s, paramsSchema: %s, resultSchema: %s, expression: %s, handler: async (params, cdpSessionId, method) => { const cdp = globalThis.CDPMod.attachToSession(cdpSessionId); const CDPMod = globalThis.CDPMod; const chrome = globalThis.chrome; const handler = (%s); return await handler(params || {}, method); }, }); })()`,
 		string(name), string(pSchema), string(rSchema), string(exprJSON), expr,
 	))
 }

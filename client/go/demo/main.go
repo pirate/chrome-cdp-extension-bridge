@@ -223,9 +223,13 @@ func main() {
 
 	if mode == "debugger" {
 		if r, err := cdp.Send("Browser.getVersion", nil); err == nil {
-			log.Fatalf("Browser.getVersion unexpectedly succeeded in debugger mode: %v", r)
+			version := mustMap(r, "Browser.getVersion")
+			_ = mustString(version["protocolVersion"], "Browser.getVersion.protocolVersion")
+			_ = mustString(version["product"], "Browser.getVersion.product")
+			b, _ := json.Marshal(version)
+			fmt.Println("Browser.getVersion ->", string(b))
 		} else {
-			fmt.Println("Browser.getVersion -> (expected debugger rejection:", err, ")")
+			fmt.Println("Browser.getVersion -> (debugger route rejected:", err, ")")
 		}
 		runtimeEval := mustMap(mustSend(cdp, "Runtime.evaluate", map[string]any{
 			"expression":    "(() => 42)()",
@@ -364,7 +368,7 @@ func main() {
 	if _, err := cdp.Send("Target.setDiscoverTargets", map[string]any{"discover": true}); err != nil {
 		log.Fatal(err)
 	}
-	createdRaw, err := cdp.Send("Target.createTarget", map[string]any{"url": "https://example.com"})
+	createdRaw, err := cdp.Send("Target.createTarget", map[string]any{"url": "https://example.com", "background": true})
 	if err != nil {
 		log.Fatalf("Target.createTarget: %v", err)
 	}

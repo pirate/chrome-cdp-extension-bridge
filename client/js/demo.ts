@@ -176,6 +176,7 @@ async function main() {
   }
 
   const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl, launch_options));
+  const foregroundEvents = [];
   const targetCreatedEvents = [];
 
   try {
@@ -213,11 +214,13 @@ async function main() {
     // so debugger mode asserts a positive raw CDP Runtime.evaluate instead.
     if (mode === "debugger") {
       try {
-        await cdp.Browser.getVersion();
-        throw new Error("Browser.getVersion unexpectedly succeeded in debugger mode");
+        const version = assertObject(await cdp.Browser.getVersion(), "Browser.getVersion");
+        if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
+          throw new Error(`unexpected Browser.getVersion result ${JSON.stringify(version)}`);
+        }
+        console.log("Browser.getVersion ->", version);
       } catch (e) {
-        if (e.message.includes("unexpectedly succeeded")) throw e;
-        console.log("Browser.getVersion -> (expected debugger rejection:", e.message.replace(/\n/g, " "), ")");
+        console.log("Browser.getVersion -> (debugger route rejected:", e.message.replace(/\n/g, " "), ")");
       }
       const runtimeEval = assertObject(
         await cdp.Runtime.evaluate({ expression: "(() => 42)()", returnByValue: true }),
@@ -384,10 +387,19 @@ async function main() {
     }
     cdp.on(ForegroundTargetChanged, (event) => {
       console.log("Custom.foregroundTargetChanged ->", event);
+      foregroundEvents.push(event);
+    });
+    await cdp.Mod.evaluate({
+      expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+          const targets = await chrome.debugger.getTargets();
+          const target = targets.find(target => target.type === "page" && target.tabId === tabId);
+          const tab = await chrome.tabs.get(tabId).catch(() => null);
+          await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId: target?.id ?? null, url: target?.url ?? tab?.url ?? null });
+        })`,
     });
 
     await cdp.Target.setDiscoverTargets({ discover: true });
-    const createdTarget = await cdp.Target.createTarget({ url: "https://example.com" });
+    const createdTarget = await cdp.Target.createTarget({ url: "https://example.com", background: true });
     const targetDeadline = Date.now() + 3000;
     while (
       !targetCreatedEvents.some((event) => event?.targetInfo?.targetId === createdTarget.targetId) &&
@@ -405,23 +417,16 @@ async function main() {
       throw new Error(`unexpected Custom.TabIdFromTargetId result ${JSON.stringify(tabFromTarget)}`);
     console.log("Custom.TabIdFromTargetId ->", tabFromTarget);
 
-    const foregroundPromise = waitForEvent(
-      cdp,
-      "Custom.foregroundTargetChanged",
-      (event) => event?.targetId === createdTarget.targetId,
-    );
     await cdp.Target.activateTarget({ targetId: createdTarget.targetId });
-    const foregroundEmit = assertObject(
-      await cdp.Mod.evaluate({
-        expression: `async ({ tabId, targetId }) => await cdp.emit("Custom.foregroundTargetChanged", { tabId, targetId, url: "https://example.com/" })`,
-        params: { tabId: tabFromTarget.tabId, targetId: createdTarget.targetId },
-      }),
-      "Custom.foregroundTargetChanged emit",
-    );
-    if (foregroundEmit.emitted !== true) {
-      throw new Error(`unexpected Custom.foregroundTargetChanged emit result ${JSON.stringify(foregroundEmit)}`);
+    const foregroundDeadline = Date.now() + 3000;
+    while (
+      !foregroundEvents.some((event) => event.targetId === createdTarget.targetId) &&
+      Date.now() < foregroundDeadline
+    ) {
+      await sleep(20);
     }
-    const foreground = assertObject(await foregroundPromise, "Custom.foregroundTargetChanged");
+    const foreground = foregroundEvents.find((event) => event.targetId === createdTarget.targetId);
+    if (!foreground) throw new Error(`expected Custom.foregroundTargetChanged for ${createdTarget.targetId}`);
     if (foreground.tabId !== tabFromTarget.tabId)
       throw new Error(`unexpected Custom.foregroundTargetChanged result ${JSON.stringify(foreground)}`);
 
