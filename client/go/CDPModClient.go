@@ -469,7 +469,8 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		return "", err
 	}
 	cdpURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	deadline := time.Now().Add(15 * time.Second)
+	const chromeReadyTimeout = 45 * time.Second
+	deadline := time.Now().Add(chromeReadyTimeout)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(cdpURL + "/json/version")
 		if err == nil {
@@ -481,7 +482,7 @@ func (c *CDPModClient) launchChrome() (string, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	c.Close()
-	return "", fmt.Errorf("Chrome at %s did not become ready within 15s", cdpURL)
+	return "", fmt.Errorf("Chrome at %s did not become ready within %s", cdpURL, chromeReadyTimeout)
 }
 
 // --- internals -----------------------------------------------------------
