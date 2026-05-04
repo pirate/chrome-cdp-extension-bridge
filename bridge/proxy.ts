@@ -1,13 +1,12 @@
 // proxy.js: a transparent local CDP proxy that "upgrades" any vanilla CDP
-// client to speak Magic.* / Custom.*. By default listens on ws://127.0.0.1:9223
+// client to speak Mod.* / Custom.*. By default listens on ws://127.0.0.1:9223
 // and forwards to http://127.0.0.1:9222.
 //
 // Behavior on each client connection:
-//   - If the upstream isn't reachable and { autoLaunch: true }, launch a local
-//     Chrome via launcher.js and use it as the upstream.
-//   - Inject the MagicCDP extension service worker via injector.js if needed
-//     (single source of truth for that precedence + error messages).
-//   - Stand up a hidden CDP session attached to the SW; rewrite Magic.* /
+//   - Connect a CDPModClient to the existing upstream so auto-attach,
+//     extension discovery, and injection stay in the main client implementation.
+//   - Reuse that client's upstream websocket + hidden extension session to
+//     rewrite Mod.* /
 //     Custom.* outbound and Runtime.bindingCalled inbound; forward everything
 //     else unchanged.
 //
@@ -19,17 +18,16 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import WebSocket, { WebSocketServer } from "ws";
+import { WebSocketServer } from "ws";
 import type { RawData, WebSocket as ClientWebSocket } from "ws";
 
-import { launchChrome } from "./launcher.js";
-import { injectExtensionIfNeeded } from "./injector.js";
+import { CDPModClient } from "../client/js/CDPModClient.js";
 import {
   bindingNameFor,
-  wrapMagicEvaluate,
-  wrapMagicAddCustomCommand,
-  wrapMagicAddMiddleware,
-  wrapMagicAddCustomEvent,
+  wrapCDPModEvaluate,
+  wrapCDPModAddCustomCommand,
+  wrapCDPModAddMiddleware,
+  wrapCDPModAddCustomEvent,
   wrapCustomCommand,
   unwrapResponseIfNeeded,
   unwrapEventIfNeeded,
@@ -39,22 +37,20 @@ import type {
   CdpEventFrame,
   CdpResponseFrame,
   CdpFrame,
-  ProtocolParams,
-  ProtocolResult,
   ProxyConnectionState,
-  ProxyUpstreamState,
-} from "../types/magic.js";
+} from "../types/cdpmod.js";
 import {
   CdpCommandFrameSchema,
   CdpEventFrameSchema,
   CdpResponseFrameSchema,
-  MagicAddCustomCommandParamsSchema,
-  MagicAddCustomEventObjectParamsSchema,
-  MagicAddMiddlewareParamsSchema,
-  MagicEvaluateParamsSchema,
-  normalizeMagicName,
-} from "../types/magic.js";
-import { events } from "../types/zod.js";
+  CDPModAddCustomCommandParamsSchema,
+  CDPModAddCustomEventObjectParamsSchema,
+  CDPModAddMiddlewareParamsSchema,
+  CDPModEvaluateParamsSchema,
+  normalizeCDPModName,
+} from "../types/cdpmod.js";
+import { events as RuntimeEvents } from "../types/zod/Runtime.js";
+import { events as TargetEvents } from "../types/zod/Target.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_EXTENSION_PATH = path.resolve(ROOT, "..", "extension");
@@ -67,23 +63,9 @@ const dbg = (...args) => {
   if (DEBUG) console.log("[proxy:dbg]", ...args);
 };
 
-const MAGIC_METHODS = new Set([
-  "Magic.evaluate",
-  "Magic.addCustomCommand",
-  "Magic.addCustomEvent",
-  "Magic.addMiddleware",
-]);
-const ROUTE_TO_SW_RE = /^(Magic|Custom)\./;
+const MAGIC_METHODS = new Set(["Mod.evaluate", "Mod.addCustomCommand", "Mod.addCustomEvent", "Mod.addMiddleware"]);
+const ROUTE_TO_SW_RE = /^(Mod|Custom)\./;
 const isWsUrl = (url) => /^wss?:\/\//i.test(url);
-
-function liveBrowserWsUrl(endpoint: string) {
-  const url = new URL(endpoint);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/devtools/browser";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
 
 // --- public API -------------------------------------------------------------
 
@@ -91,33 +73,25 @@ export async function startProxy({
   port = DEFAULT_PORT,
   upstream = DEFAULT_UPSTREAM,
   extensionPath = DEFAULT_EXTENSION_PATH,
-  autoLaunch = true,
-  launchOptions = {},
 }: {
   port?: number;
   upstream?: string;
   extensionPath?: string;
-  autoLaunch?: boolean;
-  launchOptions?: Parameters<typeof launchChrome>[0];
 } = {}) {
-  // Per-process upstream: lazily probed on first connection. If reachable, use
-  // it. Otherwise launch a local Chrome and remember it.
-  const upstreamState: ProxyUpstreamState = { url: upstream, launched: null };
-
   const server = http.createServer(async (req, res) => {
     try {
-      await ensureUpstream(upstreamState, { autoLaunch, launchOptions });
-      if (isWsUrl(upstreamState.url)) {
-        if (req.url === "/json/version") {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://${req.headers.host}/devtools/browser/proxy` }));
-        } else {
-          res.writeHead(404);
-          res.end("HTTP discovery is unavailable for a ws:// upstream.");
-        }
+      const requestUrl = req.url === "/json/version/" ? "/json/version" : req.url;
+      if (requestUrl === "/json/version") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://${req.headers.host}/devtools/browser/proxy` }));
         return;
       }
-      const upstreamRes = await fetch(`${upstreamState.url}${req.url}`);
+      if (isWsUrl(upstream)) {
+        res.writeHead(404);
+        res.end("HTTP discovery is unavailable for a ws:// upstream.");
+        return;
+      }
+      const upstreamRes = await fetch(`${upstream}${requestUrl}`);
       const text = await upstreamRes.text();
       const contentType = upstreamRes.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
@@ -143,10 +117,9 @@ export async function startProxy({
     const earlyBuffer = [];
     const earlyHandler = (buf) => earlyBuffer.push(buf);
     client.on("message", earlyHandler);
-    handleConnection(client, earlyBuffer, earlyHandler, upstreamState, {
+    handleConnection(client, earlyBuffer, earlyHandler, {
+      upstream,
       extensionPath,
-      autoLaunch,
-      launchOptions,
     }).catch((err) => {
       log("connection failed:", err.message);
       try {
@@ -156,7 +129,7 @@ export async function startProxy({
   });
 
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
-  log(`listening on ws://127.0.0.1:${port}/  (upstream: ${upstreamState.url})`);
+  log(`listening on ws://127.0.0.1:${port}/  (upstream: ${upstream})`);
 
   return {
     url: `http://127.0.0.1:${port}`,
@@ -164,55 +137,8 @@ export async function startProxy({
     close: async () => {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      if (upstreamState.launched) await upstreamState.launched.close();
     },
   };
-}
-
-// --- upstream probe / lazy launch ------------------------------------------
-
-async function ensureUpstream(
-  upstreamState: ProxyUpstreamState,
-  { autoLaunch, launchOptions }: { autoLaunch: boolean; launchOptions: Parameters<typeof launchChrome>[0] },
-) {
-  if (isWsUrl(upstreamState.url)) return;
-  try {
-    const r = await fetch(`${upstreamState.url}/json/version`);
-    if (r.ok) {
-      const { webSocketDebuggerUrl } = await r.json();
-      if (!webSocketDebuggerUrl)
-        throw new Error(`GET ${upstreamState.url}/json/version returned no webSocketDebuggerUrl`);
-      upstreamState.url = webSocketDebuggerUrl;
-      return;
-    }
-    if (r.status === 404) {
-      upstreamState.url = liveBrowserWsUrl(upstreamState.url);
-      return;
-    }
-  } catch {}
-  if (!autoLaunch) {
-    throw new Error(
-      `Upstream CDP at ${upstreamState.url} is not reachable. Pass --no-auto-launch only when an upstream is already running.`,
-    );
-  }
-  // dedupe concurrent launch attempts: stash the in-flight promise on
-  // upstreamState so callers racing into ensureUpstream all await the same
-  // single launchChrome.
-  if (!upstreamState.launchPromise) {
-    log(`upstream ${upstreamState.url} not reachable, launching local Chrome...`);
-    upstreamState.launchPromise = launchChrome(launchOptions)
-      .then((launched) => {
-        upstreamState.launched = launched;
-        upstreamState.url = launched.wsUrl;
-        log(`launched local Chrome at ${upstreamState.url}`);
-        return launched;
-      })
-      .catch((err) => {
-        upstreamState.launchPromise = null;
-        throw err;
-      });
-  }
-  await upstreamState.launchPromise;
 }
 
 function rewriteWsUrls(value: unknown, host: string) {
@@ -229,37 +155,36 @@ async function handleConnection(
   client: ClientWebSocket,
   earlyBuffer: RawData[],
   earlyHandler: (buf: RawData) => void,
-  upstreamState: ProxyUpstreamState,
-  {
-    extensionPath,
-    autoLaunch,
-    launchOptions,
-  }: { extensionPath: string; autoLaunch: boolean; launchOptions: Parameters<typeof launchChrome>[0] },
+  { upstream, extensionPath }: { upstream: string; extensionPath: string },
 ) {
-  await ensureUpstream(upstreamState, { autoLaunch, launchOptions });
-
-  const upstream = new WebSocket(upstreamState.url, { origin: undefined });
-  await new Promise((resolve, reject) => {
-    upstream.addEventListener("open", resolve, { once: true });
-    upstream.addEventListener("error", reject, { once: true });
+  const cdp = new CDPModClient({
+    cdp_url: upstream,
+    extension_path: extensionPath,
+    hydrate_aliases: false,
   });
+  await cdp.connect();
+  const upstream_socket = cdp.ws as unknown as WebSocket | null;
+  if (!upstream_socket) throw new Error("CDPModClient connected without an upstream websocket.");
 
   // per-connection state
   const state: ProxyConnectionState = {
     client,
-    upstream,
+    upstream: upstream_socket as unknown as import("ws").WebSocket,
     nextUpstreamId: 1_000_000,
     pending: new Map(), // upstreamId -> { kind, clientId?, clientSessionId?, ... }
-    extSessionId: null,
-    extTargetId: null,
+    extSessionId: cdp.ext_session_id,
+    extTargetId: cdp.ext_target_id,
     hiddenSessionIds: new Set(), // sessions we attached for ourselves
     hiddenTargetIds: new Set(), // SW target the client must never see
+    targetSessionIds: cdp.auto_target_sessions,
     clientSessionIds: new Set(), // session ids the client has attached
     bootstrapped: false,
     queuedFromClient: [],
   };
+  if (cdp.ext_session_id) state.hiddenSessionIds.add(cdp.ext_session_id);
+  if (cdp.ext_target_id) state.hiddenTargetIds.add(cdp.ext_target_id);
 
-  upstream.addEventListener("message", (event) => {
+  upstream_socket.addEventListener("message", (event) => {
     let msg: CdpResponseFrame | CdpEventFrame;
     try {
       const parsed = JSON.parse(String(event.data));
@@ -271,42 +196,21 @@ async function handleConnection(
     dbg("upstream->", msg.id ?? "", msg.method ?? "(response)", msg.sessionId ?? "");
     handleUpstreamMessage(state, msg);
   });
-  upstream.addEventListener("close", () => {
+  upstream_socket.addEventListener("close", () => {
     try {
       client.close();
     } catch {}
   });
-  upstream.addEventListener("error", () => {
+  upstream_socket.addEventListener("error", () => {
     log("upstream ws error");
     try {
       client.close(1011, "upstream error");
     } catch {}
   });
   client.on("close", () => {
-    try {
-      upstream.close();
-    } catch {}
+    void cdp.close().catch(() => {});
   });
-
-  // Bootstrap: ensure the MagicCDP extension is present and attach a hidden
-  // session to it. All single-source-of-truth precedence + error messaging
-  // lives in injector.js; the proxy just consumes its result.
-  const sendInternal = (method: string, params: ProtocolParams = {}, sessionId: string | null = null) =>
-    new Promise<ProtocolResult>((resolve, reject) => {
-      const id = state.nextUpstreamId++;
-      state.pending.set(id, { kind: "internal", resolve, reject });
-      const message: CdpCommandFrame = { id, method, params };
-      if (sessionId) message.sessionId = sessionId;
-      upstream.send(JSON.stringify(message));
-    });
-
-  const ext = await injectExtensionIfNeeded({ send: sendInternal, extensionPath });
-  state.extSessionId = ext.sessionId;
-  state.extTargetId = ext.targetId;
-  state.hiddenSessionIds.add(ext.sessionId);
-  state.hiddenTargetIds.add(ext.targetId);
-  await sendInternal("Runtime.enable", {}, ext.sessionId);
-  log(`extension ${ext.source} (${ext.extensionId}); ext session ${ext.sessionId}`);
+  log(`extension ${cdp.connect_timing?.extension_source} (${cdp.extension_id}); ext session ${cdp.ext_session_id}`);
 
   // Swap the early-buffer handler for the real one. Drain anything that
   // arrived before we got here.
@@ -335,17 +239,17 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
   dbg("client->", msg.id ?? "", msg.method, msg.sessionId ?? "");
   const { id, method, params = {}, sessionId } = msg;
 
-  // route a Magic.* / Custom.* command into a Runtime.evaluate against the
+  // route a Mod.* / Custom.* command into a Runtime.evaluate against the
   // hidden ext session, while remembering the originating client id+session
   // so the response can be steered back to the right Playwright CDPSession.
   if (MAGIC_METHODS.has(method) || ROUTE_TO_SW_RE.test(method)) {
-    if (method === "Magic.addCustomEvent") {
-      const addEventParams = MagicAddCustomEventObjectParamsSchema.parse(params ?? {});
-      const eventName = normalizeMagicName(addEventParams.name);
+    if (method === "Mod.addCustomEvent") {
+      const addEventParams = CDPModAddCustomEventObjectParamsSchema.parse(params ?? {});
+      const eventName = normalizeCDPModName(addEventParams.name);
       // two-step: addBinding, then evaluate the addCustomEvent registration.
       const upId = state.nextUpstreamId++;
       state.pending.set(upId, {
-        kind: "magic_add_event_step1",
+        kind: "cdpmod_add_event_step1",
         clientId: id,
         clientSessionId: sessionId || null,
         eventName,
@@ -361,18 +265,18 @@ function handleClientMessage(state: ProxyConnectionState, buf: RawData) {
       return;
     }
     const upId = state.nextUpstreamId++;
-    state.pending.set(upId, { kind: "magic_eval", clientId: id, clientSessionId: sessionId || null });
+    state.pending.set(upId, { kind: "cdpmod_eval", clientId: id, clientSessionId: sessionId || null });
     let runtimeParams;
-    if (method === "Magic.evaluate") {
-      const evaluateParams = MagicEvaluateParamsSchema.parse(params ?? {});
-      runtimeParams = wrapMagicEvaluate({
+    if (method === "Mod.evaluate") {
+      const evaluateParams = CDPModEvaluateParamsSchema.parse(params ?? {});
+      runtimeParams = wrapCDPModEvaluate({
         ...evaluateParams,
         cdpSessionId: evaluateParams.cdpSessionId ?? sessionId ?? null,
       });
-    } else if (method === "Magic.addCustomCommand") {
-      runtimeParams = wrapMagicAddCustomCommand(MagicAddCustomCommandParamsSchema.parse(params ?? {}));
-    } else if (method === "Magic.addMiddleware") {
-      runtimeParams = wrapMagicAddMiddleware(MagicAddMiddlewareParamsSchema.parse(params ?? {}));
+    } else if (method === "Mod.addCustomCommand") {
+      runtimeParams = wrapCDPModAddCustomCommand(CDPModAddCustomCommandParamsSchema.parse(params ?? {}));
+    } else if (method === "Mod.addMiddleware") {
+      runtimeParams = wrapCDPModAddMiddleware(CDPModAddMiddlewareParamsSchema.parse(params ?? {}));
     } else {
       const cdpSessionId =
         params && typeof params === "object" && "cdpSessionId" in params && typeof params.cdpSessionId === "string"
@@ -414,7 +318,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
       sendToClient(state, out);
     };
 
-    if (p.kind === "magic_eval") {
+    if (p.kind === "cdpmod_eval") {
       try {
         replyToClient({ result: unwrapResponseIfNeeded(response.result || {}, "evaluate") ?? {} });
       } catch (e) {
@@ -422,18 +326,18 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
       }
       return;
     }
-    if (p.kind === "magic_add_event_step1") {
+    if (p.kind === "cdpmod_add_event_step1") {
       if (response.error) {
         replyToClient({ error: response.error });
         return;
       }
       const upId = state.nextUpstreamId++;
-      state.pending.set(upId, { kind: "magic_eval", clientId: p.clientId, clientSessionId: p.clientSessionId });
+      state.pending.set(upId, { kind: "cdpmod_eval", clientId: p.clientId, clientSessionId: p.clientSessionId });
       state.upstream.send(
         JSON.stringify({
           id: upId,
           method: "Runtime.evaluate",
-          params: wrapMagicAddCustomEvent({ name: p.eventName ?? "" }),
+          params: wrapCDPModAddCustomEvent({ name: p.eventName ?? "" }),
           sessionId: state.extSessionId,
         }),
       );
@@ -447,20 +351,39 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
 
   const event = CdpEventFrameSchema.parse(msg);
 
+  if (event.method === "Target.attachedToTarget") {
+    const attached = TargetEvents["Target.attachedToTarget"].parse(event.params || {});
+    state.targetSessionIds.set(attached.targetInfo.targetId, attached.sessionId);
+  }
+  if (event.method === "Target.detachedFromTarget") {
+    const eventSessionId =
+      event.params &&
+      typeof event.params === "object" &&
+      "sessionId" in event.params &&
+      typeof event.params.sessionId === "string"
+        ? event.params.sessionId
+        : null;
+    if (eventSessionId) {
+      for (const [target_id, session_id] of state.targetSessionIds) {
+        if (session_id === eventSessionId) state.targetSessionIds.delete(target_id);
+      }
+    }
+  }
+
   // event
   if (event.method === "Runtime.bindingCalled" && event.sessionId === state.extSessionId) {
     const u = unwrapEventIfNeeded(
       event.method,
-      events["Runtime.bindingCalled"].parse(event.params || {}),
+      RuntimeEvents["Runtime.bindingCalled"].parse(event.params || {}),
       event.sessionId || null,
       null,
     );
     if (!u) return;
     // emit to root + every known client session, so any CDPSession listener
     // (Playwright per-target sessions) fires.
-    sendToClient(state, { method: u.event, params: u.data ?? {} });
+    sendToClient(state, { method: u.event, params: (u.data ?? {}) as Record<string, unknown> });
     for (const sid of state.clientSessionIds) {
-      sendToClient(state, { method: u.event, params: u.data ?? {}, sessionId: sid });
+      sendToClient(state, { method: u.event, params: (u.data ?? {}) as Record<string, unknown>, sessionId: sid });
     }
     return;
   }
@@ -474,7 +397,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
   // event, msg.params.targetInfo.targetId is the SW target (which we want to
   // act on), not a target the client owns.
   if (event.method === "Target.attachedToTarget") {
-    const attached = events["Target.attachedToTarget"].parse(event.params || {});
+    const attached = TargetEvents["Target.attachedToTarget"].parse(event.params || {});
     if (state.hiddenTargetIds.has(attached.targetInfo.targetId)) {
       const orphan = attached.sessionId;
       if (orphan && orphan !== state.extSessionId) {
@@ -547,8 +470,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(argv.port || DEFAULT_PORT);
   const upstream = argv.upstream || DEFAULT_UPSTREAM;
   const extensionPath = argv.extension ? path.resolve(argv.extension) : DEFAULT_EXTENSION_PATH;
-  const autoLaunch = argv["no-auto-launch"] !== "true";
-  startProxy({ port, upstream, extensionPath, autoLaunch }).catch((e) => {
+  startProxy({ port, upstream, extensionPath }).catch((e) => {
     console.error(e);
     process.exitCode = 1;
   });

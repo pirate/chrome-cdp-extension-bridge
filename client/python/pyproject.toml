@@ -1,5 +1,11 @@
 [project]
-name = "magic-cdp-python-client"
+name = "cdpmod"
 version = "0.0.0"
 requires-python = ">=3.10"
 dependencies = ["websocket-client>=1.8.0"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.409",
+    "ty>=0.0.34",
+]

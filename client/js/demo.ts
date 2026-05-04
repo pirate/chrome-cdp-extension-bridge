@@ -1,6 +1,6 @@
-// JS demo for MagicCDPClient with --direct / --loopback / --debugger modes.
+// JS demo for CDPModClient with --direct / --loopback / --debugger modes.
 //
-// Modes select where non-Magic CDP commands ultimately get serviced:
+// Modes select where non-CDPMod commands ultimately get serviced:
 //   --live        use the running Google Chrome enabled via chrome://inspect.
 //   --direct      client sends standard CDP straight to the upstream WS.
 //   --loopback    client routes *.* through the extension service worker,
@@ -13,7 +13,7 @@
 //                 on server.)
 //
 // All three modes exercise the same surface: raw Browser.getVersion, raw
-// Target.targetCreated event handling, Magic.evaluate, Custom.* commands,
+// Target.targetCreated event handling, Mod.evaluate, Custom.* commands,
 // Custom.* events, and response middleware.
 
 import path from "node:path";
@@ -25,8 +25,11 @@ import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 
-import { MagicCDPClient } from "./MagicCDPClient.js";
-import { launchChrome } from "../../bridge/launcher.js";
+import { CDPModClient } from "./CDPModClient.js";
+
+type TargetCreatedPayload = {
+  targetInfo?: { targetId?: string } & Record<string, unknown>;
+};
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH =
@@ -49,7 +52,15 @@ function parseArgs(argv) {
   return { mode, live };
 }
 
-function clientOptionsFor(mode, cdp_url) {
+function serverRoutesFor(mode) {
+  return {
+    "Mod.*": "service_worker",
+    "Custom.*": "service_worker",
+    "*.*": mode === "loopback" ? "loopback_cdp" : mode === "debugger" ? "chrome_debugger" : "auto",
+  };
+}
+
+function clientOptionsFor(mode, cdp_url, launch_options = {}) {
   const directNormalEventRoutes = {
     "Target.setDiscoverTargets": "direct_cdp",
     "Target.createTarget": "direct_cdp",
@@ -59,8 +70,9 @@ function clientOptionsFor(mode, cdp_url) {
     return {
       cdp_url,
       extension_path: EXTENSION_PATH,
+      launch_options,
       routes: {
-        "Magic.*": "service_worker",
+        "Mod.*": "service_worker",
         "Custom.*": "service_worker",
         "*.*": "direct_cdp",
         ...directNormalEventRoutes,
@@ -70,21 +82,47 @@ function clientOptionsFor(mode, cdp_url) {
   return {
     cdp_url,
     extension_path: EXTENSION_PATH,
+    launch_options,
     routes: {
-      "Magic.*": "service_worker",
+      "Mod.*": "service_worker",
       "Custom.*": "service_worker",
       "*.*": "service_worker",
       ...directNormalEventRoutes,
     },
     server: {
-      routes: {
-        "Magic.*": "service_worker",
-        "Custom.*": "service_worker",
-        "*.*": mode === "loopback" ? "loopback_cdp" : "chrome_debugger",
-      },
-      loopback_cdp_url: mode === "loopback" ? cdp_url : null,
+      routes: serverRoutesFor(mode),
+      ...(mode === "loopback" && cdp_url ? { loopback_cdp_url: cdp_url } : {}),
     },
   };
+}
+
+function assertObject(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} returned non-object value ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function isTargetCreatedPayload(value: unknown): value is TargetCreatedPayload {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const targetInfo = (value as Record<string, unknown>).targetInfo;
+  return targetInfo == null || (typeof targetInfo === "object" && !Array.isArray(targetInfo));
+}
+
+async function waitForEvent(cdp, eventName, predicate = (_payload) => true, timeoutMs = 3000) {
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cdp.off(eventName, onEvent);
+      reject(new Error(`timed out waiting for ${eventName}`));
+    }, timeoutMs);
+    const onEvent = (payload) => {
+      if (!predicate(payload)) return;
+      clearTimeout(timeout);
+      cdp.off(eventName, onEvent);
+      resolve(payload);
+    };
+    cdp.on(eventName, onEvent);
+  });
 }
 
 function openLiveInspectPage() {
@@ -134,88 +172,151 @@ async function main() {
     throw new Error(`Built extension not found at ${EXTENSION_PATH}. Run pnpm run build first.`);
   }
 
-  let chrome = null;
   let cdpUrl;
+  let launch_options = {};
   if (live) {
     cdpUrl = await waitForLiveCdpUrl();
   } else {
-    // --load-extension is a workaround for builds where Extensions.loadUnpacked
-    // is unavailable (e.g. Playwright-bundled chromium). On Chrome Canary you
-    // can drop extraFlags entirely and the injector will install the extension
-    // over CDP itself.
-    chrome = await launchChrome({
+    cdpUrl = null;
+    launch_options = {
       headless: process.platform === "linux",
-      noSandbox: process.platform === "linux",
-      extraFlags: [`--load-extension=${EXTENSION_PATH}`],
-    });
-    cdpUrl = chrome.wsUrl;
+      sandbox: process.platform !== "linux",
+      extra_args: [`--load-extension=${EXTENSION_PATH}`],
+    };
   }
-  console.log("upstream cdp:", cdpUrl);
 
-  const cdp = new MagicCDPClient(clientOptionsFor(mode, cdpUrl));
+  const cdp = new CDPModClient(clientOptionsFor(mode, cdpUrl, launch_options));
   const foregroundEvents = [];
-  const targetCreatedEvents = [];
-  cdp.on(cdp.Target.targetCreated, (payload) => {
-    console.log("Target.targetCreated ->", payload?.targetInfo?.targetId);
-    targetCreatedEvents.push(payload);
-  });
+  const targetCreatedEvents: TargetCreatedPayload[] = [];
 
   try {
     await cdp.connect();
+    console.log("upstream cdp:", cdp.cdp_url);
+    cdp.on(cdp.Target.targetCreated, (payload) => {
+      const event = isTargetCreatedPayload(payload) ? payload : {};
+      console.log("Target.targetCreated ->", event.targetInfo?.targetId);
+      targetCreatedEvents.push(event);
+    });
     console.log("connected; ext", cdp.extension_id, "session", cdp.ext_session_id);
     console.log("ping latency      ->", cdp.latency);
 
-    // standard CDP route differs per mode. --direct goes straight to the
-    // upstream WS. --loopback comes back into the browser via a verified
-    // ws://localhost:9222. --debugger goes through chrome.debugger which is
-    // tab-scoped and rejects browser-level methods like Browser.getVersion --
-    // expected, just report.
-    try {
-      console.log("Browser.getVersion ->", await cdp.Browser.getVersion());
-    } catch (e) {
-      console.log("Browser.getVersion -> (rejected by route:", e.message.replace(/\n/g, " "), ")");
+    const configureResult = assertObject(
+      await cdp.Mod.configure({
+        routes: serverRoutesFor(mode),
+        ...(mode === "loopback" ? { loopback_cdp_url: cdp.cdp_url } : {}),
+      }),
+      "Mod.configure",
+    );
+    if (configureResult.routes?.["*.*"] !== serverRoutesFor(mode)["*.*"]) {
+      throw new Error(`unexpected Mod.configure result ${JSON.stringify(configureResult)}`);
+    }
+    console.log("Mod.configure    ->", configureResult.routes);
+
+    const pingSentAt = Date.now();
+    const pongPromise = waitForEvent(cdp, "Mod.pong", (event) => event?.sentAt === pingSentAt);
+    const pingResult = assertObject(await cdp.Mod.ping({ sentAt: pingSentAt }), "Mod.ping");
+    const pong = assertObject(await pongPromise, "Mod.pong");
+    if (pingResult.ok !== true || pong.receivedAt == null || pong.from !== "extension-service-worker") {
+      throw new Error(`unexpected Mod.ping/Mod.pong result ${JSON.stringify({ pingResult, pong })}`);
+    }
+    console.log("Mod.ping/pong    ->", { pingResult, pong });
+
+    // Browser.getVersion is browser-scoped and chrome.debugger is tab-scoped,
+    // so debugger mode asserts a positive raw CDP Runtime.evaluate instead.
+    if (mode === "debugger") {
+      try {
+        const version = assertObject(await cdp.Browser.getVersion(), "Browser.getVersion");
+        if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
+          throw new Error(`unexpected Browser.getVersion result ${JSON.stringify(version)}`);
+        }
+        console.log("Browser.getVersion ->", version);
+      } catch (e) {
+        console.log("Browser.getVersion -> (debugger route rejected:", e.message.replace(/\n/g, " "), ")");
+      }
+      const runtimeEval = assertObject(
+        await cdp.Runtime.evaluate({ expression: "(() => 42)()", returnByValue: true }),
+        "Runtime.evaluate",
+      );
+      if (runtimeEval.result?.value !== 42)
+        throw new Error(`unexpected Runtime.evaluate result ${JSON.stringify(runtimeEval)}`);
+      console.log("Runtime.evaluate ->", runtimeEval);
+    } else {
+      const version = assertObject(await cdp.Browser.getVersion(), "Browser.getVersion");
+      if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
+        throw new Error(`unexpected Browser.getVersion result ${JSON.stringify(version)}`);
+      }
+      console.log("Browser.getVersion ->", version);
     }
 
-    const magicEval = (await cdp.Magic.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
+    const cdpmodEval = (await cdp.Mod.evaluate({ expression: "({ extensionId: chrome.runtime.id })" })) as {
       extensionId?: string;
     };
-    if (magicEval.extensionId !== cdp.extension_id)
-      throw new Error(`unexpected Magic.evaluate result ${JSON.stringify(magicEval)}`);
-    console.log("Magic.evaluate     ->", magicEval);
+    if (cdpmodEval.extensionId !== cdp.extension_id)
+      throw new Error(`unexpected Mod.evaluate result ${JSON.stringify(cdpmodEval)}`);
+    console.log("Mod.evaluate     ->", cdpmodEval);
 
-    await cdp.Magic.addCustomCommand({
-      name: "Custom.TabIdFromTargetId",
-      paramsSchema: {
-        targetId: cdp.types.zod.Target.TargetID,
-      },
-      resultSchema: {
-        tabId: z.number().nullable(),
-      },
-      expression: `async ({ targetId }) => {
+    const echoRegistration = assertObject(
+      await cdp.Mod.addCustomCommand({
+        name: "Custom.echo",
+        expression: `async (params, method) => ({ echoed: params.value, method })`,
+      }),
+      "Mod.addCustomCommand Custom.echo",
+    );
+    if (echoRegistration.registered !== true || echoRegistration.name !== "Custom.echo") {
+      throw new Error(`unexpected Custom.echo registration ${JSON.stringify(echoRegistration)}`);
+    }
+    const echoResult = assertObject(await cdp.send("Custom.echo", { value: "custom-command-ok" }), "Custom.echo");
+    if (echoResult.echoed !== "custom-command-ok" || echoResult.method !== "Custom.echo") {
+      throw new Error(`unexpected Custom.echo result ${JSON.stringify(echoResult)}`);
+    }
+    console.log("Custom.echo      ->", echoResult);
+
+    const tabCommandRegistration = assertObject(
+      await cdp.Mod.addCustomCommand({
+        name: "Custom.TabIdFromTargetId",
+        paramsSchema: {
+          targetId: cdp.types.zod.Target.TargetID,
+        },
+        resultSchema: {
+          tabId: z.number().nullable(),
+        },
+        expression: `async ({ targetId }) => {
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.id === targetId);
         return { tabId: target?.tabId ?? null };
       }`,
-    });
-    await cdp.Magic.addCustomCommand({
-      name: "Custom.targetIdFromTabId",
-      paramsSchema: {
-        tabId: z.number(),
-      },
-      resultSchema: {
-        targetId: cdp.types.zod.Target.TargetID.nullable(),
-        tabId: z.number().optional(),
-      },
-      expression: `async ({ tabId }) => {
+      }),
+      "Mod.addCustomCommand Custom.TabIdFromTargetId",
+    );
+    if (tabCommandRegistration.registered !== true) {
+      throw new Error(`unexpected TabIdFromTargetId registration ${JSON.stringify(tabCommandRegistration)}`);
+    }
+    const targetCommandRegistration = assertObject(
+      await cdp.Mod.addCustomCommand({
+        name: "Custom.targetIdFromTabId",
+        paramsSchema: {
+          tabId: z.number(),
+        },
+        resultSchema: {
+          targetId: cdp.types.zod.Target.TargetID.nullable(),
+          tabId: z.number().optional(),
+        },
+        expression: `async ({ tabId }) => {
         const targets = await chrome.debugger.getTargets();
         const target = targets.find(target => target.type === "page" && target.tabId === tabId);
         return { targetId: target?.id ?? null };
       }`,
-    });
-    await cdp.Magic.addMiddleware({
-      name: "*",
-      phase: cdp.RESPONSE,
-      expression: `async (payload, next) => {
+      }),
+      "Mod.addCustomCommand Custom.targetIdFromTabId",
+    );
+    if (targetCommandRegistration.registered !== true) {
+      throw new Error(`unexpected targetIdFromTabId registration ${JSON.stringify(targetCommandRegistration)}`);
+    }
+    const responseMiddlewareRegistration = assertObject(
+      await cdp.Mod.addMiddleware({
+        name: "*",
+        phase: cdp.RESPONSE,
+        expression: `async (payload, next) => {
         const seen = new WeakSet();
         const visit = async value => {
           if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -229,11 +330,18 @@ async function main() {
         await visit(payload);
         return next(payload);
       }`,
-    });
-    await cdp.Magic.addMiddleware({
-      name: "*",
-      phase: cdp.EVENT,
-      expression: `async (payload, next) => {
+      }),
+      "Mod.addMiddleware response",
+    );
+    if (responseMiddlewareRegistration.registered !== true || responseMiddlewareRegistration.phase !== cdp.RESPONSE) {
+      throw new Error(`unexpected response middleware registration ${JSON.stringify(responseMiddlewareRegistration)}`);
+    }
+
+    const eventMiddlewareRegistration = assertObject(
+      await cdp.Mod.addMiddleware({
+        name: "*",
+        phase: cdp.EVENT,
+        expression: `async (payload, next) => {
         const seen = new WeakSet();
         const visit = async value => {
           if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -247,7 +355,31 @@ async function main() {
         await visit(payload);
         return next(payload);
       }`,
-    });
+      }),
+      "Mod.addMiddleware event",
+    );
+    if (eventMiddlewareRegistration.registered !== true || eventMiddlewareRegistration.phase !== cdp.EVENT) {
+      throw new Error(`unexpected event middleware registration ${JSON.stringify(eventMiddlewareRegistration)}`);
+    }
+
+    const demoEventRegistration = assertObject(
+      await cdp.Mod.addCustomEvent({ name: "Custom.demoEvent" }),
+      "Mod.addCustomEvent Custom.demoEvent",
+    );
+    if (demoEventRegistration.registered !== true || demoEventRegistration.name !== "Custom.demoEvent") {
+      throw new Error(`unexpected Custom.demoEvent registration ${JSON.stringify(demoEventRegistration)}`);
+    }
+    const demoEventPromise = waitForEvent(cdp, "Custom.demoEvent", (event) => event?.value === "custom-event-ok");
+    const emitResult = assertObject(
+      await cdp.Mod.evaluate({
+        expression: `async () => await CDPMod.emit("Custom.demoEvent", { value: "custom-event-ok" })`,
+      }),
+      "Custom.demoEvent emit",
+    );
+    if (emitResult.emitted !== true)
+      throw new Error(`unexpected Custom.demoEvent emit result ${JSON.stringify(emitResult)}`);
+    const demoEvent = assertObject(await demoEventPromise, "Custom.demoEvent");
+    console.log("Custom.demoEvent ->", demoEvent);
 
     const ForegroundTargetChanged = z
       .object({
@@ -257,12 +389,18 @@ async function main() {
       })
       .passthrough()
       .meta({ id: "Custom.foregroundTargetChanged" });
-    await cdp.Magic.addCustomEvent(ForegroundTargetChanged);
+    const foregroundEventRegistration = assertObject(
+      await cdp.Mod.addCustomEvent(ForegroundTargetChanged),
+      "Mod.addCustomEvent Custom.foregroundTargetChanged",
+    );
+    if (foregroundEventRegistration.registered !== true) {
+      throw new Error(`unexpected foreground event registration ${JSON.stringify(foregroundEventRegistration)}`);
+    }
     cdp.on(ForegroundTargetChanged, (event) => {
       console.log("Custom.foregroundTargetChanged ->", event);
       foregroundEvents.push(event);
     });
-    await cdp.Magic.evaluate({
+    await cdp.Mod.evaluate({
       expression: `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.type === "page" && target.tabId === tabId);
@@ -272,7 +410,7 @@ async function main() {
     });
 
     await cdp.Target.setDiscoverTargets({ discover: true });
-    const createdTarget = await cdp.Target.createTarget({ url: "https://example.com" });
+    const createdTarget = await cdp.Target.createTarget({ url: "https://example.com", background: true });
     const targetDeadline = Date.now() + 3000;
     while (
       !targetCreatedEvents.some((event) => event?.targetInfo?.targetId === createdTarget.targetId) &&
@@ -285,6 +423,11 @@ async function main() {
     }
     console.log("normal event matched ->", createdTarget.targetId);
 
+    const tabFromTarget = await cdp.send("Custom.TabIdFromTargetId", { targetId: createdTarget.targetId });
+    if (typeof tabFromTarget.tabId !== "number")
+      throw new Error(`unexpected Custom.TabIdFromTargetId result ${JSON.stringify(tabFromTarget)}`);
+    console.log("Custom.TabIdFromTargetId ->", tabFromTarget);
+
     await cdp.Target.activateTarget({ targetId: createdTarget.targetId });
     const foregroundDeadline = Date.now() + 3000;
     while (
@@ -295,11 +438,8 @@ async function main() {
     }
     const foreground = foregroundEvents.find((event) => event.targetId === createdTarget.targetId);
     if (!foreground) throw new Error(`expected Custom.foregroundTargetChanged for ${createdTarget.targetId}`);
-
-    const tabFromTarget = await cdp.send("Custom.TabIdFromTargetId", { targetId: createdTarget.targetId });
-    if (tabFromTarget.tabId !== foreground.tabId)
-      throw new Error(`unexpected Custom.TabIdFromTargetId result ${JSON.stringify(tabFromTarget)}`);
-    console.log("Custom.TabIdFromTargetId ->", tabFromTarget);
+    if (foreground.tabId !== tabFromTarget.tabId)
+      throw new Error(`unexpected Custom.foregroundTargetChanged result ${JSON.stringify(foreground)}`);
 
     const targetFromTab = await cdp.send("Custom.targetIdFromTabId", { tabId: foreground.tabId });
     if (targetFromTab.targetId !== createdTarget.targetId || targetFromTab.tabId !== foreground.tabId) {
@@ -317,12 +457,11 @@ async function main() {
     // the prompt when run non-interactively (CI, piped stdin) so the demo
     // exits cleanly after assertions.
     if (process.stdin.isTTY) {
-      cdp.on("Magic.pong", (e) => console.log("\n[event] Magic.pong", e));
+      cdp.on("Mod.pong", (e) => console.log("\n[event] Mod.pong", e));
       await runRepl(cdp, mode);
     }
   } finally {
     await cdp.close();
-    await chrome?.close();
   }
 }
 
@@ -330,7 +469,7 @@ async function runRepl(cdp, mode) {
   console.log(`\nBrowser remains running. Mode: ${mode}.`);
   console.log("Enter commands as Domain.method({...}). Examples:");
   console.log("  Browser.getVersion({})");
-  console.log('  Magic.evaluate({expression: "chrome.tabs.query({active: true})"})');
+  console.log('  Mod.evaluate({expression: "chrome.tabs.query({active: true})"})');
   console.log("  Custom.TabIdFromTargetId({targetId: '...'})");
   console.log("Type exit or quit to disconnect (browser keeps running).");
 
@@ -339,7 +478,7 @@ async function runRepl(cdp, mode) {
     while (true) {
       let line;
       try {
-        line = (await rl.question("MagicCDP> ")).trim();
+        line = (await rl.question("CDPMod> ")).trim();
       } catch {
         break;
       }

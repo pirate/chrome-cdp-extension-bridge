@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "ignorePatterns": ["dist/**", "node_modules/**", "types/cdp.ts", "types/zod.ts"],
+  "ignorePatterns": ["dist/**", "node_modules/**", "types/aliases.ts", "types/cdp.ts", "types/zod.ts", "types/zod/**"],
   "printWidth": 120,
   "tabWidth": 2,
   "semi": true,

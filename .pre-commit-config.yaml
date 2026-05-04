@@ -1,0 +1,79 @@
+repos:
+  - repo: local
+    hooks:
+      - id: oxfmt
+        name: oxfmt
+        entry: pnpm exec oxfmt
+        language: system
+        files: \.(js|ts|json|ya?ml)$
+        exclude: ^types/(aliases|cdp|zod)\.ts$|^types/zod/
+      - id: oxlint
+        name: oxlint
+        entry: pnpm exec oxlint --format=stylish --disable-nested-config --tsconfig tsconfig.json
+        language: system
+        files: \.(js|ts|json)$
+        exclude: ^types/(cdp|zod)\.ts$
+        pass_filenames: false
+      - id: tsc
+        name: tsc
+        entry: pnpm run typecheck
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: build
+        name: build
+        entry: pnpm run build
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: test
+        name: test
+        entry: pnpm run test
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ty-check
+        name: ty-check
+        entry: uv --directory client/python run ty check
+        language: system
+        files: ^client/python/
+        pass_filenames: false
+      - id: pyright
+        name: pyright
+        entry: uv --directory client/python run pyright
+        language: system
+        files: ^client/python/
+        pass_filenames: false
+      - id: go-fmt
+        name: go-fmt
+        entry: gofmt -w
+        language: system
+        files: ^client/go/.*\.go$
+      - id: go-build
+        name: go-build
+        entry: bash -c 'cd client/go && go build ./...'
+        language: system
+        files: ^client/go/
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-ast
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: check-case-conflict
+      - id: check-illegal-windows-names
+      - id: check-shebang-scripts-are-executable
+      - id: mixed-line-ending
+      - id: fix-byte-order-marker
+      - id: end-of-file-fixer
+      - id: detect-private-key
+      - id: debug-statements
+      - id: forbid-submodules
+      - id: check-added-large-files
+        args: ["--maxkb=600"]

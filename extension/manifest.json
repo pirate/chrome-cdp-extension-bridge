@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "MagicCDP Bridge",
+  "name": "CDPMod Bridge",
   "version": "0.1.0",
-  "description": "Extension service worker bridge for MagicCDP custom commands and events.",
+  "description": "Extension service worker bridge for CDPMod custom commands and events.",
   "minimum_chrome_version": "116",
   "background": {
     "service_worker": "service_worker.js",

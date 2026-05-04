@@ -1,34 +1,59 @@
 {
-  "name": "magic-cdp-bridge",
+  "name": "cdpmod",
   "version": "0.0.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pirate/cdpmod.git"
+  },
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./client/js/CDPModClient.ts",
+      "import": "./dist/client/js/CDPModClient.js"
+    },
+    "./client": {
+      "types": "./client/js/CDPModClient.ts",
+      "import": "./dist/client/js/CDPModClient.js"
+    },
+    "./extension/service_worker.js": "./dist/extension/service_worker.js",
+    "./extension/CDPModServer.js": "./dist/extension/CDPModServer.js",
+    "./extension/translate.js": "./dist/extension/translate.js",
+    "./bridge/translate.js": "./dist/bridge/translate.js",
+    "./types/*": "./dist/types/*",
+    "./types/zod/*": "./dist/types/zod/*"
+  },
   "scripts": {
     "clean": "rm -rf dist",
     "build": "pnpm run clean && pnpm run build:package && pnpm run build:extension-assets",
     "build:package": "tsc -p tsconfig.json",
     "build:extension-assets": "node -e \"const fs = require('node:fs'); fs.mkdirSync('dist/extension/offscreen', { recursive: true }); fs.copyFileSync('extension/manifest.json', 'dist/extension/manifest.json'); fs.copyFileSync('dist/bridge/translate.js', 'dist/extension/translate.js'); fs.copyFileSync('extension/offscreen/keepalive.html', 'dist/extension/offscreen/keepalive.html');\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "oxlint .",
-    "format": "oxfmt .",
+    "lint": "pnpm exec prek run --all-files",
+    "format": "pnpm exec prek run oxfmt --all-files",
     "format:check": "oxfmt --check .",
     "demo:js": "pnpm run build && node dist/client/js/demo.js",
     "demo:python": "pnpm run build && cd client/python && uv run python demo.py",
-    "demo:go": "pnpm run build && (cd client/go && go run .)",
+    "demo:go": "pnpm run build && (cd client/go && go run ./demo)",
+    "demo:proxy:playwright": "pnpm run build && node dist/client/js/examples/playwright.js",
+    "demo:proxy:puppeteer": "pnpm run build && node dist/client/js/examples/puppeteer.js",
     "proxy": "pnpm run build && node dist/bridge/proxy.js",
-    "test": "pnpm run build && node --test \"dist/test/*.test.js\""
+    "test": "pnpm run build && node --test \"dist/test/*.test.js\"",
+    "prepare": "pnpm exec prek install"
   },
   "dependencies": {
     "ws": "^8.18.0",
     "zod": "^4.4.1"
   },
   "devDependencies": {
+    "@j178/prek": "0.3.10",
     "@types/chrome": "^0.1.40",
     "@types/node": "^25.6.0",
     "@types/ws": "^8.18.1",
     "oxfmt": "^0.47.0",
     "oxlint": "^1.62.0",
     "playwright": "^1.59.1",
+    "puppeteer-core": "^24.42.0",
     "typescript": "^6.0.3"
   },
   "engines": {

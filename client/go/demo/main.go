@@ -1,4 +1,4 @@
-// Go demo for MagicCDPClient. Mirrors client/js/demo.js and client/python/demo.py.
+// Go demo for CDPModClient. Mirrors client/js/demo.js and client/python/demo.py.
 //
 // Modes:
 //   --live       Use the running Google Chrome enabled via chrome://inspect.
@@ -12,49 +12,21 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"cdpmod"
 	"golang.org/x/term"
 )
 
-func freePort() int {
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
-}
-
-func waitForJSON(url string, deadline time.Time) (map[string]any, error) {
-	for time.Now().Before(deadline) {
-		resp, err := (&http.Client{Timeout: 500 * time.Millisecond}).Get(url)
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode < 500 {
-				var data map[string]any
-				if err := json.Unmarshal(body, &data); err != nil {
-					return nil, err
-				}
-				return data, nil
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("timeout waiting for %s", url)
-}
-
-func optionsFor(mode, cdpURL, extensionPath string) Options {
+func optionsFor(mode, cdpURL, extensionPath string, launchOptions cdpmod.LaunchOptions) cdpmod.Options {
 	directNormalEventRoutes := map[string]string{
 		"Target.setDiscoverTargets": "direct_cdp",
 		"Target.createTarget":       "direct_cdp",
@@ -67,39 +39,77 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 		return base
 	}
 	if mode == "direct" {
-		return Options{
+		return cdpmod.Options{
 			CDPURL:        cdpURL,
 			ExtensionPath: extensionPath,
+			LaunchOptions: launchOptions,
 			Routes: routes(map[string]string{
-				"Magic.*":  "service_worker",
+				"Mod.*":    "service_worker",
 				"Custom.*": "service_worker",
 				"*.*":      "direct_cdp",
 			}),
 		}
 	}
-	serverRoute := "chrome_debugger"
-	if mode == "loopback" {
-		serverRoute = "loopback_cdp"
+	server := &cdpmod.ServerConfig{
+		Routes: serverRoutesFor(mode),
 	}
-	server := &ServerConfig{
-		Routes: map[string]string{
-			"Magic.*":  "service_worker",
-			"Custom.*": "service_worker",
-			"*.*":      serverRoute,
-		},
-	}
-	if mode == "loopback" {
+	if mode == "loopback" && cdpURL != "" {
 		server.LoopbackCDPURL = cdpURL
 	}
-	return Options{
+	return cdpmod.Options{
 		CDPURL:        cdpURL,
 		ExtensionPath: extensionPath,
+		LaunchOptions: launchOptions,
 		Routes: routes(map[string]string{
-			"Magic.*":  "service_worker",
+			"Mod.*":    "service_worker",
 			"Custom.*": "service_worker",
 			"*.*":      "service_worker",
 		}),
 		Server: server,
+	}
+}
+
+func serverRoutesFor(mode string) map[string]string {
+	serverRoute := "auto"
+	if mode == "loopback" {
+		serverRoute = "loopback_cdp"
+	} else if mode == "debugger" {
+		serverRoute = "chrome_debugger"
+	}
+	return map[string]string{
+		"Mod.*":    "service_worker",
+		"Custom.*": "service_worker",
+		"*.*":      serverRoute,
+	}
+}
+
+func mustMap(value any, label string) map[string]any {
+	result, ok := value.(map[string]any)
+	if !ok {
+		log.Fatalf("%s returned non-object value: %v", label, value)
+	}
+	return result
+}
+
+func mustString(value any, label string) string {
+	result, ok := value.(string)
+	if !ok || result == "" {
+		log.Fatalf("%s returned non-string value: %v", label, value)
+	}
+	return result
+}
+
+func waitForEvent(ch <-chan map[string]any, label string, predicate func(map[string]any) bool) map[string]any {
+	timeout := time.After(3 * time.Second)
+	for {
+		select {
+		case event := <-ch:
+			if predicate(event) {
+				return event
+			}
+		case <-timeout:
+			log.Fatalf("timed out waiting for %s", label)
+		}
 	}
 }
 
@@ -134,9 +144,10 @@ func main() {
 	// Resolve repo root from this source file so the demo runs correctly from
 	// any CWD (`go run ./client/go`, `go run .` from inside client/go, etc.).
 	_, thisFile, _, _ := runtime.Caller(0)
-	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
 	extensionPath := filepath.Join(root, "dist", "extension")
 	var cdpURL string
+	launchOptions := cdpmod.LaunchOptions{}
 	if live {
 		var err error
 		cdpURL, err = waitForLiveCDPURL()
@@ -144,38 +155,21 @@ func main() {
 			log.Fatal(err)
 		}
 	} else {
-		profile, _ := os.MkdirTemp("", "magic-cdp-go.")
-		defer os.RemoveAll(profile)
-
-		chromePort := freePort()
-		chromeFlags := []string{
-			"--disable-gpu",
-			"--enable-unsafe-extension-debugging", "--remote-allow-origins=*",
-			"--no-first-run", "--no-default-browser-check",
-			"--remote-debugging-port=" + strconv.Itoa(chromePort),
-			"--user-data-dir=" + profile,
-			"--load-extension=" + extensionPath,
-			"about:blank",
-		}
+		headless := false
+		sandbox := true
 		if runtime.GOOS == "linux" {
-			chromeFlags = append([]string{"--headless=new", "--no-sandbox"}, chromeFlags...)
+			headless = true
+			sandbox = false
 		}
-		chrome := exec.Command(chromePath, chromeFlags...)
-		if err := chrome.Start(); err != nil {
-			log.Fatal(err)
+		launchOptions = cdpmod.LaunchOptions{
+			ExecutablePath: chromePath,
+			ExtraArgs:      []string{"--load-extension=" + extensionPath},
+			Headless:       &headless,
+			Sandbox:        &sandbox,
 		}
-		defer func() { _ = chrome.Process.Kill(); _, _ = chrome.Process.Wait() }()
-
-		httpURL := fmt.Sprintf("http://127.0.0.1:%d", chromePort)
-		version, err := waitForJSON(httpURL+"/json/version", time.Now().Add(10*time.Second))
-		if err != nil {
-			log.Fatal(err)
-		}
-		cdpURL, _ = version["webSocketDebuggerUrl"].(string)
 	}
-	fmt.Println("upstream cdp:", cdpURL)
 
-	cdp := New(optionsFor(mode, cdpURL, extensionPath))
+	cdp := cdpmod.New(optionsFor(mode, cdpURL, extensionPath, launchOptions))
 	var (
 		eventsMu            sync.Mutex
 		targetCreatedEvents []map[string]any
@@ -194,53 +188,118 @@ func main() {
 		log.Fatalf("connect: %v", err)
 	}
 	defer cdp.Close()
+	fmt.Println("upstream cdp:", cdp.CDPURL)
 	fmt.Printf("connected; ext %s session %s\n", cdp.ExtensionID, cdp.ExtSessionID)
 	if b, err := json.Marshal(cdp.Latency); err == nil {
 		fmt.Println("ping latency      ->", string(b))
 	}
 
-	if r, err := cdp.Send("Browser.getVersion", nil); err != nil {
-		fmt.Println("Browser.getVersion -> (rejected by route:", err, ")")
+	configureParams := map[string]any{"routes": serverRoutesFor(mode)}
+	if mode == "loopback" {
+		configureParams["loopback_cdp_url"] = cdp.CDPURL
+	}
+	configure := mustMap(mustSend(cdp, "Mod.configure", configureParams), "Mod.configure")
+	configureRoutes := mustMap(configure["routes"], "Mod.configure.routes")
+	if configureRoutes["*.*"] != serverRoutesFor(mode)["*.*"] {
+		log.Fatalf("unexpected Mod.configure result: %v", configure)
+	}
+	fmt.Println("Mod.configure    ->", configureRoutes)
+
+	pongCh := make(chan map[string]any, 16)
+	cdp.On("Mod.pong", func(data any) {
+		if event, ok := data.(map[string]any); ok {
+			pongCh <- event
+		}
+	})
+	pingSentAt := time.Now().UnixMilli()
+	ping := mustMap(mustSend(cdp, "Mod.ping", map[string]any{"sentAt": pingSentAt}), "Mod.ping")
+	pong := waitForEvent(pongCh, "Mod.pong", func(event map[string]any) bool {
+		return event["sentAt"] == float64(pingSentAt) || event["sentAt"] == pingSentAt
+	})
+	if ping["ok"] != true || pong["receivedAt"] == nil || pong["from"] != "extension-service-worker" {
+		log.Fatalf("unexpected Mod.ping/Mod.pong result: ping=%v pong=%v", ping, pong)
+	}
+	fmt.Println("Mod.ping/pong    ->", ping, pong)
+
+	if mode == "debugger" {
+		if r, err := cdp.Send("Browser.getVersion", nil); err == nil {
+			version := mustMap(r, "Browser.getVersion")
+			_ = mustString(version["protocolVersion"], "Browser.getVersion.protocolVersion")
+			_ = mustString(version["product"], "Browser.getVersion.product")
+			b, _ := json.Marshal(version)
+			fmt.Println("Browser.getVersion ->", string(b))
+		} else {
+			fmt.Println("Browser.getVersion -> (debugger route rejected:", err, ")")
+		}
+		runtimeEval := mustMap(mustSend(cdp, "Runtime.evaluate", map[string]any{
+			"expression":    "(() => 42)()",
+			"returnByValue": true,
+		}), "Runtime.evaluate")
+		runtimeResult := mustMap(runtimeEval["result"], "Runtime.evaluate.result")
+		if runtimeResult["value"] != float64(42) && runtimeResult["value"] != 42 {
+			log.Fatalf("unexpected Runtime.evaluate result: %v", runtimeEval)
+		}
+		b, _ := json.Marshal(runtimeEval)
+		fmt.Println("Runtime.evaluate ->", string(b))
 	} else {
-		b, _ := json.Marshal(r)
+		version := mustMap(mustSend(cdp, "Browser.getVersion", nil), "Browser.getVersion")
+		_ = mustString(version["protocolVersion"], "Browser.getVersion.protocolVersion")
+		_ = mustString(version["product"], "Browser.getVersion.product")
+		b, _ := json.Marshal(version)
 		fmt.Println("Browser.getVersion ->", string(b))
 	}
 
-	if r, err := cdp.Send("Magic.evaluate", map[string]any{
+	if r, err := cdp.Send("Mod.evaluate", map[string]any{
 		"expression": "({ extensionId: chrome.runtime.id })",
 	}); err != nil {
-		log.Fatalf("Magic.evaluate: %v", err)
+		log.Fatalf("Mod.evaluate: %v", err)
 	} else {
-		magicEval, _ := r.(map[string]any)
-		if magicEval["extensionId"] != cdp.ExtensionID {
-			log.Fatalf("unexpected Magic.evaluate result: %v", magicEval)
+		cdpmodEval, _ := r.(map[string]any)
+		if cdpmodEval["extensionId"] != cdp.ExtensionID {
+			log.Fatalf("unexpected Mod.evaluate result: %v", cdpmodEval)
 		}
 		b, _ := json.Marshal(r)
-		fmt.Println("Magic.evaluate     ->", string(b))
+		fmt.Println("Mod.evaluate     ->", string(b))
 	}
 
-	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
+	echoRegistration := mustMap(mustSend(cdp, "Mod.addCustomCommand", map[string]any{
+		"name":       "Custom.echo",
+		"expression": `async (params, method) => ({ echoed: params.value, method })`,
+	}), "Mod.addCustomCommand Custom.echo")
+	if echoRegistration["registered"] != true || echoRegistration["name"] != "Custom.echo" {
+		log.Fatalf("unexpected Custom.echo registration: %v", echoRegistration)
+	}
+	echoResult := mustMap(mustSend(cdp, "Custom.echo", map[string]any{"value": "custom-command-ok"}), "Custom.echo")
+	if echoResult["echoed"] != "custom-command-ok" || echoResult["method"] != "Custom.echo" {
+		log.Fatalf("unexpected Custom.echo result: %v", echoResult)
+	}
+	b, _ := json.Marshal(echoResult)
+	fmt.Println("Custom.echo      ->", string(b))
+
+	tabCommandRegistration := mustMap(mustSend(cdp, "Mod.addCustomCommand", map[string]any{
 		"name": "Custom.TabIdFromTargetId",
 		"expression": `async ({ targetId }) => {
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.id === targetId);
           return { tabId: target?.tabId ?? null };
         }`,
-	}); err != nil {
-		log.Fatal(err)
+	}), "Mod.addCustomCommand Custom.TabIdFromTargetId")
+	if tabCommandRegistration["registered"] != true {
+		log.Fatalf("unexpected TabIdFromTargetId registration: %v", tabCommandRegistration)
 	}
-	if _, err := cdp.Send("Magic.addCustomCommand", map[string]any{
+	targetCommandRegistration := mustMap(mustSend(cdp, "Mod.addCustomCommand", map[string]any{
 		"name": "Custom.targetIdFromTabId",
 		"expression": `async ({ tabId }) => {
           const targets = await chrome.debugger.getTargets();
           const target = targets.find(target => target.type === "page" && target.tabId === tabId);
           return { targetId: target?.id ?? null };
         }`,
-	}); err != nil {
-		log.Fatal(err)
+	}), "Mod.addCustomCommand Custom.targetIdFromTabId")
+	if targetCommandRegistration["registered"] != true {
+		log.Fatalf("unexpected targetIdFromTabId registration: %v", targetCommandRegistration)
 	}
 	for _, phase := range []string{"response", "event"} {
-		if _, err := cdp.Send("Magic.addMiddleware", map[string]any{
+		middlewareRegistration := mustMap(mustSend(cdp, "Mod.addMiddleware", map[string]any{
 			"name":  "*",
 			"phase": phase,
 			"expression": `async (payload, next) => {
@@ -257,13 +316,36 @@ func main() {
               await visit(payload);
               return next(payload);
             }`,
-		}); err != nil {
-			log.Fatal(err)
+		}), "Mod.addMiddleware "+phase)
+		if middlewareRegistration["registered"] != true || middlewareRegistration["phase"] != phase {
+			log.Fatalf("unexpected %s middleware registration: %v", phase, middlewareRegistration)
 		}
 	}
 
-	if _, err := cdp.Send("Magic.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}); err != nil {
-		log.Fatal(err)
+	demoEventCh := make(chan map[string]any, 16)
+	cdp.On("Custom.demoEvent", func(data any) {
+		if event, ok := data.(map[string]any); ok {
+			demoEventCh <- event
+		}
+	})
+	demoEventRegistration := mustMap(mustSend(cdp, "Mod.addCustomEvent", map[string]any{"name": "Custom.demoEvent"}), "Mod.addCustomEvent Custom.demoEvent")
+	if demoEventRegistration["registered"] != true || demoEventRegistration["name"] != "Custom.demoEvent" {
+		log.Fatalf("unexpected Custom.demoEvent registration: %v", demoEventRegistration)
+	}
+	emitResult := mustMap(mustSend(cdp, "Mod.evaluate", map[string]any{
+		"expression": `async () => await CDPMod.emit("Custom.demoEvent", { value: "custom-event-ok" })`,
+	}), "Custom.demoEvent emit")
+	if emitResult["emitted"] != true {
+		log.Fatalf("unexpected Custom.demoEvent emit result: %v", emitResult)
+	}
+	demoEvent := waitForEvent(demoEventCh, "Custom.demoEvent", func(event map[string]any) bool {
+		return event["value"] == "custom-event-ok"
+	})
+	fmt.Println("Custom.demoEvent ->", demoEvent)
+
+	foregroundEventRegistration := mustMap(mustSend(cdp, "Mod.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}), "Mod.addCustomEvent Custom.foregroundTargetChanged")
+	if foregroundEventRegistration["registered"] != true {
+		log.Fatalf("unexpected foreground event registration: %v", foregroundEventRegistration)
 	}
 	cdp.On("Custom.foregroundTargetChanged", func(p any) {
 		event, _ := p.(map[string]any)
@@ -272,7 +354,7 @@ func main() {
 		foregroundEvents = append(foregroundEvents, event)
 		eventsMu.Unlock()
 	})
-	if _, err := cdp.Send("Magic.evaluate", map[string]any{
+	if _, err := cdp.Send("Mod.evaluate", map[string]any{
 		"expression": `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
             const targets = await chrome.debugger.getTargets();
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
@@ -286,7 +368,7 @@ func main() {
 	if _, err := cdp.Send("Target.setDiscoverTargets", map[string]any{"discover": true}); err != nil {
 		log.Fatal(err)
 	}
-	createdRaw, err := cdp.Send("Target.createTarget", map[string]any{"url": "https://example.com"})
+	createdRaw, err := cdp.Send("Target.createTarget", map[string]any{"url": "https://example.com", "background": true})
 	if err != nil {
 		log.Fatalf("Target.createTarget: %v", err)
 	}
@@ -345,12 +427,12 @@ func main() {
 		log.Fatalf("Custom.TabIdFromTargetId: %v", err)
 	}
 	tabFromTarget, _ := tabFromTargetRaw.(map[string]any)
-	foregroundTabID, _ := numberAsInt64(foreground["tabId"])
-	tabID, _ := numberAsInt64(tabFromTarget["tabId"])
+	foregroundTabID, _ := foreground["tabId"].(float64)
+	tabID, _ := tabFromTarget["tabId"].(float64)
 	if tabID != foregroundTabID {
 		log.Fatalf("unexpected Custom.TabIdFromTargetId result: %v", tabFromTarget)
 	}
-	b, _ := json.Marshal(tabFromTarget)
+	b, _ = json.Marshal(tabFromTarget)
 	fmt.Println("Custom.TabIdFromTargetId ->", string(b))
 
 	targetFromTabRaw, err := cdp.Send("Custom.targetIdFromTabId", map[string]any{"tabId": foreground["tabId"]})
@@ -358,7 +440,7 @@ func main() {
 		log.Fatalf("Custom.targetIdFromTabId: %v", err)
 	}
 	targetFromTab, _ := targetFromTabRaw.(map[string]any)
-	middlewareTabID, _ := numberAsInt64(targetFromTab["tabId"])
+	middlewareTabID, _ := targetFromTab["tabId"].(float64)
 	if targetFromTab["targetId"] != createdTargetID || middlewareTabID != foregroundTabID {
 		log.Fatalf("unexpected Custom.targetIdFromTabId/middleware result: %v", targetFromTab)
 	}
@@ -372,12 +454,20 @@ func main() {
 	// (CI / piped input / /dev/null) so the demo exits cleanly after
 	// assertions.
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		cdp.On("Magic.pong", func(p any) {
+		cdp.On("Mod.pong", func(p any) {
 			b, _ := json.Marshal(p)
-			fmt.Printf("\n[event] Magic.pong %s\n", string(b))
+			fmt.Printf("\n[event] Mod.pong %s\n", string(b))
 		})
 		runRepl(cdp, mode)
 	}
+}
+
+func mustSend(cdp *cdpmod.CDPModClient, method string, params map[string]any) any {
+	result, err := cdp.Send(method, params)
+	if err != nil {
+		log.Fatalf("%s: %v", method, err)
+	}
+	return result
 }
 
 func waitForLiveCDPURL() (string, error) {
@@ -423,20 +513,20 @@ func waitForLiveCDPURL() (string, error) {
 	}
 }
 
-func runRepl(cdp *MagicCDPClient, mode string) {
+func runRepl(cdp *cdpmod.CDPModClient, mode string) {
 	fmt.Printf("\nBrowser remains running. Mode: %s.\n", mode)
 	fmt.Println("Enter commands as Domain.method({...JSON params...}). Examples:")
 	fmt.Println(`  Browser.getVersion({})`)
-	fmt.Println(`  Magic.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
+	fmt.Println(`  Mod.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
 	fmt.Println(`  Custom.TabIdFromTargetId({"targetId": "..."})`)
 	fmt.Println("Type exit or quit to disconnect (browser keeps running).")
 	cmdRE := regexp.MustCompile(`^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$`)
 	sc := bufio.NewScanner(os.Stdin)
-	fmt.Print("MagicCDP> ")
+	fmt.Print("CDPMod> ")
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
-			fmt.Print("MagicCDP> ")
+			fmt.Print("CDPMod> ")
 			continue
 		}
 		if line == "exit" || line == "quit" {
@@ -445,7 +535,7 @@ func runRepl(cdp *MagicCDPClient, mode string) {
 		m := cmdRE.FindStringSubmatch(line)
 		if m == nil {
 			fmt.Println("error: format: Domain.method({...JSON...})")
-			fmt.Print("MagicCDP> ")
+			fmt.Print("CDPMod> ")
 			continue
 		}
 		method := m[1]
@@ -454,18 +544,18 @@ func runRepl(cdp *MagicCDPClient, mode string) {
 		if raw != "" {
 			if err := json.Unmarshal([]byte(raw), &params); err != nil {
 				fmt.Printf("error: parse params: %v\n", err)
-				fmt.Print("MagicCDP> ")
+				fmt.Print("CDPMod> ")
 				continue
 			}
 		}
 		result, err := cdp.Send(method, params)
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
-			fmt.Print("MagicCDP> ")
+			fmt.Print("CDPMod> ")
 			continue
 		}
 		b, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(b))
-		fmt.Print("MagicCDP> ")
+		fmt.Print("CDPMod> ")
 	}
 }
