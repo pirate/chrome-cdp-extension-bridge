@@ -91,8 +91,7 @@ export type CDPModsPayloadSchemaSpec = z.infer<typeof CDPModsPayloadSchemaSpecSc
 export function normalizeCDPModsPayloadSchema(schema: CDPModsPayloadSchemaSpec | null | undefined) {
   if (!schema) return null;
   if (isZodType(schema)) return schema;
-  if (Object.values(schema).length > 0 && Object.values(schema).every(isZodType))
-    return z.object(schema as CDPModsPayloadShape).passthrough();
+  if (Object.values(schema).every(isZodType)) return z.object(schema as CDPModsPayloadShape).passthrough();
   if (schema.type === "object") return z.object({}).passthrough();
   throw new Error("Unsupported payload schema; pass a Zod schema, Zod shape, or object JSON schema.");
 }
