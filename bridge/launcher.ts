@@ -27,6 +27,7 @@ const CANDIDATE_PATHS = [
 
 const DEFAULT_FLAGS = [
   "--enable-unsafe-extension-debugging",
+  "--enable-extensions",
   "--remote-allow-origins=*",
   "--no-first-run",
   "--no-default-browser-check",

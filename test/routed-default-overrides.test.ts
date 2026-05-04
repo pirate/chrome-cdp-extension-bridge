@@ -3,6 +3,8 @@ import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { chromium } from "playwright";
+
 import { launchChrome } from "../bridge/launcher.js";
 import { CDPModClient } from "../client/js/CDPModClient.js";
 import { commands, events } from "../types/zod.js";
@@ -114,9 +116,10 @@ async (payload, next) => {
 
 test("service-worker routed standard CDP commands and events can be transformed", { timeout: 45_000 }, async () => {
   const chrome = await launchChrome({
-    headless: process.platform === "linux",
+    executable_path: chromium.executablePath(),
+    headless: true,
     sandbox: process.platform !== "linux",
-    extra_args: [`--load-extension=${EXTENSION_PATH}`],
+    extra_args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
   });
   const cdp = new CDPModClient({
     cdp_url: chrome.cdpUrl,

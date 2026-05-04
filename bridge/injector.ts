@@ -107,30 +107,44 @@ export async function injectExtensionIfNeeded({
       session_id,
     };
   };
+  const discoverReadyServiceWorker = async (session_timeout_ms = 2_000) => {
+    const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+    if (trust_matched_service_worker) {
+      const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as
+        | TargetInfo
+        | undefined;
+      if (trusted_target) {
+        const probed = await probeTarget(trusted_target, session_timeout_ms);
+        if (probed) return { source: "trusted" as const, ...probed };
+      }
+    }
+    for (const candidate of target_infos) {
+      if (candidate.type !== "service_worker") continue;
+      if (!candidate.url.startsWith("chrome-extension://")) continue;
+      try {
+        const probed = await probeTarget(candidate as TargetInfo, session_timeout_ms);
+        if (probed) return { source: "discovered" as const, ...probed };
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  };
+  const waitForReadyServiceWorker = async (timeout_ms: number) => {
+    const deadline = Date.now() + timeout_ms;
+    while (Date.now() < deadline) {
+      const discovered = await discoverReadyServiceWorker(Math.min(2_000, Math.max(100, deadline - Date.now())));
+      if (discovered) return discovered;
+      await sleep(100);
+    }
+    return null;
+  };
 
   // 1. Discover an existing CDPMod service worker from the current CDP target
   // snapshot. If no already-ready worker is visible, move on to the explicit
   // injection path instead of waiting on a guessed preinstalled-extension budget.
-  const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
-  if (trust_matched_service_worker) {
-    const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as
-      | TargetInfo
-      | undefined;
-    if (trusted_target) {
-      const probed = await probeTarget(trusted_target, 2_000);
-      if (probed) return { source: "trusted", ...probed };
-    }
-  }
-  for (const candidate of target_infos) {
-    if (candidate.type !== "service_worker") continue;
-    if (!candidate.url.startsWith("chrome-extension://")) continue;
-    try {
-      const probed = await probeTarget(candidate as TargetInfo, 2_000);
-      if (probed) return { source: "discovered", ...probed };
-    } catch {
-      continue;
-    }
-  }
+  const discovered = await discoverReadyServiceWorker();
+  if (discovered) return discovered;
   if (require_service_worker_target) {
     throw new Error(
       `Required CDPMod service worker target was not visible in the current CDP target snapshot ` +
@@ -150,28 +164,8 @@ export async function injectExtensionIfNeeded({
       const load_error = error instanceof Error ? error : new Error(String(error));
       if (/Method not available|Method.*not.*found|wasn't found/i.test(load_error.message)) {
         load_unpacked_unavailable_error = load_error;
-        const target_infos = TargetCommands["Target.getTargets"].result.parse(
-          await send("Target.getTargets"),
-        ).targetInfos;
-        if (trust_matched_service_worker) {
-          const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as
-            | TargetInfo
-            | undefined;
-          if (trusted_target) {
-            const probed = await probeTarget(trusted_target, 2_000);
-            if (probed) return { source: "trusted", ...probed };
-          }
-        }
-        for (const candidate of target_infos) {
-          if (candidate.type !== "service_worker") continue;
-          if (!candidate.url.startsWith("chrome-extension://")) continue;
-          try {
-            const probed = await probeTarget(candidate as TargetInfo, 2_000);
-            if (probed) return { source: "discovered", ...probed };
-          } catch {
-            continue;
-          }
-        }
+        const discovered = await discoverReadyServiceWorker();
+        if (discovered) return discovered;
       } else {
         throw new Error(
           `Extensions.loadUnpacked failed for ${extension_path}: ${load_error.message}\n` +
@@ -217,6 +211,9 @@ export async function injectExtensionIfNeeded({
   // 4. Chrome's new chrome://inspect auto-connect flow exposes CDP without
   // exposing Extensions.loadUnpacked. In that case, inject the same server into
   // every currently running extension service worker and keep the best session.
+  const late_discovered = await waitForReadyServiceWorker(5_000);
+  if (late_discovered) return late_discovered;
+
   const borrowed: {
     target_id: string;
     url: string;

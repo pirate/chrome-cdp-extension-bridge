@@ -19,6 +19,7 @@ import type {
   ProtocolPayload,
   ProtocolResult,
 } from "../types/cdpmod.js";
+import { registerReplayableBuiltins } from "./replayableBuiltins.js";
 
 type MiddlewarePhase = "request" | "response" | "event";
 type CDPModGlobalScope = typeof globalThis &
@@ -410,6 +411,22 @@ export function installCDPModServer(globalScope: CDPModGlobalScope = globalThis 
       }
       if (typeof handler !== "function") throw new Error(`Custom command ${name} was registered without a handler.`);
       commandHandlers.set(name, { name, handler, paramsSchema, resultSchema, expression });
+      return { name, registered: true };
+    },
+
+    /**
+     * Internal built-in command registration.
+     *
+     * This intentionally bypasses the custom command Domain.method restriction
+     * because CDPMod-owned namespaces such as Mod.DOM.queryElement are grouped
+     * more narrowly than public custom commands. Do not use this for user
+     * supplied commands.
+     */
+    addBuiltinCommand({ name, paramsSchema = null, resultSchema = null, handler }: CDPModCustomCommandRegistration) {
+      name = normalizeCDPModName(name);
+      if (!/^[^.]+(?:\.[^.]+)+$/.test(name)) throw new Error("name must be in Dotted.command form.");
+      if (typeof handler !== "function") throw new Error(`Built-in command ${name} was registered without a handler.`);
+      commandHandlers.set(name, { name, handler, paramsSchema, resultSchema, expression: null });
       return { name, registered: true };
     },
 
@@ -816,6 +833,8 @@ export function installCDPModServer(globalScope: CDPModGlobalScope = globalThis 
     name: "Mod.addMiddleware",
     handler: async (params: ProtocolParams = {}) => CDPModServer.addMiddleware(params as CDPModMiddlewareRegistration),
   });
+
+  if (typeof registerReplayableBuiltins === "function") registerReplayableBuiltins(CDPModServer, globalScope);
 
   const chromeApi = globalScope.chrome;
   try {

@@ -7,19 +7,28 @@
     "url": "git+https://github.com/pirate/cdpmod.git"
   },
   "type": "module",
+  "types": "./types/client.d.ts",
   "exports": {
     ".": {
-      "types": "./client/js/CDPModClient.ts",
+      "types": "./types/client.d.ts",
       "import": "./dist/client/js/CDPModClient.js"
     },
     "./client": {
-      "types": "./client/js/CDPModClient.ts",
+      "types": "./types/client.d.ts",
       "import": "./dist/client/js/CDPModClient.js"
     },
     "./extension/service_worker.js": "./dist/extension/service_worker.js",
     "./extension/CDPModServer.js": "./dist/extension/CDPModServer.js",
     "./extension/translate.js": "./dist/extension/translate.js",
     "./bridge/translate.js": "./dist/bridge/translate.js",
+    "./types/replayable.js": {
+      "types": "./types/replayable.ts",
+      "import": "./dist/types/replayable.js"
+    },
+    "./types/cdpmod.js": {
+      "types": "./types/cdpmod.ts",
+      "import": "./dist/types/cdpmod.js"
+    },
     "./types/*": "./dist/types/*",
     "./types/zod/*": "./dist/types/zod/*"
   },
@@ -37,8 +46,9 @@
     "demo:go": "pnpm run build && (cd client/go && go run ./demo)",
     "demo:proxy:playwright": "pnpm run build && node dist/client/js/examples/playwright.js",
     "demo:proxy:puppeteer": "pnpm run build && node dist/client/js/examples/puppeteer.js",
+    "example:replay:hn": "pnpm run build && node examples/replay-hacker-news.js",
     "proxy": "pnpm run build && node dist/bridge/proxy.js",
-    "test": "pnpm run build && node --test \"dist/test/*.test.js\"",
+    "test": "pnpm run build && node --test --test-concurrency=2 \"dist/test/*.test.js\"",
     "prepare": "pnpm exec prek install"
   },
   "dependencies": {

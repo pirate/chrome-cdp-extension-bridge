@@ -14,6 +14,7 @@
 // oxlint-disable typescript-eslint/no-unsafe-declaration-merging -- alias members are assigned by connect().
 import type { z } from "zod";
 
+import { ReplayPageRegistry } from "./_ReplayPageRegistry.js";
 import type { CdpAliases } from "../../types/aliases.js";
 import {
   bindingNameFor,
@@ -49,6 +50,44 @@ import {
   normalizeCDPModName,
   normalizeCDPModPayloadSchema,
 } from "../../types/cdpmod.js";
+import {
+  ModBindPageParamsSchema,
+  ModElementSchema,
+  ModOpenPageParamsSchema,
+  ModPageSchema,
+  ModWaitForPageParamsSchema,
+  type ModClickResult,
+  type ModElement,
+  type ModFillResult,
+  type ModFrameHop,
+  type ModHoverResult,
+  type ModNavigationResult,
+  type ModOpenPageParams,
+  type ModPage,
+  type ModPageEvaluateParams,
+  type ModPageEvaluateResult,
+  type ModPageExpectation,
+  type ModPageGoBackParams,
+  type ModPageGoForwardParams,
+  type ModPageGotoParams,
+  type ModPageReloadParams,
+  type ModPageScreenshotParams,
+  type ModPageScreenshotResult,
+  type ModPageWaitForLoadStateParams,
+  type ModPageWaitForLoadStateResult,
+  type ModPageWaitForSelectorParams,
+  type ModPageWaitForSelectorResult,
+  type ModPageWaitForTimeoutParams,
+  type ModPageWaitForTimeoutResult,
+  type ModPressResult,
+  type PageTargetInfo,
+  type ModQueryElementResult,
+  type ModScrollResult,
+  type ModSelector,
+  type ModTextResult,
+  type ModTypeResult,
+  type ModWaitForPageParams,
+} from "../../types/replayable.js";
 
 const DEFAULT_LIVE_CDP_URL = "http://127.0.0.1:9222";
 
@@ -57,7 +96,7 @@ type PendingCommand = {
   resolve: (value: ProtocolResult) => void;
   reject: (error: Error) => void;
 };
-type ClientOptions = {
+export type CDPModClientOptions = {
   cdp_url?: string | null;
   extension_path?: string;
   routes?: CDPModRoutes;
@@ -80,10 +119,201 @@ type ClientOptions = {
     handleCommand: (method: string, params?: ProtocolParams, cdpSessionId?: string | null) => Promise<ProtocolResult>;
   } | null;
 };
-type CDPModEventNameInput = string | symbol | (z.ZodType & CDPModNamedValue);
-type CDPModClientCustomCommandParams = Omit<CDPModAddCustomCommandParams, "expression"> & {
+export type CDPModEventNameInput = string | symbol | (z.ZodType & CDPModNamedValue);
+export type CDPModClientCustomCommandParams = Omit<CDPModAddCustomCommandParams, "expression"> & {
   expression?: string | null;
 };
+export type ModFrameOptions = "IFRAME" | "FRAME" | { assertNodeName?: "IFRAME" | "FRAME" };
+export type ModWaitForPageOptions = Omit<ModWaitForPageParams, "opener"> & {
+  opener?: ModPage | ModPageHandle;
+};
+export type ModPageGotoOptions = Partial<Omit<ModPageGotoParams, "page" | "url">>;
+export type ModPageReloadOptions = Partial<Omit<ModPageReloadParams, "page">>;
+export type ModPageGoBackOptions = Partial<Omit<ModPageGoBackParams, "page">>;
+export type ModPageGoForwardOptions = Partial<Omit<ModPageGoForwardParams, "page">>;
+export type ModPageScreenshotOptions = Partial<Omit<ModPageScreenshotParams, "page">>;
+export type ModPageEvaluateOptions = Partial<Omit<ModPageEvaluateParams, "page" | "frames" | "expression">>;
+export type ModPageWaitForSelectorOptions = Partial<Omit<ModPageWaitForSelectorParams, "page" | "frames" | "selector">>;
+export type ModInputScrollOptions = {
+  selector?: ModSelector;
+  deltaX?: number;
+  deltaY: number;
+};
+
+export class ModPageHandle {
+  readonly object = "mod.page";
+  readonly id: string;
+
+  #client: CDPModClient;
+  #frames: ModFrameHop[];
+
+  constructor(client: CDPModClient, page: ModPage, frames: ModFrameHop[] = []) {
+    this.#client = client;
+    this.id = page.id;
+    this.#frames = frames;
+  }
+
+  get ref(): ModPage {
+    return { object: "mod.page", id: this.id };
+  }
+
+  get frames(): readonly ModFrameHop[] {
+    return this.#frames;
+  }
+
+  toJSON(): ModPage {
+    return this.ref;
+  }
+
+  frame(owner: ModSelector, options: ModFrameOptions = "IFRAME"): ModPageHandle {
+    const assertNodeName = typeof options === "string" ? options : (options.assertNodeName ?? "IFRAME");
+    return new ModPageHandle(this.#client, this.ref, [...this.#frames, { owner, assertNodeName }]);
+  }
+
+  async send(method: string, params: Record<string, unknown> = {}) {
+    if (
+      method === "Mod.DOM.elementText" ||
+      method === "Mod.Input.clickElement" ||
+      method === "Mod.Input.typeElement" ||
+      method === "Mod.Input.hoverElement" ||
+      method === "Mod.Input.fillElement" ||
+      method === "Mod.Input.pressElement" ||
+      method === "Mod.Input.scrollElement"
+    ) {
+      return this.#client.send(method, params);
+    }
+    if (method.startsWith("Mod.DOM.") || method.startsWith("Mod.Input.")) {
+      return this.#client.send(method, {
+        ...params,
+        page: params.page ?? this.ref,
+        frames: params.frames ?? this.#frames,
+      });
+    }
+    if (method === "Mod.Page.evaluate" || method === "Mod.Page.waitForSelector") {
+      return this.#client.send(method, {
+        ...params,
+        page: params.page ?? this.ref,
+        frames: params.frames ?? this.#frames,
+      });
+    }
+    if (method.startsWith("Mod.Page.")) {
+      return this.#client.send(method, {
+        ...params,
+        page: params.page ?? this.ref,
+      });
+    }
+    return this.#client.send(method, params);
+  }
+
+  async goto(url: string, options: ModPageGotoOptions = {}): Promise<ModNavigationResult> {
+    return (await this.send("Mod.Page.goto", { ...options, url })) as ModNavigationResult;
+  }
+
+  async reload(options: ModPageReloadOptions = {}): Promise<ModNavigationResult> {
+    return (await this.send("Mod.Page.reload", options)) as ModNavigationResult;
+  }
+
+  async goBack(options: ModPageGoBackOptions = {}): Promise<ModNavigationResult> {
+    return (await this.send("Mod.Page.goBack", options)) as ModNavigationResult;
+  }
+
+  async goForward(options: ModPageGoForwardOptions = {}): Promise<ModNavigationResult> {
+    return (await this.send("Mod.Page.goForward", options)) as ModNavigationResult;
+  }
+
+  async waitForLoadState(
+    state: ModPageWaitForLoadStateParams["state"],
+    options: Partial<Omit<ModPageWaitForLoadStateParams, "page" | "state">> = {},
+  ): Promise<ModPageWaitForLoadStateResult> {
+    return (await this.send("Mod.Page.waitForLoadState", { ...options, state })) as ModPageWaitForLoadStateResult;
+  }
+
+  async waitForTimeout(ms: number): Promise<ModPageWaitForTimeoutResult> {
+    return (await this.send("Mod.Page.waitForTimeout", { ms })) as ModPageWaitForTimeoutResult;
+  }
+
+  async screenshot(options: ModPageScreenshotOptions = {}): Promise<ModPageScreenshotResult> {
+    return (await this.send("Mod.Page.screenshot", options)) as ModPageScreenshotResult;
+  }
+
+  async evaluate(expression: string, options: ModPageEvaluateOptions = {}): Promise<ModPageEvaluateResult> {
+    return (await this.send("Mod.Page.evaluate", { ...options, expression })) as ModPageEvaluateResult;
+  }
+
+  async waitForSelector(
+    selector: ModSelector,
+    options: ModPageWaitForSelectorOptions = {},
+  ): Promise<ModPageWaitForSelectorResult> {
+    const result = (await this.send("Mod.Page.waitForSelector", {
+      ...options,
+      selector,
+    })) as ModPageWaitForSelectorResult;
+    if (result.element) result.element = ModElementSchema.parse(result.element);
+    return result;
+  }
+
+  async query(selector: ModSelector, options: { id?: string } = {}): Promise<ModElement> {
+    const result = (await this.send("Mod.DOM.queryElement", { ...options, selector })) as ModQueryElementResult;
+    return ModElementSchema.parse(result.element);
+  }
+
+  async text(selector: ModSelector): Promise<string> {
+    const result = (await this.send("Mod.DOM.text", { selector })) as ModTextResult;
+    return result.text;
+  }
+
+  async click(selector: ModSelector): Promise<ModClickResult> {
+    return (await this.send("Mod.Input.click", { selector })) as ModClickResult;
+  }
+
+  async type(selector: ModSelector, text: string): Promise<ModTypeResult> {
+    return (await this.send("Mod.Input.type", { selector, text })) as ModTypeResult;
+  }
+
+  async hover(selector: ModSelector): Promise<ModHoverResult> {
+    return (await this.send("Mod.Input.hover", { selector })) as ModHoverResult;
+  }
+
+  async fill(selector: ModSelector, value: string): Promise<ModFillResult> {
+    return (await this.send("Mod.Input.fill", { selector, value })) as ModFillResult;
+  }
+
+  async press(key: string): Promise<ModPressResult> {
+    return (await this.send("Mod.Input.press", { key })) as ModPressResult;
+  }
+
+  async scroll(options: ModInputScrollOptions): Promise<ModScrollResult> {
+    return (await this.send("Mod.Input.scroll", options)) as ModScrollResult;
+  }
+
+  async waitForPage(params: Omit<ModWaitForPageParams, "opener">): Promise<ModPageHandle> {
+    const result = (await this.#client.send("Mod.Page.waitFor", {
+      ...params,
+      opener: this.ref,
+    })) as { page: unknown };
+    return new ModPageHandle(this.#client, ModPageSchema.parse(result.page));
+  }
+}
+
+export class CDPModReplayNamespace {
+  constructor(private readonly client: CDPModClient) {}
+
+  async openPage(params: ModOpenPageParams): Promise<ModPageHandle> {
+    const result = (await this.client.send("Mod.Page.open", params)) as { page: unknown };
+    return new ModPageHandle(this.client, ModPageSchema.parse(result.page));
+  }
+
+  async waitForPage(params: ModWaitForPageOptions): Promise<ModPageHandle> {
+    const opener = params.opener instanceof ModPageHandle ? params.opener.ref : params.opener;
+    const result = (await this.client.send("Mod.Page.waitFor", { ...params, opener })) as { page: unknown };
+    return new ModPageHandle(this.client, ModPageSchema.parse(result.page));
+  }
+
+  page(page: ModPage | ModPageHandle): ModPageHandle {
+    if (page instanceof ModPageHandle) return page;
+    return new ModPageHandle(this.client, ModPageSchema.parse(page));
+  }
+}
 
 export type CDPModCommandSpec<Params = unknown, Result = unknown> = {
   params: Params;
@@ -218,6 +448,17 @@ function runtimeModuleUrl(relative_path: string) {
   return new URL(relative_path, import.meta.url).href;
 }
 
+function pageTargetMatchesExpectation(target: PageTargetInfo, expected: ModPageExpectation | undefined): boolean {
+  if (!expected) return true;
+  if (expected.url && target.url !== expected.url) return false;
+  if (expected.urlIncludes && !target.url?.includes(expected.urlIncludes)) return false;
+  return true;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function hasCommandExpression(
   command: CDPModClientCustomCommandParams,
 ): command is CDPModClientCustomCommandParams & { expression: string } {
@@ -240,7 +481,7 @@ export class CDPModClient extends CDPModEventEmitter {
   require_service_worker_target: boolean;
   service_worker_ready_expression: string | null;
   ws: WebSocket | null;
-  self: ClientOptions["self"];
+  self: CDPModClientOptions["self"];
   next_id: number;
   pending: Map<number, PendingCommand>;
   ext_session_id: string | null;
@@ -258,6 +499,8 @@ export class CDPModClient extends CDPModEventEmitter {
   event_wait_cleanups: Set<() => void>;
   auto_target_sessions: Map<string, string>;
   auto_session_targets: Map<string, Record<string, unknown>>;
+  private readonly replay_pages: ReplayPageRegistry;
+  refs: CDPModReplayNamespace;
   _prepared_extension: { path: string; close: () => Promise<void> } | null;
   _cdp: {
     send: (method: string, params?: ProtocolParams, sessionId?: string | null) => Promise<ProtocolResult>;
@@ -282,7 +525,7 @@ export class CDPModClient extends CDPModEventEmitter {
     service_worker_ready_expression = null,
     launch_options = {},
     self = null,
-  }: ClientOptions = {}) {
+  }: CDPModClientOptions = {}) {
     super();
     this.cdp_url = cdp_url;
     this.extension_path = extension_path;
@@ -318,6 +561,8 @@ export class CDPModClient extends CDPModEventEmitter {
     this.event_wait_cleanups = new Set();
     this.auto_target_sessions = new Map();
     this.auto_session_targets = new Map();
+    this.replay_pages = new ReplayPageRegistry();
+    this.refs = new CDPModReplayNamespace(this);
     this._prepared_extension = null;
     this._launched = null;
 
@@ -388,6 +633,7 @@ export class CDPModClient extends CDPModEventEmitter {
       }),
       this._sendFrame("Target.setDiscoverTargets", { discover: true }),
     ]);
+    await this._refreshTargetInfos().catch(() => {});
 
     const service_worker_url_suffixes = await this._serviceWorkerUrlSuffixes();
     const trust_service_worker_target =
@@ -446,6 +692,9 @@ export class CDPModClient extends CDPModEventEmitter {
   }
 
   async send(method: string, params: unknown = {}) {
+    if (method === "Mod.Page.open") return this._openModPage(params);
+    if (method === "Mod.Page.waitFor") return this._waitForModPage(params);
+
     const started_at = Date.now();
     const command_params = this.command_params_schemas.get(method)?.parse(params ?? {}) ?? params ?? {};
     const command = wrapCommandIfNeeded(method, command_params as ProtocolParams, {
@@ -462,6 +711,116 @@ export class CDPModClient extends CDPModEventEmitter {
       duration_ms: completed_at - started_at,
     };
     return this.command_result_schemas.get(method)?.parse(result) ?? result;
+  }
+
+  async _openModPage(raw_params: unknown) {
+    const params = ModOpenPageParamsSchema.parse(raw_params ?? {});
+    const page = this._createModPage(params.id);
+    const { targetId } = (await this._sendFrame("Target.createTarget", { url: params.url })) as { targetId?: string };
+    if (!targetId) throw new Error("Target.createTarget returned no targetId.");
+
+    await this._waitForPageTarget(
+      (target) => target.targetId === targetId && (!params.url || target.url === params.url),
+      `Timed out waiting for page target ${targetId} to navigate to ${params.url}.`,
+    );
+    await this._bindModPage(page, targetId);
+    return { page };
+  }
+
+  async _waitForModPage(raw_params: unknown) {
+    const params = ModWaitForPageParamsSchema.parse(raw_params ?? {});
+    const page = this._createModPage(params.id);
+    const timeout_ms = params.timeoutMs ?? 10_000;
+    const started_at = Date.now();
+    await this._refreshTargetInfos().catch(() => {});
+    const baseline = new Set(this._pageTargetInfos().map((target) => target.targetId));
+    const opener_target_id = params.opener ? this.replay_pages.targetIdForPage(params.opener) : null;
+    if (params.opener && !opener_target_id) {
+      throw new Error(`Unknown opener ModPage id "${params.opener.id}".`);
+    }
+
+    while (Date.now() - started_at < timeout_ms) {
+      await this._refreshTargetInfos().catch(() => {});
+      const scoped_targets = this.replay_pages.unboundPageTargetInfos(baseline, opener_target_id);
+      await Promise.all(scoped_targets.filter((target) => !target.url).map((target) => this._resumeTarget(target)));
+      if (scoped_targets.some((target) => !target.url)) await this._refreshTargetInfos().catch(() => {});
+      const candidates = scoped_targets
+        .map((target) => this.replay_pages.targetInfo(target.targetId) ?? target)
+        .filter((target) => pageTargetMatchesExpectation(target, params.expected));
+      if (candidates.length === 1) {
+        await this._bindModPage(page, candidates[0].targetId);
+        return { page };
+      }
+      if (candidates.length > 1) {
+        throw new Error(`Mod.Page.waitFor expected exactly one new page, found ${candidates.length}.`);
+      }
+      await sleep(100);
+    }
+
+    throw new Error(`Mod.Page.waitFor timed out after ${timeout_ms}ms.`);
+  }
+
+  _createModPage(id?: string): ModPage {
+    return this.replay_pages.createPage(id);
+  }
+
+  async _bindModPage(page: ModPage, target_id: string) {
+    const params = ModBindPageParamsSchema.parse({ page, targetId: target_id });
+    const result = await this.send("Mod.Page.bind", params);
+    const bound_page = ModPageSchema.parse((result as { page?: unknown }).page);
+    this.replay_pages.bindPage(bound_page, target_id);
+    return bound_page;
+  }
+
+  async _waitForPageTarget(predicate: (target: PageTargetInfo) => boolean, message: string, timeout_ms = 10_000) {
+    const deadline = Date.now() + timeout_ms;
+    while (Date.now() < deadline) {
+      await this._refreshTargetInfos().catch(() => {});
+      const target = this._pageTargetInfos().find(predicate);
+      if (target) return target;
+      await sleep(100);
+    }
+    throw new Error(message);
+  }
+
+  async _refreshTargetInfos() {
+    const result = (await this._sendFrame("Target.getTargets")) as { targetInfos?: unknown[] };
+    for (const target_info of result.targetInfos || []) this._upsertTargetInfo(target_info);
+  }
+
+  _pageTargetInfos(): PageTargetInfo[] {
+    return this.replay_pages.pageTargetInfos();
+  }
+
+  _upsertTargetInfo(value: unknown) {
+    this.replay_pages.upsertTargetInfo(value);
+  }
+
+  _removeTargetInfo(target_id: string) {
+    this.replay_pages.removeTarget(target_id);
+  }
+
+  async _resumeTarget(target: PageTargetInfo) {
+    if (!this.replay_pages.takeResumeAttempt(target.targetId)) return;
+    let session_id = this.auto_target_sessions.get(target.targetId) ?? null;
+    let attached_here = false;
+    try {
+      if (!session_id) {
+        const attached = (await this._sendFrame("Target.attachToTarget", {
+          targetId: target.targetId,
+          flatten: true,
+        })) as { sessionId?: string };
+        session_id = attached.sessionId ?? null;
+        attached_here = Boolean(session_id);
+      }
+      if (!session_id) return;
+      await this._sendFrame("Runtime.runIfWaitingForDebugger", {}, session_id).catch(() => {});
+      await this._sendFrame("Page.enable", {}, session_id).catch(() => {});
+    } finally {
+      if (attached_here && session_id) {
+        await this._sendFrame("Target.detachFromTarget", { sessionId: session_id }).catch(() => {});
+      }
+    }
   }
 
   async _hydrateCdpAliases() {
@@ -749,10 +1108,19 @@ export class CDPModClient extends CDPModEventEmitter {
           ? (params.targetInfo as Record<string, unknown>)
           : null;
       const target_id = typeof target_info?.targetId === "string" ? target_info.targetId : null;
+      this._upsertTargetInfo(target_info);
       if (session_id && target_id) {
         this.auto_target_sessions.set(target_id, session_id);
         this.auto_session_targets.set(session_id, target_info as Record<string, unknown>);
+        void this._sendFrame("Runtime.runIfWaitingForDebugger", {}, session_id).catch(() => {});
       }
+    } else if (event.method === "Target.targetCreated" || event.method === "Target.targetInfoChanged") {
+      const params = (event.params || {}) as Record<string, unknown>;
+      this._upsertTargetInfo(params.targetInfo);
+    } else if (event.method === "Target.targetDestroyed") {
+      const params = (event.params || {}) as Record<string, unknown>;
+      const target_id = typeof params.targetId === "string" ? params.targetId : null;
+      if (target_id) this._removeTargetInfo(target_id);
     } else if (event.method === "Target.detachedFromTarget") {
       const params = (event.params || {}) as Record<string, unknown>;
       const session_id = typeof params.sessionId === "string" ? params.sessionId : null;
