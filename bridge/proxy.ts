@@ -54,7 +54,8 @@ import {
   CDPModsEvaluateParamsSchema,
   normalizeCDPModsName,
 } from "../types/cdpmods.js";
-import { events } from "../types/zod.js";
+import { events as RuntimeEvents } from "../types/zod/Runtime.js";
+import { events as TargetEvents } from "../types/zod/Target.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_EXTENSION_PATH = path.resolve(ROOT, "..", "extension");
@@ -451,7 +452,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
   if (event.method === "Runtime.bindingCalled" && event.sessionId === state.extSessionId) {
     const u = unwrapEventIfNeeded(
       event.method,
-      events["Runtime.bindingCalled"].parse(event.params || {}),
+      RuntimeEvents["Runtime.bindingCalled"].parse(event.params || {}),
       event.sessionId || null,
       null,
     );
@@ -474,7 +475,7 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
   // event, msg.params.targetInfo.targetId is the SW target (which we want to
   // act on), not a target the client owns.
   if (event.method === "Target.attachedToTarget") {
-    const attached = events["Target.attachedToTarget"].parse(event.params || {});
+    const attached = TargetEvents["Target.attachedToTarget"].parse(event.params || {});
     if (state.hiddenTargetIds.has(attached.targetInfo.targetId)) {
       const orphan = attached.sessionId;
       if (orphan && orphan !== state.extSessionId) {

@@ -18,7 +18,8 @@
 //   4. Otherwise throw with explicit instructions for all failure modes.
 
 import type { ProtocolParams, ProtocolResult } from "../types/cdpmods.js";
-import { commands } from "../types/zod.js";
+import { commands as RuntimeCommands } from "../types/zod/Runtime.js";
+import { commands as TargetCommands } from "../types/zod/Target.js";
 import { installCDPModsServer } from "../extension/CDPModsServer.js";
 
 const EXT_ID_FROM_URL = /^chrome-extension:\/\/([a-z]+)\//;
@@ -84,7 +85,7 @@ export async function injectExtensionIfNeeded({
   const probeTarget = async (target: TargetInfo) => {
     const session_id = sessionIdForTarget(target.targetId);
     if (session_id == null) return null;
-    const probe = commands["Runtime.evaluate"].result.parse(
+    const probe = RuntimeCommands["Runtime.evaluate"].result.parse(
       await sendWithTimeout(
         "Runtime.evaluate",
         {
@@ -106,7 +107,7 @@ export async function injectExtensionIfNeeded({
   // 1. Discover an existing CDPMods service worker from the current CDP target
   // snapshot. If no already-ready worker is visible, move on to the explicit
   // injection path instead of waiting on a guessed preinstalled-extension budget.
-  const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+  const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
   if (trust_matched_service_worker) {
     const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as TargetInfo | undefined;
     if (trusted_target) {
@@ -160,7 +161,7 @@ export async function injectExtensionIfNeeded({
       // can name the worker bundle anything; WXT uses background.js.
       const sw_url_prefix = `chrome-extension://${extension_id}/`;
       for (;;) {
-        const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+        const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
         const target = target_infos.find((candidate) => candidate.type === "service_worker" && candidate.url.startsWith(sw_url_prefix)) as TargetInfo | undefined;
         if (target) {
           const probed = await probeTarget(target);
@@ -182,7 +183,7 @@ export async function injectExtensionIfNeeded({
     has_tabs?: boolean;
     has_debugger?: boolean;
   }[] = [];
-  const borrowed_target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+  const borrowed_target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
   for (const target of borrowed_target_infos) {
     if (target.type !== "service_worker") continue;
     if (!target.url.startsWith("chrome-extension://")) continue;
@@ -192,7 +193,7 @@ export async function injectExtensionIfNeeded({
       session_id = sessionIdForTarget(target.targetId);
       if (session_id == null) continue;
       await send("Runtime.enable", {}, session_id).catch(() => {});
-      const bootstrap = commands["Runtime.evaluate"].result.parse(
+      const bootstrap = RuntimeCommands["Runtime.evaluate"].result.parse(
         await sendWithTimeout(
           "Runtime.evaluate",
           {
@@ -208,7 +209,7 @@ export async function injectExtensionIfNeeded({
       const value = bootstrap.result?.value || {};
       let ready = Boolean(value.ok);
       if (ready && ready_expression !== CDPMODS_READY_EXPRESSION) {
-        const probe = commands["Runtime.evaluate"].result.parse(
+        const probe = RuntimeCommands["Runtime.evaluate"].result.parse(
           await sendWithTimeout(
             "Runtime.evaluate",
             { expression: ready_expression, returnByValue: true },

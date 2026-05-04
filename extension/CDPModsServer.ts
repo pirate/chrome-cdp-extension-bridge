@@ -54,6 +54,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     event: [],
   } satisfies Record<MiddlewarePhase, CDPModsMiddlewareRegistration[]>;
   const attachedDebuggees = new Set<string>();
+  let runtime_types_promise: Promise<unknown> | null = null;
 
   const targetAutoAttachParams = {
     autoAttach: true,
@@ -316,8 +317,21 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     routes: { ...defaultRoutes },
     loopback_cdp_url: null,
     browserToken: null,
+    types: null,
+    commands: null,
+    events: null,
     startOffscreenKeepAlive,
     ensureOffscreenKeepAlive,
+
+    async loadTypes() {
+      runtime_types_promise ??= import("../types/zod.js").then((module) => {
+        this.types = module.types;
+        this.commands = module.commands;
+        this.events = module.events;
+        return module.types;
+      });
+      return runtime_types_promise;
+    },
 
     async configure(params: CDPModsConfigureParams = {}) {
       const {
@@ -393,6 +407,28 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       if (!["request", "response", "event"].includes(phase))
         throw new Error("phase must be request, response, or event.");
       if (name !== "*" && (!name || !name.includes("."))) throw new Error("name must be '*' or Domain.name form.");
+      if (typeof handler !== "function" && typeof expression === "string") {
+        handler = async (payload: ProtocolPayload, next: unknown, context: ProtocolPayload = {}) => {
+          const cdp = CDPModsServer.attachToSession(
+            typeof context?.cdpSessionId === "string" ? context.cdpSessionId : null,
+          );
+          const CDPMods = CDPModsServer;
+          const chrome = globalScope.chrome;
+          const value = new Function(
+            "payload",
+            "next",
+            "context",
+            "cdp",
+            "CDPMods",
+            "chrome",
+            `return (async () => {
+              const handler = (${expression});
+              return await handler(payload, next, context);
+            })()`,
+          );
+          return await value(payload, next, context, cdp, CDPMods, chrome);
+        };
+      }
       if (typeof handler !== "function") {
         throw new Error(`Middleware ${name}:${phase} was registered without a handler.`);
       }
@@ -475,6 +511,15 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     attachToSession(cdpSessionId: string | null = null) {
       return {
         sessionId: cdpSessionId,
+        get types() {
+          return CDPModsServer.types;
+        },
+        get commands() {
+          return CDPModsServer.commands;
+        },
+        get events() {
+          return CDPModsServer.events;
+        },
         send: (method: string, params: ProtocolParams = {}) => this.handleCommand(method, params, cdpSessionId),
         emit: (eventName: string, payload: ProtocolPayload = {}) => this.emit(eventName, payload, cdpSessionId),
       };

@@ -513,11 +513,17 @@ export class CDPModsClient extends CDPModsEventEmitter {
   }
 
   async _prepareExtensionPath() {
-    if (typeof process === "object" && process?.versions?.node) {
-      const { prepareExtensionPath } = (await import(
-        /* @vite-ignore */ runtimeModuleUrl("../../bridge/extension-path.js")
-      )) as typeof import("../../bridge/extension-path.js");
-      return await prepareExtensionPath(this.extension_path);
+    if (this.extension_path.endsWith(".zip") && typeof process === "object" && process?.versions?.node) {
+      const nodeImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
+      const [{ execFileSync }, fs, os, path] = await Promise.all(
+        ["node:child_process", "node:fs", "node:os", "node:path"].map(nodeImport),
+      );
+      const unpacked_path = fs.mkdtempSync(path.join(os.tmpdir(), "cdpmods-extension-"));
+      execFileSync("unzip", ["-q", this.extension_path, "-d", unpacked_path]);
+      return {
+        path: unpacked_path,
+        close: async () => fs.rmSync(unpacked_path, { recursive: true, force: true }),
+      };
     }
     return { path: this.extension_path, close: async () => {} };
   }

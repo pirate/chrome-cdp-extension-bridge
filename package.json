@@ -12,11 +12,16 @@
       "types": "./client/js/CDPModsClient.ts",
       "import": "./client/js/CDPModsClient.ts"
     },
+    "./client": {
+      "types": "./client/js/CDPModsClient.ts",
+      "import": "./client/js/CDPModsClient.ts"
+    },
     "./extension/service_worker.js": "./extension/service_worker.ts",
     "./extension/CDPModsServer.js": "./extension/CDPModsServer.ts",
     "./extension/translate.js": "./extension/translate.ts",
     "./bridge/translate.js": "./bridge/translate.ts",
-    "./types/*": "./types/*"
+    "./types/*": "./types/*",
+    "./types/zod/*": "./types/zod/*"
   },
   "scripts": {
     "clean": "rm -rf dist",
