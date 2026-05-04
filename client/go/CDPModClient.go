@@ -699,7 +699,11 @@ func (c *CDPModClient) sendFrameTimeout(method string, params map[string]any, se
 }
 
 func (c *CDPModClient) cdpmodServerBootstrapExpression() (string, error) {
-	body, err := os.ReadFile(filepath.Join(c.opts.ExtensionPath, "CDPModServer.js"))
+	serverPath, err := c.cdpmodServerPath()
+	if err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(serverPath)
 	if err != nil {
 		return "", err
 	}
@@ -719,7 +723,25 @@ return {
   has_tabs: Boolean(globalThis.chrome?.tabs?.query),
   has_debugger: Boolean(globalThis.chrome?.debugger?.sendCommand),
 };
-})()`, installer), nil
+	})()`, installer), nil
+}
+
+func (c *CDPModClient) cdpmodServerPath() (string, error) {
+	candidates := []string{filepath.Join(c.opts.ExtensionPath, "CDPModServer.js")}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		for dir := filepath.Dir(file); ; dir = filepath.Dir(dir) {
+			candidates = append(candidates, filepath.Join(dir, "dist", "extension", "CDPModServer.js"))
+			if parent := filepath.Dir(dir); parent == dir {
+				break
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find CDPModServer.js; checked %s", strings.Join(candidates, ", "))
 }
 
 func (c *CDPModClient) reader() {

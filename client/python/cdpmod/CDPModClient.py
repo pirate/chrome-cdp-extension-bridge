@@ -129,8 +129,19 @@ def _json_object(value: JsonValue | None) -> ProtocolResult:
     return value if isinstance(value, dict) else {}
 
 
+def cdpmod_server_path(extension_path: str) -> Path:
+    candidates = [Path(extension_path) / "CDPModServer.js"]
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / "dist" / "extension" / "CDPModServer.js")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    checked = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Unable to locate CDPModServer.js; checked: {checked}")
+
+
 def cdpmod_server_bootstrap_expression(extension_path: str) -> str:
-    server_path = Path(extension_path) / "CDPModServer.js"
+    server_path = cdpmod_server_path(extension_path)
     source = server_path.read_text()
     start = source.index("export function installCDPModServer")
     end = source.index("export const CDPModServer")
