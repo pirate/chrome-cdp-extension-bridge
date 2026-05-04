@@ -68,7 +68,7 @@ export async function freePort() {
 export async function launchChrome({
   executable_path,
   port,
-  headless = false,
+  headless = process.platform === "linux" && !process.env.DISPLAY,
   sandbox = false,
   extra_args = [],
   stdio = "ignore",

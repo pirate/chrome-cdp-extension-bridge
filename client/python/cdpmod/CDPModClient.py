@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import tempfile
@@ -306,6 +307,8 @@ class CDPModClient:
 
     def on(self, event: str, handler: Handler) -> "CDPModClient":
         self._handlers.setdefault(event, []).append(handler)
+        if self.ext_session_id is not None and "." in event:
+            self._send_frame("Runtime.addBinding", {"name": binding_name_for(event)}, self.ext_session_id)
         return self
 
     def __getattr__(self, domain: str) -> _DomainMethods:
@@ -387,7 +390,8 @@ class CDPModClient:
             "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={port}",
         ]
-        if self.launch_options.get("headless", False):
+        default_headless = sys.platform.startswith("linux") and not os.environ.get("DISPLAY")
+        if self.launch_options.get("headless", default_headless):
             args.append("--headless=new")
         if self.launch_options.get("sandbox", False) is False:
             args.append("--no-sandbox")
