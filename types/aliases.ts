@@ -2,7 +2,7 @@
 import type { z } from "zod";
 import type { cdp } from "./cdp.js";
 import { commands, events, types as runtimeTypes } from "./zod.js";
-import { Mods, normalizeCDPModsName, normalizeCDPModsPayloadSchema } from "./cdpmods.js";
+import { Mod, normalizeCDPModName, normalizeCDPModPayloadSchema } from "./cdpmod.js";
 
 export type CdpNamedValue<Name extends string = string, Kind extends string = string> = { readonly id: Name; readonly name: Name; readonly kind: Kind; meta(): { id: Name; name: Name; kind: Kind } };
 export type CdpCommandAlias<Params, Result, Name extends string> = ((params: Params) => Promise<Result>) & CdpNamedValue<Name, "command">;
@@ -1037,13 +1037,13 @@ export type CdpAliases = {
     toolInvoked: CdpEventAlias<cdp.types.ts.WebMCP.ToolInvokedEvent, "WebMCP.toolInvoked">;
     toolResponded: CdpEventAlias<cdp.types.ts.WebMCP.ToolRespondedEvent, "WebMCP.toolResponded">;
   };
-  Mods: {
-    evaluate(params: cdp.types.ts.Mods.EvaluateParams): Promise<cdp.types.ts.Mods.EvaluateResponse>;
-    addCustomCommand(params: cdp.types.ts.Mods.AddCustomCommandParams): Promise<cdp.types.ts.Mods.AddCustomCommandResponse>;
-    addCustomEvent(params: cdp.types.ts.Mods.AddCustomEventParams): Promise<cdp.types.ts.Mods.AddCustomEventResponse>;
-    addMiddleware(params: cdp.types.ts.Mods.AddMiddlewareParams): Promise<cdp.types.ts.Mods.AddMiddlewareResponse>;
-    configure(params: cdp.types.ts.Mods.ConfigureParams): Promise<cdp.types.ts.Mods.ConfigureResponse>;
-    ping(params?: cdp.types.ts.Mods.PingParams): Promise<cdp.types.ts.Mods.PingResponse>;
+  Mod: {
+    evaluate(params: cdp.types.ts.Mod.EvaluateParams): Promise<cdp.types.ts.Mod.EvaluateResponse>;
+    addCustomCommand(params: cdp.types.ts.Mod.AddCustomCommandParams): Promise<cdp.types.ts.Mod.AddCustomCommandResponse>;
+    addCustomEvent(params: cdp.types.ts.Mod.AddCustomEventParams): Promise<cdp.types.ts.Mod.AddCustomEventResponse>;
+    addMiddleware(params: cdp.types.ts.Mod.AddMiddlewareParams): Promise<cdp.types.ts.Mod.AddMiddlewareResponse>;
+    configure(params: cdp.types.ts.Mod.ConfigureParams): Promise<cdp.types.ts.Mod.ConfigureResponse>;
+    ping(params?: cdp.types.ts.Mod.PingParams): Promise<cdp.types.ts.Mod.PingResponse>;
   };
 };
 
@@ -2081,49 +2081,49 @@ export function createCdpAliases(send: CdpAliasSend, hooks: CdpAliasHooks = {}):
       toolInvoked: events["WebMCP.toolInvoked"] as CdpEventAlias<cdp.types.ts.WebMCP.ToolInvokedEvent, "WebMCP.toolInvoked">,
       toolResponded: events["WebMCP.toolResponded"] as CdpEventAlias<cdp.types.ts.WebMCP.ToolRespondedEvent, "WebMCP.toolResponded">,
     },
-    Mods: {
+    Mod: {
       evaluate: async (params?: unknown) => {
-        const parsed = Mods.EvaluateParams.parse(params ?? {});
-        return Mods.EvaluateResponse.parse(await send("Mods.evaluate", parsed));
+        const parsed = Mod.EvaluateParams.parse(params ?? {});
+        return Mod.EvaluateResponse.parse(await send("Mod.evaluate", parsed));
       },
       addCustomCommand: async (params?: unknown) => {
-        const parsed = Mods.AddCustomCommandParams.parse(params ?? {});
-        const name = normalizeCDPModsName(parsed.name);
-        const paramsSchema = normalizeCDPModsPayloadSchema(parsed.paramsSchema);
-        const resultSchema = normalizeCDPModsPayloadSchema(parsed.resultSchema);
-        const response = Mods.AddCustomCommandResponse.parse(await send("Mods.addCustomCommand", { ...parsed, name, paramsSchema: null, resultSchema: null }));
+        const parsed = Mod.AddCustomCommandParams.parse(params ?? {});
+        const name = normalizeCDPModName(parsed.name);
+        const paramsSchema = normalizeCDPModPayloadSchema(parsed.paramsSchema);
+        const resultSchema = normalizeCDPModPayloadSchema(parsed.resultSchema);
+        const response = Mod.AddCustomCommandResponse.parse(await send("Mod.addCustomCommand", { ...parsed, name, paramsSchema: null, resultSchema: null }));
         hooks.onCustomCommand?.(name, paramsSchema, resultSchema);
         return response;
       },
       addCustomEvent: async (params?: unknown) => {
-        const parsed = Mods.AddCustomEventParams.parse(params ?? {});
-        const directSchema = Mods.ZodType.safeParse(parsed);
+        const parsed = Mod.AddCustomEventParams.parse(params ?? {});
+        const directSchema = Mod.ZodType.safeParse(parsed);
         if (directSchema.success) {
-          const name = normalizeCDPModsName(directSchema.data);
-          const eventSchema = normalizeCDPModsPayloadSchema(directSchema.data);
-          const response = Mods.AddCustomEventResponse.parse(await send("Mods.addCustomEvent", { name, eventSchema: null }));
+          const name = normalizeCDPModName(directSchema.data);
+          const eventSchema = normalizeCDPModPayloadSchema(directSchema.data);
+          const response = Mod.AddCustomEventResponse.parse(await send("Mod.addCustomEvent", { name, eventSchema: null }));
           hooks.onCustomEvent?.(name, eventSchema);
           return response;
         }
-        const objectParams = Mods.AddCustomEventObjectParams.parse(parsed);
-        const name = normalizeCDPModsName(objectParams.name);
-        const eventSchema = normalizeCDPModsPayloadSchema(objectParams.eventSchema);
-        const response = Mods.AddCustomEventResponse.parse(await send("Mods.addCustomEvent", { ...objectParams, name, eventSchema: null }));
+        const objectParams = Mod.AddCustomEventObjectParams.parse(parsed);
+        const name = normalizeCDPModName(objectParams.name);
+        const eventSchema = normalizeCDPModPayloadSchema(objectParams.eventSchema);
+        const response = Mod.AddCustomEventResponse.parse(await send("Mod.addCustomEvent", { ...objectParams, name, eventSchema: null }));
         hooks.onCustomEvent?.(name, eventSchema);
         return response;
       },
       addMiddleware: async (params?: unknown) => {
-        const parsed = Mods.AddMiddlewareParams.parse(params ?? {});
-        const name = parsed.name == null ? undefined : normalizeCDPModsName(parsed.name);
-        return Mods.AddMiddlewareResponse.parse(await send("Mods.addMiddleware", { ...parsed, name }));
+        const parsed = Mod.AddMiddlewareParams.parse(params ?? {});
+        const name = parsed.name == null ? undefined : normalizeCDPModName(parsed.name);
+        return Mod.AddMiddlewareResponse.parse(await send("Mod.addMiddleware", { ...parsed, name }));
       },
       configure: async (params?: unknown) => {
-        const parsed = Mods.ConfigureParams.parse(params ?? {});
-        return Mods.ConfigureResponse.parse(await send("Mods.configure", parsed));
+        const parsed = Mod.ConfigureParams.parse(params ?? {});
+        return Mod.ConfigureResponse.parse(await send("Mod.configure", parsed));
       },
       ping: async (params?: unknown) => {
-        const parsed = Mods.PingParams.parse(params ?? {});
-        return Mods.PingResponse.parse(await send("Mods.ping", parsed));
+        const parsed = Mod.PingParams.parse(params ?? {});
+        return Mod.PingResponse.parse(await send("Mod.ping", parsed));
       },
     },
   };

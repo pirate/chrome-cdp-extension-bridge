@@ -1,6 +1,6 @@
 // @ts-nocheck
 // launcher.js: find a Chrome/Chromium binary and launch it with CDP enabled.
-// Knows nothing about CDPMods, the extension, or wrap/unwrap. Extra launch args
+// Knows nothing about CDPMod, the extension, or wrap/unwrap. Extra launch args
 // are passed through verbatim; extension discovery/injection is owned elsewhere.
 
 import { spawn } from "node:child_process";
@@ -81,7 +81,7 @@ export async function launchChrome({
 } = {}) {
   const exe = findChromeBinary(executable_path);
   const usePort = port || (await freePort());
-  const profileDir = await mkdtemp(path.join(tmpdir(), "cdpmods."));
+  const profileDir = await mkdtemp(path.join(tmpdir(), "cdpmod."));
   const flags = [
     ...DEFAULT_FLAGS,
     headless ? "--headless=new" : null,

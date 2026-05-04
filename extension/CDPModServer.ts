@@ -1,4 +1,4 @@
-// CDPModsServer: lives inside an extension service worker. Owns the registry
+// CDPModServer: lives inside an extension service worker. Owns the registry
 // of custom commands and event bindings, and emits events through the binding
 // API installed by the client (Runtime.addBinding -> globalThis[bindingName]).
 //
@@ -9,29 +9,29 @@
 import type { cdp } from "../types/cdp.js";
 import type {
   CdpDebuggeeCommandParams,
-  CDPModsConfigureParams,
-  CDPModsCustomCommandRegistration,
-  CDPModsCustomEventRegistration,
-  CDPModsMiddlewareRegistration,
-  CDPModsPingParams,
-  CDPModsRoutes,
+  CDPModConfigureParams,
+  CDPModCustomCommandRegistration,
+  CDPModCustomEventRegistration,
+  CDPModMiddlewareRegistration,
+  CDPModPingParams,
+  CDPModRoutes,
   ProtocolParams,
   ProtocolPayload,
   ProtocolResult,
-} from "../types/cdpmods.js";
+} from "../types/cdpmod.js";
 
 type MiddlewarePhase = "request" | "response" | "event";
 
-export function installCDPModsServer(globalScope: typeof globalThis = globalThis) {
-  const CDP_MODS_SERVER_VERSION = 1;
+export function installCDPModServer(globalScope: typeof globalThis = globalThis) {
+  const CDPMOD_SERVER_VERSION = 1;
   if (
-    globalScope.CDPMods?.__CDPModsServerVersion === CDP_MODS_SERVER_VERSION &&
-    globalScope.CDPMods?.handleCommand &&
-    globalScope.CDPMods?.addCustomEvent
+    globalScope.CDPMod?.__CDPModServerVersion === CDPMOD_SERVER_VERSION &&
+    globalScope.CDPMod?.handleCommand &&
+    globalScope.CDPMod?.addCustomEvent
   )
-    return globalScope.CDPMods;
+    return globalScope.CDPMod;
 
-  const BINDING_PREFIX = "__CDPMods_";
+  const BINDING_PREFIX = "__CDPMod_";
   const bindingNameFor = (eventName: string) =>
     BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
   const encodeBindingPayload = ({
@@ -44,14 +44,14 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     cdpSessionId?: string | null;
   }) => JSON.stringify({ event, data, cdpSessionId });
 
-  const commandHandlers = new Map<string, CDPModsCustomCommandRegistration>();
-  const eventBindings = new Map<string, CDPModsCustomEventRegistration>();
+  const commandHandlers = new Map<string, CDPModCustomCommandRegistration>();
+  const eventBindings = new Map<string, CDPModCustomEventRegistration>();
   const eventListeners = new Set<(event: string, data: ProtocolPayload, cdpSessionId: string | null) => void>();
   const middlewares = {
     request: [],
     response: [],
     event: [],
-  } satisfies Record<MiddlewarePhase, CDPModsMiddlewareRegistration[]>;
+  } satisfies Record<MiddlewarePhase, CDPModMiddlewareRegistration[]>;
   const attachedDebuggees = new Set<string>();
   let runtime_types_promise: Promise<unknown> | null = null;
 
@@ -62,10 +62,10 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
   } satisfies cdp.types.ts.Target.SetAutoAttachParams;
 
   const defaultRoutes = {
-    "Mods.*": "service_worker",
+    "Mod.*": "service_worker",
     "Custom.*": "service_worker",
     "*.*": "auto",
-  } satisfies CDPModsRoutes;
+  } satisfies CDPModRoutes;
 
   const browserLevelDomains = new Set(["Browser", "Target", "SystemInfo"]);
 
@@ -78,7 +78,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     number,
     { resolve: (value: ProtocolResult) => void; reject: (error: Error) => void }
   >();
-  const offscreenKeepAlivePortName = "CDPModsOffscreenKeepAlive";
+  const offscreenKeepAlivePortName = "CDPModOffscreenKeepAlive";
   const offscreenKeepAlivePath = "offscreen/keepalive.html";
   let creatingOffscreenKeepAlive: Promise<void> | null = null;
   let offscreenKeepAlivePort: chrome.runtime.Port | null = null;
@@ -98,7 +98,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     return match;
   }
 
-  function normalizeCDPModsName(
+  function normalizeCDPModName(
     value:
       | {
           cdp_command_name?: string;
@@ -207,7 +207,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
               ? (msg.params as ProtocolPayload)
               : {};
           const cdpSessionId = typeof msg.sessionId === "string" ? msg.sessionId : null;
-          void CDPModsServer.runMiddleware("event", method, payload, {
+          void CDPModServer.runMiddleware("event", method, payload, {
             cdpSessionId,
             event: { name: method, payload },
           })
@@ -217,11 +217,11 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
                 try {
                   listener(method, nextPayload, cdpSessionId);
                 } catch (error) {
-                  console.error("[CDPModsServer] event listener failed", error);
+                  console.error("[CDPModServer] event listener failed", error);
                 }
               }
             })
-            .catch((error) => console.error("[CDPModsServer] loopback event listener failed", error));
+            .catch((error) => console.error("[CDPModServer] loopback event listener failed", error));
           return;
         }
         const pending = loopbackPending.get(id);
@@ -253,8 +253,8 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
   }
 
   async function callLoopbackWS(method: string, params: ProtocolParams = {}, sessionId: string | null = null) {
-    if (!CDPModsServer.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
-    const ws = await loopbackWS(CDPModsServer.loopback_cdp_url);
+    if (!CDPModServer.loopback_cdp_url) throw new Error(`No loopback_cdp_url configured for ${method}.`);
+    const ws = await loopbackWS(CDPModServer.loopback_cdp_url);
     const id = nextLoopbackId++;
     const message: { id: number; method: string; params: ProtocolParams; sessionId?: string } = {
       id,
@@ -265,15 +265,15 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     ws.send(JSON.stringify(message));
     return new Promise<ProtocolResult>((resolve, reject) => {
       loopbackPending.set(id, { resolve, reject });
-      ws.addEventListener("error", () => reject(new Error(`CDP socket error ${CDPModsServer.loopback_cdp_url}`)), {
+      ws.addEventListener("error", () => reject(new Error(`CDP socket error ${CDPModServer.loopback_cdp_url}`)), {
         once: true,
       });
     });
   }
 
   async function initializeLoopbackCDP() {
-    if (!CDPModsServer.loopback_cdp_url) return;
-    const ws = await loopbackWS(CDPModsServer.loopback_cdp_url);
+    if (!CDPModServer.loopback_cdp_url) return;
+    const ws = await loopbackWS(CDPModServer.loopback_cdp_url);
     if (initializedLoopbackSockets.has(ws)) return;
     await callLoopbackWS("Target.setAutoAttach", targetAutoAttachParams);
     await callLoopbackWS("Target.setDiscoverTargets", { discover: true });
@@ -299,7 +299,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         .createDocument({
           url: offscreenKeepAlivePath,
           reasons: ["BLOBS"],
-          justification: "Keep CDPMods service worker active while CDP clients route commands through it.",
+          justification: "Keep CDPMod service worker active while CDP clients route commands through it.",
         })
         .finally(() => {
           creatingOffscreenKeepAlive = null;
@@ -311,8 +311,8 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     }
   }
 
-  const CDPModsServer = {
-    __CDPModsServerVersion: CDP_MODS_SERVER_VERSION,
+  const CDPModServer = {
+    __CDPModServerVersion: CDPMOD_SERVER_VERSION,
     routes: { ...defaultRoutes },
     loopback_cdp_url: null,
     browserToken: null,
@@ -332,7 +332,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       return runtime_types_promise;
     },
 
-    async configure(params: CDPModsConfigureParams = {}) {
+    async configure(params: CDPModConfigureParams = {}) {
       const {
         loopback_cdp_url = this.loopback_cdp_url,
         routes,
@@ -348,9 +348,9 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         this.routes = { ...defaultRoutes };
         await this.discoverLoopbackCDP();
       }
-      for (const command of custom_commands) this.addCustomCommand(command as CDPModsCustomCommandRegistration);
-      for (const event of custom_events) this.addCustomEvent(event as CDPModsCustomEventRegistration);
-      for (const middleware of custom_middlewares) this.addMiddleware(middleware as CDPModsMiddlewareRegistration);
+      for (const command of custom_commands) this.addCustomCommand(command as CDPModCustomCommandRegistration);
+      for (const event of custom_events) this.addCustomEvent(event as CDPModCustomEventRegistration);
+      for (const middleware of custom_middlewares) this.addMiddleware(middleware as CDPModMiddlewareRegistration);
       await initializeLoopbackCDP();
       return { loopback_cdp_url: this.loopback_cdp_url, routes: this.routes };
     },
@@ -361,26 +361,26 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       resultSchema = null,
       expression = null,
       handler,
-    }: CDPModsCustomCommandRegistration) {
-      name = normalizeCDPModsName(name);
+    }: CDPModCustomCommandRegistration) {
+      name = normalizeCDPModName(name);
       if (!/^[^.]+\.[^.]+$/.test(name)) throw new Error("name must be in Domain.method form.");
       if (typeof handler !== "function" && typeof expression === "string") {
         handler = async (params: ProtocolParams = {}, cdpSessionId: string | null = null, method: string = name) => {
-          const cdp = CDPModsServer.attachToSession(cdpSessionId);
-          const CDPMods = CDPModsServer;
+          const cdp = CDPModServer.attachToSession(cdpSessionId);
+          const CDPMod = CDPModServer;
           const chrome = globalScope.chrome;
           const value = new Function(
             "params",
             "method",
             "cdp",
-            "CDPMods",
+            "CDPMod",
             "chrome",
             `return (async () => {
               const handler = (${expression});
               return typeof handler === "function" ? await handler(params || {}, method) : handler;
             })()`,
           );
-          return await value(params, method, cdp, CDPMods, chrome);
+          return await value(params, method, cdp, CDPMod, chrome);
         };
       }
       if (typeof handler !== "function") throw new Error(`Custom command ${name} was registered without a handler.`);
@@ -388,8 +388,8 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       return { name, registered: true };
     },
 
-    addCustomEvent({ name, bindingName, eventSchema = null }: CDPModsCustomEventRegistration) {
-      name = normalizeCDPModsName(name);
+    addCustomEvent({ name, bindingName, eventSchema = null }: CDPModCustomEventRegistration) {
+      name = normalizeCDPModName(name);
       if (!/^[^.]+\.[^.]+$/.test(name)) throw new Error("name must be in Domain.event form.");
       bindingName ??= bindingNameFor(name);
       eventBindings.set(name, { name, bindingName, eventSchema });
@@ -401,32 +401,32 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       return { remove: () => eventListeners.delete(listener) };
     },
 
-    addMiddleware({ name = "*", phase, expression = null, handler }: CDPModsMiddlewareRegistration) {
-      name = normalizeCDPModsName(name);
+    addMiddleware({ name = "*", phase, expression = null, handler }: CDPModMiddlewareRegistration) {
+      name = normalizeCDPModName(name);
       if (!["request", "response", "event"].includes(phase))
         throw new Error("phase must be request, response, or event.");
       if (name !== "*" && (!name || !name.includes("."))) throw new Error("name must be '*' or Domain.name form.");
       if (typeof handler !== "function" && typeof expression === "string") {
         handler = async (payload: ProtocolPayload, next: unknown, context: ProtocolPayload = {}) => {
           const context_object = context && typeof context === "object" ? context as Record<string, unknown> : {};
-          const cdp = CDPModsServer.attachToSession(
+          const cdp = CDPModServer.attachToSession(
             typeof context_object.cdpSessionId === "string" ? context_object.cdpSessionId : null,
           );
-          const CDPMods = CDPModsServer;
+          const CDPMod = CDPModServer;
           const chrome = globalScope.chrome;
           const value = new Function(
             "payload",
             "next",
             "context",
             "cdp",
-            "CDPMods",
+            "CDPMod",
             "chrome",
             `return (async () => {
               const handler = (${expression});
               return await handler(payload, next, context);
             })()`,
           );
-          return await value(payload, next, context, cdp, CDPMods, chrome);
+          return await value(payload, next, context, cdp, CDPMod, chrome);
         };
       }
       if (typeof handler !== "function") {
@@ -499,7 +499,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         }
       } else if (upstream === "loopback_cdp") result = await this.sendLoopback(method, params);
       else if (upstream === "chrome_debugger") result = await this.sendChromeDebugger(method, params);
-      else throw new Error(`No CDPMods command registered for ${method}.`);
+      else throw new Error(`No CDPMod command registered for ${method}.`);
 
       return this.runMiddleware("response", method, result, {
         cdpSessionId,
@@ -512,13 +512,13 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       return {
         sessionId: cdpSessionId,
         get types() {
-          return CDPModsServer.types;
+          return CDPModServer.types;
         },
         get commands() {
-          return CDPModsServer.commands;
+          return CDPModServer.commands;
         },
         get events() {
-          return CDPModsServer.events;
+          return CDPModServer.events;
         },
         send: (method: string, params: ProtocolParams = {}) => this.handleCommand(method, params, cdpSessionId),
         emit: (eventName: string, payload: ProtocolPayload = {}) => this.emit(eventName, payload, cdpSessionId),
@@ -541,7 +541,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         try {
           listener(eventName, payload, cdpSessionId);
         } catch (error) {
-          console.error("[CDPModsServer] event listener failed", error);
+          console.error("[CDPModServer] event listener failed", error);
         }
       }
       if (typeof binding === "function") binding(encodeBindingPayload({ event: eventName, data: payload, cdpSessionId }));
@@ -578,7 +578,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         const result = (await callLoopbackWS(
           "Runtime.evaluate",
           {
-            expression: `globalThis.CDPMods?.browserToken === ${JSON.stringify(this.browserToken)}`,
+            expression: `globalThis.CDPMod?.browserToken === ${JSON.stringify(this.browserToken)}`,
             returnByValue: true,
           },
           sessionId,
@@ -640,7 +640,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         }
         if (!resolvedTargetId) {
           const created = (await callLoopbackWS("Target.createTarget", {
-            url: "about:blank#cdpmods",
+            url: "about:blank#cdpmod",
           })) as cdp.types.ts.Target.CreateTargetResult;
           resolvedTargetId = created.targetId || null;
         }
@@ -680,9 +680,9 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         if (!tab?.id) [tab] = await chromeApi.tabs.query({});
         if (!tab?.id) {
           try {
-            tab = await chromeApi.tabs.create({ url: "https://example.com/#cdpmods", active: true });
+            tab = await chromeApi.tabs.create({ url: "https://example.com/#cdpmod", active: true });
           } catch {
-            const win = await chromeApi.windows.create({ url: "https://example.com/#cdpmods", focused: true });
+            const win = await chromeApi.windows.create({ url: "https://example.com/#cdpmod", focused: true });
             tab = win.tabs?.[0] || null;
           }
         }
@@ -723,19 +723,19 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     },
   };
 
-  globalScope.CDPMods = CDPModsServer;
+  globalScope.CDPMod = CDPModServer;
 
-  CDPModsServer.addCustomEvent({
-    name: "Mods.pong",
-    bindingName: bindingNameFor("Mods.pong"),
+  CDPModServer.addCustomEvent({
+    name: "Mod.pong",
+    bindingName: bindingNameFor("Mod.pong"),
   });
 
-  CDPModsServer.addCustomCommand({
-    name: "Mods.ping",
-    handler: async (params: CDPModsPingParams = {}, cdpSessionId: string | null = null) => {
+  CDPModServer.addCustomCommand({
+    name: "Mod.ping",
+    handler: async (params: CDPModPingParams = {}, cdpSessionId: string | null = null) => {
       const receivedAt = Date.now();
-      await CDPModsServer.emit(
-        "Mods.pong",
+      await CDPModServer.emit(
+        "Mod.pong",
         {
           sentAt: typeof params.sentAt === "number" ? params.sentAt : receivedAt,
           receivedAt,
@@ -747,47 +747,47 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
     },
   });
 
-  CDPModsServer.addCustomCommand({
-    name: "Mods.configure",
-    handler: async (params: CDPModsConfigureParams = {}) => CDPModsServer.configure(params),
+  CDPModServer.addCustomCommand({
+    name: "Mod.configure",
+    handler: async (params: CDPModConfigureParams = {}) => CDPModServer.configure(params),
   });
 
-  CDPModsServer.addCustomCommand({
-    name: "Mods.evaluate",
+  CDPModServer.addCustomCommand({
+    name: "Mod.evaluate",
     handler: async (raw_params: ProtocolParams = {}) => {
       const { expression, params = {}, cdpSessionId = null } = raw_params as Record<string, unknown>;
-      const cdp = CDPModsServer.attachToSession(typeof cdpSessionId === "string" ? cdpSessionId : null);
-      const CDPMods = CDPModsServer;
+      const cdp = CDPModServer.attachToSession(typeof cdpSessionId === "string" ? cdpSessionId : null);
+      const CDPMod = CDPModServer;
       const chrome = globalScope.chrome;
       const value = new Function(
         "params",
         "cdp",
-        "CDPMods",
+        "CDPMod",
         "chrome",
         `return (async () => {
           const value = (${expression});
           return typeof value === "function" ? await value(params || {}) : value;
         })()`,
       );
-      return await value(params, cdp, CDPMods, chrome);
+      return await value(params, cdp, CDPMod, chrome);
     },
   });
 
-  CDPModsServer.addCustomCommand({
-    name: "Mods.addCustomCommand",
+  CDPModServer.addCustomCommand({
+    name: "Mod.addCustomCommand",
     handler: async (params: ProtocolParams = {}) =>
-      CDPModsServer.addCustomCommand(params as CDPModsCustomCommandRegistration),
+      CDPModServer.addCustomCommand(params as CDPModCustomCommandRegistration),
   });
 
-  CDPModsServer.addCustomCommand({
-    name: "Mods.addCustomEvent",
+  CDPModServer.addCustomCommand({
+    name: "Mod.addCustomEvent",
     handler: async (params: ProtocolParams = {}) =>
-      CDPModsServer.addCustomEvent(params as CDPModsCustomEventRegistration),
+      CDPModServer.addCustomEvent(params as CDPModCustomEventRegistration),
   });
 
-  CDPModsServer.addCustomCommand({
-    name: "Mods.addMiddleware",
-    handler: async (params: ProtocolParams = {}) => CDPModsServer.addMiddleware(params as CDPModsMiddlewareRegistration),
+  CDPModServer.addCustomCommand({
+    name: "Mod.addMiddleware",
+    handler: async (params: ProtocolParams = {}) => CDPModServer.addMiddleware(params as CDPModMiddlewareRegistration),
   });
 
   const chromeApi = globalScope.chrome;
@@ -812,7 +812,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
   } catch {}
   startOffscreenKeepAlive();
 
-  return CDPModsServer;
+  return CDPModServer;
 }
 
-export const CDPModsServer = installCDPModsServer(globalThis);
+export const CDPModServer = installCDPModServer(globalThis);

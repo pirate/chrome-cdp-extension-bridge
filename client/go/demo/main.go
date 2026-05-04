@@ -1,6 +1,4 @@
-//go:build cdpmods_demo
-
-// Go demo for CDPModsClient. Mirrors client/js/demo.js and client/python/demo.py.
+// Go demo for CDPModClient. Mirrors client/js/demo.js and client/python/demo.py.
 //
 // Modes:
 //   --live       Use the running Google Chrome enabled via chrome://inspect.
@@ -28,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"cdpmod"
 	"golang.org/x/term"
 )
 
@@ -56,7 +55,7 @@ func waitForJSON(url string, deadline time.Time) (map[string]any, error) {
 	return nil, fmt.Errorf("timeout waiting for %s", url)
 }
 
-func optionsFor(mode, cdpURL, extensionPath string) Options {
+func optionsFor(mode, cdpURL, extensionPath string) cdpmod.Options {
 	directNormalEventRoutes := map[string]string{
 		"Target.setDiscoverTargets": "direct_cdp",
 		"Target.createTarget":       "direct_cdp",
@@ -69,11 +68,11 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 		return base
 	}
 	if mode == "direct" {
-		return Options{
+		return cdpmod.Options{
 			CDPURL:        cdpURL,
 			ExtensionPath: extensionPath,
 			Routes: routes(map[string]string{
-				"Mods.*":  "service_worker",
+				"Mod.*":    "service_worker",
 				"Custom.*": "service_worker",
 				"*.*":      "direct_cdp",
 			}),
@@ -83,9 +82,9 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 	if mode == "loopback" {
 		serverRoute = "loopback_cdp"
 	}
-	server := &ServerConfig{
+	server := &cdpmod.ServerConfig{
 		Routes: map[string]string{
-			"Mods.*":  "service_worker",
+			"Mod.*":    "service_worker",
 			"Custom.*": "service_worker",
 			"*.*":      serverRoute,
 		},
@@ -93,11 +92,11 @@ func optionsFor(mode, cdpURL, extensionPath string) Options {
 	if mode == "loopback" {
 		server.LoopbackCDPURL = cdpURL
 	}
-	return Options{
+	return cdpmod.Options{
 		CDPURL:        cdpURL,
 		ExtensionPath: extensionPath,
 		Routes: routes(map[string]string{
-			"Mods.*":  "service_worker",
+			"Mod.*":    "service_worker",
 			"Custom.*": "service_worker",
 			"*.*":      "service_worker",
 		}),
@@ -136,7 +135,7 @@ func main() {
 	// Resolve repo root from this source file so the demo runs correctly from
 	// any CWD (`go run ./client/go`, `go run .` from inside client/go, etc.).
 	_, thisFile, _, _ := runtime.Caller(0)
-	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
 	extensionPath := filepath.Join(root, "dist", "extension")
 	var cdpURL string
 	if live {
@@ -146,7 +145,7 @@ func main() {
 			log.Fatal(err)
 		}
 	} else {
-		profile, _ := os.MkdirTemp("", "cdpmods-go.")
+		profile, _ := os.MkdirTemp("", "cdpmod-go.")
 		defer os.RemoveAll(profile)
 
 		chromePort := freePort()
@@ -177,7 +176,7 @@ func main() {
 	}
 	fmt.Println("upstream cdp:", cdpURL)
 
-	cdp := New(optionsFor(mode, cdpURL, extensionPath))
+	cdp := cdpmod.New(optionsFor(mode, cdpURL, extensionPath))
 	var (
 		eventsMu            sync.Mutex
 		targetCreatedEvents []map[string]any
@@ -208,20 +207,20 @@ func main() {
 		fmt.Println("Browser.getVersion ->", string(b))
 	}
 
-	if r, err := cdp.Send("Mods.evaluate", map[string]any{
+	if r, err := cdp.Send("Mod.evaluate", map[string]any{
 		"expression": "({ extensionId: chrome.runtime.id })",
 	}); err != nil {
-		log.Fatalf("Mods.evaluate: %v", err)
+		log.Fatalf("Mod.evaluate: %v", err)
 	} else {
-		cdpmodsEval, _ := r.(map[string]any)
-		if cdpmodsEval["extensionId"] != cdp.ExtensionID {
-			log.Fatalf("unexpected Mods.evaluate result: %v", cdpmodsEval)
+		cdpmodEval, _ := r.(map[string]any)
+		if cdpmodEval["extensionId"] != cdp.ExtensionID {
+			log.Fatalf("unexpected Mod.evaluate result: %v", cdpmodEval)
 		}
 		b, _ := json.Marshal(r)
-		fmt.Println("Mods.evaluate     ->", string(b))
+		fmt.Println("Mod.evaluate     ->", string(b))
 	}
 
-	if _, err := cdp.Send("Mods.addCustomCommand", map[string]any{
+	if _, err := cdp.Send("Mod.addCustomCommand", map[string]any{
 		"name": "Custom.TabIdFromTargetId",
 		"expression": `async ({ targetId }) => {
           const targets = await chrome.debugger.getTargets();
@@ -231,7 +230,7 @@ func main() {
 	}); err != nil {
 		log.Fatal(err)
 	}
-	if _, err := cdp.Send("Mods.addCustomCommand", map[string]any{
+	if _, err := cdp.Send("Mod.addCustomCommand", map[string]any{
 		"name": "Custom.targetIdFromTabId",
 		"expression": `async ({ tabId }) => {
           const targets = await chrome.debugger.getTargets();
@@ -242,7 +241,7 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, phase := range []string{"response", "event"} {
-		if _, err := cdp.Send("Mods.addMiddleware", map[string]any{
+		if _, err := cdp.Send("Mod.addMiddleware", map[string]any{
 			"name":  "*",
 			"phase": phase,
 			"expression": `async (payload, next) => {
@@ -264,7 +263,7 @@ func main() {
 		}
 	}
 
-	if _, err := cdp.Send("Mods.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}); err != nil {
+	if _, err := cdp.Send("Mod.addCustomEvent", map[string]any{"name": "Custom.foregroundTargetChanged"}); err != nil {
 		log.Fatal(err)
 	}
 	cdp.On("Custom.foregroundTargetChanged", func(p any) {
@@ -274,7 +273,7 @@ func main() {
 		foregroundEvents = append(foregroundEvents, event)
 		eventsMu.Unlock()
 	})
-	if _, err := cdp.Send("Mods.evaluate", map[string]any{
+	if _, err := cdp.Send("Mod.evaluate", map[string]any{
 		"expression": `chrome.tabs.onActivated.addListener(async ({ tabId }) => {
             const targets = await chrome.debugger.getTargets();
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
@@ -347,8 +346,8 @@ func main() {
 		log.Fatalf("Custom.TabIdFromTargetId: %v", err)
 	}
 	tabFromTarget, _ := tabFromTargetRaw.(map[string]any)
-	foregroundTabID, _ := numberAsInt64(foreground["tabId"])
-	tabID, _ := numberAsInt64(tabFromTarget["tabId"])
+	foregroundTabID, _ := foreground["tabId"].(float64)
+	tabID, _ := tabFromTarget["tabId"].(float64)
 	if tabID != foregroundTabID {
 		log.Fatalf("unexpected Custom.TabIdFromTargetId result: %v", tabFromTarget)
 	}
@@ -360,7 +359,7 @@ func main() {
 		log.Fatalf("Custom.targetIdFromTabId: %v", err)
 	}
 	targetFromTab, _ := targetFromTabRaw.(map[string]any)
-	middlewareTabID, _ := numberAsInt64(targetFromTab["tabId"])
+	middlewareTabID, _ := targetFromTab["tabId"].(float64)
 	if targetFromTab["targetId"] != createdTargetID || middlewareTabID != foregroundTabID {
 		log.Fatalf("unexpected Custom.targetIdFromTabId/middleware result: %v", targetFromTab)
 	}
@@ -374,9 +373,9 @@ func main() {
 	// (CI / piped input / /dev/null) so the demo exits cleanly after
 	// assertions.
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		cdp.On("Mods.pong", func(p any) {
+		cdp.On("Mod.pong", func(p any) {
 			b, _ := json.Marshal(p)
-			fmt.Printf("\n[event] Mods.pong %s\n", string(b))
+			fmt.Printf("\n[event] Mod.pong %s\n", string(b))
 		})
 		runRepl(cdp, mode)
 	}
@@ -425,20 +424,20 @@ func waitForLiveCDPURL() (string, error) {
 	}
 }
 
-func runRepl(cdp *CDPModsClient, mode string) {
+func runRepl(cdp *cdpmod.CDPModClient, mode string) {
 	fmt.Printf("\nBrowser remains running. Mode: %s.\n", mode)
 	fmt.Println("Enter commands as Domain.method({...JSON params...}). Examples:")
 	fmt.Println(`  Browser.getVersion({})`)
-	fmt.Println(`  Mods.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
+	fmt.Println(`  Mod.evaluate({"expression": "chrome.tabs.query({active: true})"})`)
 	fmt.Println(`  Custom.TabIdFromTargetId({"targetId": "..."})`)
 	fmt.Println("Type exit or quit to disconnect (browser keeps running).")
 	cmdRE := regexp.MustCompile(`^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$`)
 	sc := bufio.NewScanner(os.Stdin)
-	fmt.Print("CDPMods> ")
+	fmt.Print("CDPMod> ")
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
-			fmt.Print("CDPMods> ")
+			fmt.Print("CDPMod> ")
 			continue
 		}
 		if line == "exit" || line == "quit" {
@@ -447,7 +446,7 @@ func runRepl(cdp *CDPModsClient, mode string) {
 		m := cmdRE.FindStringSubmatch(line)
 		if m == nil {
 			fmt.Println("error: format: Domain.method({...JSON...})")
-			fmt.Print("CDPMods> ")
+			fmt.Print("CDPMod> ")
 			continue
 		}
 		method := m[1]
@@ -456,18 +455,18 @@ func runRepl(cdp *CDPModsClient, mode string) {
 		if raw != "" {
 			if err := json.Unmarshal([]byte(raw), &params); err != nil {
 				fmt.Printf("error: parse params: %v\n", err)
-				fmt.Print("CDPMods> ")
+				fmt.Print("CDPMod> ")
 				continue
 			}
 		}
 		result, err := cdp.Send(method, params)
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
-			fmt.Print("CDPMods> ")
+			fmt.Print("CDPMod> ")
 			continue
 		}
 		b, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(b))
-		fmt.Print("CDPMods> ")
+		fmt.Print("CDPMod> ")
 	}
 }

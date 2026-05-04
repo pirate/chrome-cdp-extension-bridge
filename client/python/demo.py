@@ -1,4 +1,4 @@
-"""Python demo for CDPModsClient. Mirrors client/js/demo.js.
+"""Python demo for CDPModClient. Mirrors client/js/demo.js.
 
 Modes (mirror the JS / Go demos):
     --live        Use the running Google Chrome enabled via chrome://inspect.
@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdpmods import CDPModsClient
+from cdpmod import CDPModClient
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXTENSION_PATH = ROOT / "dist" / "extension"
@@ -69,15 +69,15 @@ def client_options_for(mode, cdp_url):
         return {
             "cdp_url": cdp_url,
             "extension_path": str(EXTENSION_PATH),
-            "routes": {"Mods.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp", **direct_normal_event_routes},
+            "routes": {"Mod.*": "service_worker", "Custom.*": "service_worker", "*.*": "direct_cdp", **direct_normal_event_routes},
         }
     return {
         "cdp_url": cdp_url,
         "extension_path": str(EXTENSION_PATH),
-        "routes": {"Mods.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker", **direct_normal_event_routes},
+        "routes": {"Mod.*": "service_worker", "Custom.*": "service_worker", "*.*": "service_worker", **direct_normal_event_routes},
         "server": {
             "routes": {
-                "Mods.*": "service_worker",
+                "Mod.*": "service_worker",
                 "Custom.*": "service_worker",
                 "*.*": "loopback_cdp" if mode == "loopback" else "chrome_debugger",
             },
@@ -122,7 +122,7 @@ def main():
             cdp_url = wait_for_live_cdp_url()
         else:
             chrome_port = free_port()
-            profile_dir = tempfile.mkdtemp(prefix="cdpmods-py.")
+            profile_dir = tempfile.mkdtemp(prefix="cdpmod-py.")
             chrome_args = [
                 CHROME,
                 "--disable-gpu",
@@ -141,7 +141,7 @@ def main():
             cdp_url = wait_for_url(f"{http_url}/json/version")["webSocketDebuggerUrl"]
         print(f"upstream cdp: {cdp_url}")
 
-        cdp = CDPModsClient(**client_options_for(mode, cdp_url))
+        cdp = CDPModClient(**client_options_for(mode, cdp_url))
         foreground_events = []
         target_created_events = []
         events_lock = threading.Lock()
@@ -165,12 +165,12 @@ def main():
         try: print(f"Browser.getVersion -> {cdp.send('Browser.getVersion')}")
         except Exception as e: print(f"Browser.getVersion -> (rejected by route: {str(e).splitlines()[0]} )")
 
-        cdpmods_eval = cdp.send("Mods.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"})
-        if cdpmods_eval.get("extensionId") != cdp.extension_id:
-            raise RuntimeError(f"unexpected Mods.evaluate result {cdpmods_eval}")
-        print(f"Mods.evaluate     -> {cdpmods_eval}")
+        cdpmod_eval = cdp.send("Mod.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"})
+        if cdpmod_eval.get("extensionId") != cdp.extension_id:
+            raise RuntimeError(f"unexpected Mod.evaluate result {cdpmod_eval}")
+        print(f"Mod.evaluate     -> {cdpmod_eval}")
 
-        cdp.send("Mods.addCustomCommand", {
+        cdp.send("Mod.addCustomCommand", {
             "name": "Custom.TabIdFromTargetId",
             "expression": '''async ({ targetId }) => {
               const targets = await chrome.debugger.getTargets();
@@ -178,7 +178,7 @@ def main():
               return { tabId: target?.tabId ?? null };
             }''',
         })
-        cdp.send("Mods.addCustomCommand", {
+        cdp.send("Mod.addCustomCommand", {
             "name": "Custom.targetIdFromTabId",
             "expression": '''async ({ tabId }) => {
               const targets = await chrome.debugger.getTargets();
@@ -187,7 +187,7 @@ def main():
             }''',
         })
         for phase in ("response", "event"):
-            cdp.send("Mods.addMiddleware", {
+            cdp.send("Mod.addMiddleware", {
                 "name": "*",
                 "phase": phase,
                 "expression": '''async (payload, next) => {
@@ -206,9 +206,9 @@ def main():
                 }''',
             })
 
-        cdp.send("Mods.addCustomEvent", {"name": "Custom.foregroundTargetChanged"})
+        cdp.send("Mod.addCustomEvent", {"name": "Custom.foregroundTargetChanged"})
         cdp.on("Custom.foregroundTargetChanged", on_foreground_changed)
-        cdp.send("Mods.evaluate", {"expression": '''chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+        cdp.send("Mod.evaluate", {"expression": '''chrome.tabs.onActivated.addListener(async ({ tabId }) => {
             const targets = await chrome.debugger.getTargets();
             const target = targets.find(target => target.type === "page" && target.tabId === tabId);
             const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -258,7 +258,7 @@ def main():
         # watch events as they print. Skip when run non-interactively so the
         # demo stays CI-friendly.
         if sys.stdin.isatty():
-            cdp.on("Mods.pong", lambda e: print(f"\n[event] Mods.pong {e}"))
+            cdp.on("Mod.pong", lambda e: print(f"\n[event] Mod.pong {e}"))
             run_repl(cdp, mode)
 
         return 0
@@ -279,13 +279,13 @@ def run_repl(cdp, mode):
     print(f"\nBrowser remains running. Mode: {mode}.")
     print("Enter commands as Domain.method({...JSON params...}). Examples:")
     print('  Browser.getVersion({})')
-    print('  Mods.evaluate({"expression": "chrome.tabs.query({active: true})"})')
+    print('  Mod.evaluate({"expression": "chrome.tabs.query({active: true})"})')
     print('  Custom.TabIdFromTargetId({"targetId": "..."})')
     print("Type exit or quit to disconnect (browser keeps running).")
     cmd_re = re.compile(r"^([A-Za-z_]\w*\.[A-Za-z_]\w*)(?:\((.*)\))?$")
     while True:
         try:
-            line = input("CDPMods> ").strip()
+            line = input("CDPMod> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break

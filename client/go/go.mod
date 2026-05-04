@@ -1,4 +1,4 @@
-module cdpmods
+module cdpmod
 
 go 1.24.7
 

@@ -1,7 +1,7 @@
-// Puppeteer through the standalone CDPMods proxy.
+// Puppeteer through the standalone CDPMod proxy.
 //
 // This is intentionally a normal Puppeteer connect flow. The proxy endpoint
-// exposes the regular CDP discovery endpoints while adding Mods.* and Custom.*
+// exposes the regular CDP discovery endpoints while adding Mod.* and Custom.*
 // support to every CDPSession.
 
 import assert from "node:assert/strict";
@@ -40,13 +40,13 @@ try {
   assert.equal(typeof version.product, "string");
   console.log("Browser.getVersion ->", version.product);
 
-  const worker_info = await cdp.send("Mods.evaluate", {
+  const worker_info = await cdp.send("Mod.evaluate", {
     expression: "({ extension_id: chrome.runtime.id, service_worker_url: chrome.runtime.getURL('service_worker.js') })",
   });
   assert.equal(typeof worker_info.extension_id, "string");
-  console.log("Mods.evaluate ->", worker_info);
+  console.log("Mod.evaluate ->", worker_info);
 
-  await cdp.send("Mods.addCustomEvent", { name: "Custom.proxyEvent" });
+  await cdp.send("Mod.addCustomEvent", { name: "Custom.proxyEvent" });
   const event_received = new Promise<Record<string, unknown>>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Timed out waiting for Custom.proxyEvent")), 3000);
     cdp.on("Custom.proxyEvent", (payload) => {
@@ -55,7 +55,7 @@ try {
     });
   });
 
-  await cdp.send("Mods.addCustomCommand", {
+  await cdp.send("Mod.addCustomCommand", {
     name: "Custom.proxyEcho",
     expression: `async (params) => {
       await cdp.emit("Custom.proxyEvent", { source: "puppeteer", value: params.value });

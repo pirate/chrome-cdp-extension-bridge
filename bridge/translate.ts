@@ -1,34 +1,34 @@
 // @ts-nocheck
-// Pure stateless translation between CDPMods and raw CDP frames.
+// Pure stateless translation between CDPMod and raw CDP frames.
 // No I/O, no maps, no classes. Trivial to port to any language.
 // Used on both the Node side (proxy + client) and the extension service worker
 // side, so the binding payload format only has one definition.
 
 import type {
-  CDPModsAddCustomCommandParams,
-  CDPModsAddMiddlewareParams,
-  CDPModsBindingPayload,
-  CDPModsCustomPayload,
-  CDPModsEvaluateParams,
-  CDPModsPingParams,
-  CDPModsRoutes,
+  CDPModAddCustomCommandParams,
+  CDPModAddMiddlewareParams,
+  CDPModBindingPayload,
+  CDPModCustomPayload,
+  CDPModEvaluateParams,
+  CDPModPingParams,
+  CDPModRoutes,
   ProtocolParams,
   ProtocolResult,
   RuntimeBindingCalledEvent,
   TranslatedCommand,
-  UnwrappedCDPModsEvent,
-} from "../types/cdpmods.js";
+  UnwrappedCDPModEvent,
+} from "../types/cdpmod.js";
 import type { cdp } from "../types/cdp.js";
 
-export const BINDING_PREFIX = "__CDPMods_";
+export const BINDING_PREFIX = "__CDPMod_";
 
 export const DEFAULT_CLIENT_ROUTES = {
-  "Mods.*": "service_worker",
+  "Mod.*": "service_worker",
   "Custom.*": "service_worker",
   "*.*": "service_worker",
-} satisfies CDPModsRoutes;
+} satisfies CDPModRoutes;
 
-type TranslateOptions = { routes?: CDPModsRoutes; cdpSessionId?: string | null };
+type TranslateOptions = { routes?: CDPModRoutes; cdpSessionId?: string | null };
 
 export const bindingNameFor = (eventName: string) =>
   BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
@@ -36,7 +36,7 @@ export const bindingNameFor = (eventName: string) =>
 export const eventNameFor = (bindingName: string) =>
   bindingName.startsWith(BINDING_PREFIX) ? bindingName.slice(BINDING_PREFIX.length).replaceAll("_", ".") : null;
 
-function normalizeCDPModsName(
+function normalizeCDPModName(
   value:
     | {
         cdp_command_name?: string;
@@ -62,7 +62,7 @@ function normalizeCDPModsName(
   return name;
 }
 
-export function routeFor(method: string, routes: CDPModsRoutes = {}) {
+export function routeFor(method: string, routes: CDPModRoutes = {}) {
   if (Object.prototype.hasOwnProperty.call(routes, method)) return routes[method];
   let bestPrefixLen = -1;
   let bestRoute: string | null = null;
@@ -79,19 +79,19 @@ export function routeFor(method: string, routes: CDPModsRoutes = {}) {
   return "direct_cdp";
 }
 
-// --- outbound: CDPMods method -> Runtime.* params on the extension session --
+// --- outbound: CDPMod method -> Runtime.* params on the extension session --
 
-export function wrapCDPModsEvaluate({
+export function wrapCDPModEvaluate({
   expression,
   params = {},
   cdpSessionId = null,
-}: CDPModsEvaluateParams): cdp.types.ts.Runtime.EvaluateParams {
+}: CDPModEvaluateParams): cdp.types.ts.Runtime.EvaluateParams {
   return {
     expression: `
       (async () => {
         const params = ${JSON.stringify(params)};
-        const cdp = globalThis.CDPMods.attachToSession(${JSON.stringify(cdpSessionId)});
-        const CDPMods = globalThis.CDPMods;
+        const cdp = globalThis.CDPMod.attachToSession(${JSON.stringify(cdpSessionId)});
+        const CDPMod = globalThis.CDPMod;
         const chrome = globalThis.chrome;
         const value = (${expression});
         return typeof value === "function" ? await value(params) : value;
@@ -103,22 +103,22 @@ export function wrapCDPModsEvaluate({
   };
 }
 
-export function wrapCDPModsAddCustomCommand({
+export function wrapCDPModAddCustomCommand({
   name,
   expression,
-}: CDPModsAddCustomCommandParams): cdp.types.ts.Runtime.EvaluateParams {
-  const commandName = normalizeCDPModsName(name);
+}: CDPModAddCustomCommandParams): cdp.types.ts.Runtime.EvaluateParams {
+  const commandName = normalizeCDPModName(name);
   return {
     expression: `
       (() => {
-        return globalThis.CDPMods.addCustomCommand({
+        return globalThis.CDPMod.addCustomCommand({
           name: ${JSON.stringify(commandName)},
           paramsSchema: null,
           resultSchema: null,
           expression: ${JSON.stringify(expression)},
           handler: async (params, cdpSessionId, method) => {
-            const cdp = globalThis.CDPMods.attachToSession(cdpSessionId);
-            const CDPMods = globalThis.CDPMods;
+            const cdp = globalThis.CDPMod.attachToSession(cdpSessionId);
+            const CDPMod = globalThis.CDPMod;
             const chrome = globalThis.chrome;
             const handler = (${expression});
             return await handler(params || {}, method);
@@ -132,11 +132,11 @@ export function wrapCDPModsAddCustomCommand({
   };
 }
 
-export function wrapCDPModsAddCustomEvent({ name }: { name: string }): cdp.types.ts.Runtime.EvaluateParams {
-  const eventName = normalizeCDPModsName(name);
+export function wrapCDPModAddCustomEvent({ name }: { name: string }): cdp.types.ts.Runtime.EvaluateParams {
+  const eventName = normalizeCDPModName(name);
   return {
     expression: `
-      globalThis.CDPMods.addCustomEvent({
+      globalThis.CDPMod.addCustomEvent({
         name: ${JSON.stringify(eventName)},
         bindingName: ${JSON.stringify(bindingNameFor(eventName))},
         eventSchema: null,
@@ -148,22 +148,22 @@ export function wrapCDPModsAddCustomEvent({ name }: { name: string }): cdp.types
   };
 }
 
-export function wrapCDPModsAddMiddleware({
+export function wrapCDPModAddMiddleware({
   name = "*",
   phase,
   expression,
-}: CDPModsAddMiddlewareParams): cdp.types.ts.Runtime.EvaluateParams {
-  const middlewareName = normalizeCDPModsName(name);
+}: CDPModAddMiddlewareParams): cdp.types.ts.Runtime.EvaluateParams {
+  const middlewareName = normalizeCDPModName(name);
   return {
     expression: `
       (() => {
-        return globalThis.CDPMods.addMiddleware({
+        return globalThis.CDPMod.addMiddleware({
           name: ${JSON.stringify(middlewareName)},
           phase: ${JSON.stringify(phase)},
           expression: ${JSON.stringify(expression)},
           handler: async (payload, next, context = {}) => {
-            const cdp = globalThis.CDPMods.attachToSession(context.cdpSessionId ?? null);
-            const CDPMods = globalThis.CDPMods;
+            const cdp = globalThis.CDPMod.attachToSession(context.cdpSessionId ?? null);
+            const CDPMod = globalThis.CDPMod;
             const chrome = globalThis.chrome;
             const middleware = (${expression});
             return await middleware(payload, next, context);
@@ -183,7 +183,7 @@ export function wrapCustomCommand(
   cdpSessionId: string | null = null,
 ): cdp.types.ts.Runtime.EvaluateParams {
   return {
-    expression: `globalThis.CDPMods.handleCommand(${JSON.stringify(method)}, ${JSON.stringify(params)}, ${JSON.stringify(cdpSessionId)})`,
+    expression: `globalThis.CDPMod.handleCommand(${JSON.stringify(method)}, ${JSON.stringify(params)}, ${JSON.stringify(cdpSessionId)})`,
     awaitPromise: true,
     returnByValue: true,
     allowUnsafeEvalBlockedByCSP: true,
@@ -191,13 +191,13 @@ export function wrapCustomCommand(
 }
 
 function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, cdpSessionId: string | null = null) {
-  if (method === "Mods.ping" && !Object.prototype.hasOwnProperty.call(params, "sentAt")) {
-    params = { ...(params as CDPModsPingParams), sentAt: Date.now() };
+  if (method === "Mod.ping" && !Object.prototype.hasOwnProperty.call(params, "sentAt")) {
+    params = { ...(params as CDPModPingParams), sentAt: Date.now() };
   }
 
-  if (method === "Mods.addCustomEvent") {
+  if (method === "Mod.addCustomEvent") {
     const eventParams = params as { name: any };
-    const eventName = normalizeCDPModsName(eventParams.name);
+    const eventName = normalizeCDPModName(eventParams.name);
     return [
       {
         method: "Runtime.addBinding",
@@ -205,25 +205,25 @@ function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, c
       },
       {
         method: "Runtime.evaluate",
-        params: wrapCDPModsAddCustomEvent({ name: eventName }),
+        params: wrapCDPModAddCustomEvent({ name: eventName }),
         unwrap: "evaluate" as const,
       },
     ];
   }
 
   let runtimeParams;
-  if (method === "Mods.evaluate") {
-    const evaluateParams = params as CDPModsEvaluateParams;
-    runtimeParams = wrapCDPModsEvaluate({ ...evaluateParams, cdpSessionId: evaluateParams.cdpSessionId ?? cdpSessionId });
-  } else if (method === "Mods.addCustomCommand") {
-    runtimeParams = wrapCDPModsAddCustomCommand(params as CDPModsAddCustomCommandParams);
-  } else if (method === "Mods.addMiddleware") {
-    runtimeParams = wrapCDPModsAddMiddleware(params as CDPModsAddMiddlewareParams);
+  if (method === "Mod.evaluate") {
+    const evaluateParams = params as CDPModEvaluateParams;
+    runtimeParams = wrapCDPModEvaluate({ ...evaluateParams, cdpSessionId: evaluateParams.cdpSessionId ?? cdpSessionId });
+  } else if (method === "Mod.addCustomCommand") {
+    runtimeParams = wrapCDPModAddCustomCommand(params as CDPModAddCustomCommandParams);
+  } else if (method === "Mod.addMiddleware") {
+    runtimeParams = wrapCDPModAddMiddleware(params as CDPModAddMiddlewareParams);
   } else {
     runtimeParams = wrapCustomCommand(
       method,
       params,
-      ((params as CDPModsCustomPayload).cdpSessionId as string) ?? cdpSessionId,
+      ((params as CDPModCustomPayload).cdpSessionId as string) ?? cdpSessionId,
     );
   }
 
@@ -267,7 +267,7 @@ export function wrapCommandIfNeeded(
   throw new Error(`Unsupported client route "${route}" for ${method}`);
 }
 
-// --- inbound: Runtime.* result/event -> CDPMods value/event ----------------
+// --- inbound: Runtime.* result/event -> CDPMod value/event ----------------
 
 function unwrapEvaluateResponse(result: cdp.types.ts.Runtime.EvaluateResult) {
   if (result?.exceptionDetails) {
@@ -284,7 +284,7 @@ export function unwrapResponseIfNeeded(
   return unwrap === "evaluate" ? unwrapEvaluateResponse(result as cdp.types.ts.Runtime.EvaluateResult) : (result ?? {});
 }
 
-// Returns { event, data } or null when the binding is not a CDPMods event,
+// Returns { event, data } or null when the binding is not a CDPMod event,
 // when the payload is scoped to a different cdpSessionId than ourSessionId,
 // or when the payload string is not valid JSON.
 export function unwrapEventIfNeeded(
@@ -292,9 +292,9 @@ export function unwrapEventIfNeeded(
   params: RuntimeBindingCalledEvent,
   sessionId: string | null = null,
   ourSessionId: string | null = null,
-): UnwrappedCDPModsEvent | null {
+): UnwrappedCDPModEvent | null {
   if (method !== "Runtime.bindingCalled") return null;
-  let payload: CDPModsBindingPayload;
+  let payload: CDPModBindingPayload;
   try {
     payload = JSON.parse(params.payload || "{}");
   } catch {
@@ -311,6 +311,6 @@ export function unwrapEventIfNeeded(
 
 // --- shared encoder used by the extension service worker --------------------
 
-export function encodeBindingPayload({ event, data, cdpSessionId = null }: CDPModsBindingPayload) {
+export function encodeBindingPayload({ event, data, cdpSessionId = null }: CDPModBindingPayload) {
   return JSON.stringify({ event, data, cdpSessionId });
 }

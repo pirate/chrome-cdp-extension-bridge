@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { launchChrome } from "../bridge/launcher.js";
-import { CDPModsClient } from "../client/js/CDPModsClient.js";
+import { CDPModClient } from "../client/js/CDPModClient.js";
 import { commands, events } from "../types/zod.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -13,7 +13,7 @@ const EXTENSION_PATH = path.resolve(HERE, "..", "extension");
 const getTargetsOverride = String.raw`
 async (params) => {
   const [upstream, tabs] = await Promise.all([
-    CDPMods.sendLoopback("Target.getTargets", params),
+    CDPMod.sendLoopback("Target.getTargets", params),
     chrome.tabs.query({}),
   ]);
 
@@ -36,14 +36,14 @@ async (params) => {
 
 const setDiscoverTargetsOverride = String.raw`
 async (params) => {
-  if (!CDPMods.loopback_cdp_url) throw new Error("loopback_cdp_url is required");
+  if (!CDPMod.loopback_cdp_url) throw new Error("loopback_cdp_url is required");
 
-  const state = globalThis.__cdpmodsTargetForwarder ||= { nextId: 1, pending: new Map(), ws: null };
+  const state = globalThis.__cdpmodTargetForwarder ||= { nextId: 1, pending: new Map(), ws: null };
   const needsSocket = !state.ws || state.ws.readyState === WebSocket.CLOSING || state.ws.readyState === WebSocket.CLOSED;
 
   if (needsSocket) {
     state.ws = await new Promise((resolve, reject) => {
-      const ws = new WebSocket(CDPMods.loopback_cdp_url);
+      const ws = new WebSocket(CDPMod.loopback_cdp_url);
       ws.addEventListener("open", () => resolve(ws), { once: true });
       ws.addEventListener("error", reject, { once: true });
     });
@@ -59,7 +59,7 @@ async (params) => {
       }
 
       if (msg.method !== "Target.targetCreated") return;
-      await CDPMods.emit("Target.targetCreated", msg.params || {});
+      await CDPMod.emit("Target.targetCreated", msg.params || {});
     });
   }
 
@@ -112,7 +112,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
     sandbox: process.platform !== "linux",
     extra_args: [`--load-extension=${EXTENSION_PATH}`],
   });
-  const cdp = new CDPModsClient({
+  const cdp = new CDPModClient({
     cdp_url: chrome.cdpUrl,
     routes: {
       "Target.getTargets": "service_worker",
@@ -137,11 +137,11 @@ test("service-worker routed standard CDP commands and events can be transformed"
       "raw CDP TargetInfo should not already contain tabId",
     );
 
-    await cdp.send("Mods.addCustomCommand", {
+    await cdp.send("Mod.addCustomCommand", {
       name: "Custom.tabIdFromTargetId",
       expression: tabIdFromTargetIdCommand,
     });
-    await cdp.Mods.addMiddleware({
+    await cdp.Mod.addMiddleware({
       name: "*",
       phase: cdp.RESPONSE,
       expression: addTabIdMiddleware,
@@ -154,13 +154,13 @@ test("service-worker routed standard CDP commands and events can be transformed"
       "wildcard response middleware should add tabId next to targetId inside TargetInfo",
     );
 
-    await cdp.Mods.addMiddleware({
+    await cdp.Mod.addMiddleware({
       name: "*",
       phase: cdp.EVENT,
       expression: addTabIdMiddleware,
     });
 
-    await cdp.Mods.addCustomCommand({
+    await cdp.Mod.addCustomCommand({
       name: cdp.Target.getTargets,
       expression: getTargetsOverride,
     });
@@ -179,8 +179,8 @@ test("service-worker routed standard CDP commands and events can be transformed"
       "expected at least one page target to be matched to a chrome.tabs tab id",
     );
 
-    await cdp.Mods.addCustomEvent({ name: cdp.Target.targetCreated });
-    await cdp.Mods.addCustomCommand({
+    await cdp.Mod.addCustomEvent({ name: cdp.Target.targetCreated });
+    await cdp.Mod.addCustomCommand({
       name: cdp.Target.setDiscoverTargets,
       expression: setDiscoverTargetsOverride,
     });
@@ -198,7 +198,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
     });
 
     await cdp.Target.setDiscoverTargets({ discover: true });
-    await cdp._sendFrame("Target.createTarget", { url: "about:blank#cdpmods-event-test" });
+    await cdp._sendFrame("Target.createTarget", { url: "about:blank#cdpmod-event-test" });
 
     const event = events["Target.targetCreated"].parse(await forwardedEvent);
     assert.ok(Object.hasOwn(event.targetInfo, "tabId"), "transformed event targetInfo should include tabId");

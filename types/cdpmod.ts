@@ -32,13 +32,13 @@ export const TargetAttachedToTargetEventSchema = z
   .passthrough();
 export type TargetAttachedToTargetEvent = z.infer<typeof TargetAttachedToTargetEventSchema>;
 
-export const CDPModsRoutesSchema = z.object({}).catchall(z.string());
-export type CDPModsRoutes = z.infer<typeof CDPModsRoutesSchema>;
+export const CDPModRoutesSchema = z.object({}).catchall(z.string());
+export type CDPModRoutes = z.infer<typeof CDPModRoutesSchema>;
 
-export const CDPModsCustomPayloadSchema = z.object({}).passthrough();
-export type CDPModsCustomPayload = z.infer<typeof CDPModsCustomPayloadSchema>;
+export const CDPModCustomPayloadSchema = z.object({}).passthrough();
+export type CDPModCustomPayload = z.infer<typeof CDPModCustomPayloadSchema>;
 
-export type CDPModsNamedValue = {
+export type CDPModNamedValue = {
   cdp_command_name?: string;
   cdp_event_name?: string;
   id?: string;
@@ -48,7 +48,7 @@ export type CDPModsNamedValue = {
     | undefined;
 };
 
-export function normalizeCDPModsName(value: CDPModsName) {
+export function normalizeCDPModName(value: CDPModName) {
   if (typeof value === "string") return value;
   const meta = typeof value?.meta === "function" ? value.meta() : undefined;
   const name =
@@ -64,91 +64,91 @@ export function normalizeCDPModsName(value: CDPModsName) {
   return name;
 }
 
-export const CDPModsNameSchema = z.custom<string | CDPModsNamedValue>((value) => {
+export const CDPModNameSchema = z.custom<string | CDPModNamedValue>((value) => {
   try {
-    normalizeCDPModsName(value as CDPModsName);
+    normalizeCDPModName(value as CDPModName);
     return true;
   } catch {
     return false;
   }
 });
-export type CDPModsName = z.infer<typeof CDPModsNameSchema>;
+export type CDPModName = z.infer<typeof CDPModNameSchema>;
 
-export const CDPModsZodTypeSchema = z.custom<z.ZodType>(isZodType);
-export type CDPModsZodType = z.infer<typeof CDPModsZodTypeSchema>;
+export const CDPModZodTypeSchema = z.custom<z.ZodType>(isZodType);
+export type CDPModZodType = z.infer<typeof CDPModZodTypeSchema>;
 
-export const CDPModsPayloadJsonSchemaSchema = z.record(z.string(), z.unknown());
-export const CDPModsPayloadShapeSchema = z.record(z.string(), CDPModsZodTypeSchema);
-export type CDPModsPayloadShape = z.infer<typeof CDPModsPayloadShapeSchema>;
+export const CDPModPayloadJsonSchemaSchema = z.record(z.string(), z.unknown());
+export const CDPModPayloadShapeSchema = z.record(z.string(), CDPModZodTypeSchema);
+export type CDPModPayloadShape = z.infer<typeof CDPModPayloadShapeSchema>;
 
-export const CDPModsPayloadSchemaSpecSchema = z.union([
-  CDPModsZodTypeSchema,
-  CDPModsPayloadShapeSchema,
-  CDPModsPayloadJsonSchemaSchema,
+export const CDPModPayloadSchemaSpecSchema = z.union([
+  CDPModZodTypeSchema,
+  CDPModPayloadShapeSchema,
+  CDPModPayloadJsonSchemaSchema,
 ]);
-export type CDPModsPayloadSchemaSpec = z.infer<typeof CDPModsPayloadSchemaSpecSchema>;
+export type CDPModPayloadSchemaSpec = z.infer<typeof CDPModPayloadSchemaSpecSchema>;
 
-export function normalizeCDPModsPayloadSchema(schema: CDPModsPayloadSchemaSpec | null | undefined) {
+export function normalizeCDPModPayloadSchema(schema: CDPModPayloadSchemaSpec | null | undefined) {
   if (!schema) return null;
   if (isZodType(schema)) return schema;
-  if (Object.values(schema).every(isZodType)) return z.object(schema as CDPModsPayloadShape).passthrough();
+  if (Object.values(schema).every(isZodType)) return z.object(schema as CDPModPayloadShape).passthrough();
   if (schema.type === "object") return z.object({}).passthrough();
   throw new Error("Unsupported payload schema; pass a Zod schema, Zod shape, or object JSON schema.");
 }
 
-export const CDPModsEvaluateParamsSchema = z.object({
+export const CDPModEvaluateParamsSchema = z.object({
   expression: z.string(),
-  params: CDPModsCustomPayloadSchema.optional(),
+  params: CDPModCustomPayloadSchema.optional(),
   cdpSessionId: z.string().nullable().optional(),
 });
-export type CDPModsEvaluateParams = z.infer<typeof CDPModsEvaluateParamsSchema>;
+export type CDPModEvaluateParams = z.infer<typeof CDPModEvaluateParamsSchema>;
 
-export const CDPModsAddCustomCommandParamsSchema = z.object({
-  name: CDPModsNameSchema,
+export const CDPModAddCustomCommandParamsSchema = z.object({
+  name: CDPModNameSchema,
   expression: z.string(),
-  paramsSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
-  resultSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
+  paramsSchema: CDPModPayloadSchemaSpecSchema.nullable().optional(),
+  resultSchema: CDPModPayloadSchemaSpecSchema.nullable().optional(),
 });
-export type CDPModsAddCustomCommandParams = z.infer<typeof CDPModsAddCustomCommandParamsSchema>;
+export type CDPModAddCustomCommandParams = z.infer<typeof CDPModAddCustomCommandParamsSchema>;
 
-export const CDPModsAddCustomEventObjectParamsSchema = z.object({
-  name: CDPModsNameSchema,
-  eventSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
+export const CDPModAddCustomEventObjectParamsSchema = z.object({
+  name: CDPModNameSchema,
+  eventSchema: CDPModPayloadSchemaSpecSchema.nullable().optional(),
 });
-export type CDPModsAddCustomEventObjectParams = z.infer<typeof CDPModsAddCustomEventObjectParamsSchema>;
-export const CDPModsAddCustomEventParamsSchema = z.union([CDPModsZodTypeSchema, CDPModsAddCustomEventObjectParamsSchema]);
-export type CDPModsAddCustomEventParams = z.infer<typeof CDPModsAddCustomEventParamsSchema>;
+export type CDPModAddCustomEventObjectParams = z.infer<typeof CDPModAddCustomEventObjectParamsSchema>;
+export const CDPModAddCustomEventParamsSchema = z.union([CDPModZodTypeSchema, CDPModAddCustomEventObjectParamsSchema]);
+export type CDPModAddCustomEventParams = z.infer<typeof CDPModAddCustomEventParamsSchema>;
 
-export const CDPModsAddMiddlewareParamsSchema = z.object({
-  name: CDPModsNameSchema.optional(),
+export const CDPModAddMiddlewareParamsSchema = z.object({
+  name: CDPModNameSchema.optional(),
   phase: z.enum(["request", "response", "event"]),
   expression: z.string(),
 });
-export type CDPModsAddMiddlewareParams = z.infer<typeof CDPModsAddMiddlewareParamsSchema>;
+export type CDPModAddMiddlewareParams = z.infer<typeof CDPModAddMiddlewareParamsSchema>;
 
-export const CDPModsConfigureParamsSchema = z.object({
+export const CDPModConfigureParamsSchema = z.object({
   loopback_cdp_url: z.string().nullable().optional(),
-  routes: CDPModsRoutesSchema.optional(),
+  routes: CDPModRoutesSchema.optional(),
   browserToken: z.string().nullable().optional(),
-  custom_commands: z.array(CDPModsAddCustomCommandParamsSchema).optional(),
-  custom_events: z.array(CDPModsAddCustomEventObjectParamsSchema).optional(),
-  custom_middlewares: z.array(CDPModsAddMiddlewareParamsSchema).optional(),
+  custom_commands: z.array(CDPModAddCustomCommandParamsSchema).optional(),
+  custom_events: z.array(CDPModAddCustomEventObjectParamsSchema).optional(),
+  custom_middlewares: z.array(CDPModAddMiddlewareParamsSchema).optional(),
 });
-export type CDPModsConfigureParams = z.infer<typeof CDPModsConfigureParamsSchema>;
+export type CDPModConfigureParams = z.infer<typeof CDPModConfigureParamsSchema>;
 
-export const CDPModsPingParamsSchema = z.object({
+export const CDPModPingParamsSchema = z.object({
   sentAt: z.number().optional(),
 });
-export type CDPModsPingParams = z.infer<typeof CDPModsPingParamsSchema>;
+export type CDPModPingParams = z.infer<typeof CDPModPingParamsSchema>;
 
-export const CDPModsPongEventSchema = z.object({
+export const CDPModPongEventSchema = z.object({
   sentAt: z.number(),
   receivedAt: z.number(),
   from: z.string(),
 });
-export type CDPModsPongEvent = z.infer<typeof CDPModsPongEventSchema>;
+export type CDPModPongEvent = z.infer<typeof CDPModPongEventSchema>;
 
-export const CDPModsPingLatencySchema = z.object({
+export const CDPModPingLatencySchema = z.object({
   sentAt: z.number(),
   receivedAt: z.number().nullable(),
   returnedAt: z.number(),
@@ -156,77 +156,77 @@ export const CDPModsPingLatencySchema = z.object({
   serviceWorkerMs: z.number().nullable(),
   returnPathMs: z.number().nullable(),
 });
-export type CDPModsPingLatency = z.infer<typeof CDPModsPingLatencySchema>;
+export type CDPModPingLatency = z.infer<typeof CDPModPingLatencySchema>;
 
-export const CDPModsCommandParamsSchema = z.union([
-  CDPModsEvaluateParamsSchema,
-  CDPModsAddCustomCommandParamsSchema,
-  CDPModsAddCustomEventParamsSchema,
-  CDPModsAddMiddlewareParamsSchema,
-  CDPModsConfigureParamsSchema,
-  CDPModsPingParamsSchema,
-  CDPModsCustomPayloadSchema,
+export const CDPModCommandParamsSchema = z.union([
+  CDPModEvaluateParamsSchema,
+  CDPModAddCustomCommandParamsSchema,
+  CDPModAddCustomEventParamsSchema,
+  CDPModAddMiddlewareParamsSchema,
+  CDPModConfigureParamsSchema,
+  CDPModPingParamsSchema,
+  CDPModCustomPayloadSchema,
 ]);
-export type CDPModsCommandParams = z.infer<typeof CDPModsCommandParamsSchema>;
+export type CDPModCommandParams = z.infer<typeof CDPModCommandParamsSchema>;
 
-export const CDPModsCommandResultSchema = z.union([
+export const CDPModCommandResultSchema = z.union([
   z.object({ ok: z.boolean() }).passthrough(),
-  CDPModsCustomPayloadSchema,
+  CDPModCustomPayloadSchema,
 ]);
-export type CDPModsCommandResult = z.infer<typeof CDPModsCommandResultSchema>;
+export type CDPModCommandResult = z.infer<typeof CDPModCommandResultSchema>;
 
-export const CDPModsEvaluateResponseSchema = z.unknown();
-export type CDPModsEvaluateResponse = z.infer<typeof CDPModsEvaluateResponseSchema>;
+export const CDPModEvaluateResponseSchema = z.unknown();
+export type CDPModEvaluateResponse = z.infer<typeof CDPModEvaluateResponseSchema>;
 
-export const CDPModsAddCustomCommandResponseSchema = z
+export const CDPModAddCustomCommandResponseSchema = z
   .object({
     name: z.string(),
     registered: z.boolean(),
   })
   .passthrough();
-export type CDPModsAddCustomCommandResponse = z.infer<typeof CDPModsAddCustomCommandResponseSchema>;
+export type CDPModAddCustomCommandResponse = z.infer<typeof CDPModAddCustomCommandResponseSchema>;
 
-export const CDPModsAddCustomEventResponseSchema = z
+export const CDPModAddCustomEventResponseSchema = z
   .object({
     name: z.string(),
     bindingName: z.string(),
     registered: z.boolean(),
   })
   .passthrough();
-export type CDPModsAddCustomEventResponse = z.infer<typeof CDPModsAddCustomEventResponseSchema>;
+export type CDPModAddCustomEventResponse = z.infer<typeof CDPModAddCustomEventResponseSchema>;
 
-export const CDPModsAddMiddlewareResponseSchema = z
+export const CDPModAddMiddlewareResponseSchema = z
   .object({
     name: z.string(),
     phase: z.enum(["request", "response", "event"]),
     registered: z.boolean(),
   })
   .passthrough();
-export type CDPModsAddMiddlewareResponse = z.infer<typeof CDPModsAddMiddlewareResponseSchema>;
+export type CDPModAddMiddlewareResponse = z.infer<typeof CDPModAddMiddlewareResponseSchema>;
 
-export const CDPModsConfigureResponseSchema = z
+export const CDPModConfigureResponseSchema = z
   .object({
     loopback_cdp_url: z.string().nullable().optional(),
-    routes: CDPModsRoutesSchema,
+    routes: CDPModRoutesSchema,
   })
   .passthrough();
-export type CDPModsConfigureResponse = z.infer<typeof CDPModsConfigureResponseSchema>;
+export type CDPModConfigureResponse = z.infer<typeof CDPModConfigureResponseSchema>;
 
-export const CDPModsPingResponseSchema = z
+export const CDPModPingResponseSchema = z
   .object({
     ok: z.boolean(),
   })
   .passthrough();
-export type CDPModsPingResponse = z.infer<typeof CDPModsPingResponseSchema>;
+export type CDPModPingResponse = z.infer<typeof CDPModPingResponseSchema>;
 
-export const CDPModsBindingPayloadSchema = z.object({
+export const CDPModBindingPayloadSchema = z.object({
   event: z.string(),
   data: z.unknown(),
   cdpSessionId: z.string().nullable().optional(),
 });
-export type CDPModsBindingPayload = z.infer<typeof CDPModsBindingPayloadSchema>;
+export type CDPModBindingPayload = z.infer<typeof CDPModBindingPayloadSchema>;
 
-export const CdpDebuggeeCommandParamsSchema = CDPModsCustomPayloadSchema.extend({
+export const CdpDebuggeeCommandParamsSchema = CDPModCustomPayloadSchema.extend({
   debuggee: z.custom<chrome.debugger.Debuggee>().nullable().optional(),
   tabId: z.number().nullable().optional(),
   targetId: z.string().nullable().optional(),
@@ -234,16 +234,16 @@ export const CdpDebuggeeCommandParamsSchema = CDPModsCustomPayloadSchema.extend(
 });
 export type CdpDebuggeeCommandParams = z.infer<typeof CdpDebuggeeCommandParamsSchema>;
 
-export const ProtocolParamsSchema = z.union([CDPModsCommandParamsSchema, CdpCommandParamsSchema]);
+export const ProtocolParamsSchema = z.union([CdpCommandParamsSchema, CDPModCommandParamsSchema]);
 export type ProtocolParams = z.infer<typeof ProtocolParamsSchema>;
 
-export const ProtocolResultSchema = z.union([CDPModsCommandResultSchema, CdpCommandResultSchema]);
+export const ProtocolResultSchema = z.union([CdpCommandResultSchema, CDPModCommandResultSchema]);
 export type ProtocolResult = z.infer<typeof ProtocolResultSchema>;
 
 export const ProtocolEventParamsSchema = z.union([
-  CDPModsPongEventSchema,
-  CDPModsCustomPayloadSchema,
   CdpEventParamsSchema,
+  CDPModPongEventSchema,
+  CDPModCustomPayloadSchema,
 ]);
 export type ProtocolEventParams = z.infer<typeof ProtocolEventParamsSchema>;
 
@@ -251,36 +251,36 @@ export const ProtocolPayloadSchema = z.union([
   ProtocolParamsSchema,
   ProtocolResultSchema,
   ProtocolEventParamsSchema,
-  CDPModsBindingPayloadSchema,
+  CDPModBindingPayloadSchema,
   z.null(),
 ]);
 export type ProtocolPayload = z.infer<typeof ProtocolPayloadSchema>;
 
-export const CDPModsCustomCommandRegistrationSchema = CDPModsAddCustomCommandParamsSchema.extend({
+export const CDPModCustomCommandRegistrationSchema = CDPModAddCustomCommandParamsSchema.extend({
   expression: z.string().nullable().optional(),
   handler:
     z.custom<
       (params: ProtocolParams, cdpSessionId: string | null, method?: string) => ProtocolResult | Promise<ProtocolResult>
     >(),
 });
-export type CDPModsCustomCommandRegistration = z.infer<typeof CDPModsCustomCommandRegistrationSchema>;
+export type CDPModCustomCommandRegistration = z.infer<typeof CDPModCustomCommandRegistrationSchema>;
 
-export const CDPModsCustomEventRegistrationSchema = CDPModsAddCustomEventObjectParamsSchema.extend({
+export const CDPModCustomEventRegistrationSchema = CDPModAddCustomEventObjectParamsSchema.extend({
   bindingName: z.string(),
 });
-export type CDPModsCustomEventRegistration = z.infer<typeof CDPModsCustomEventRegistrationSchema>;
+export type CDPModCustomEventRegistration = z.infer<typeof CDPModCustomEventRegistrationSchema>;
 
-export const CDPModsMiddlewareRegistrationSchema = CDPModsAddMiddlewareParamsSchema.extend({
+export const CDPModMiddlewareRegistrationSchema = CDPModAddMiddlewareParamsSchema.extend({
   handler:
     z.custom<
       (
         payload: ProtocolPayload,
         next: (payload?: ProtocolPayload) => Promise<ProtocolPayload>,
-        context: CDPModsCustomPayload,
+        context: CDPModCustomPayload,
       ) => ProtocolPayload | Promise<ProtocolPayload>
     >(),
 });
-export type CDPModsMiddlewareRegistration = z.infer<typeof CDPModsMiddlewareRegistrationSchema>;
+export type CDPModMiddlewareRegistration = z.infer<typeof CDPModMiddlewareRegistrationSchema>;
 
 export const CdpErrorSchema = z
   .object({
@@ -341,14 +341,14 @@ export const TranslatedCommandSchema = z
   .passthrough();
 export type TranslatedCommand = z.infer<typeof TranslatedCommandSchema>;
 
-export const UnwrappedCDPModsEventSchema = z
+export const UnwrappedCDPModEventSchema = z
   .object({
     event: z.string(),
     data: ProtocolPayloadSchema,
     sessionId: z.string().nullable(),
   })
   .passthrough();
-export type UnwrappedCDPModsEvent = z.infer<typeof UnwrappedCDPModsEventSchema>;
+export type UnwrappedCDPModEvent = z.infer<typeof UnwrappedCDPModEventSchema>;
 
 export const ProxyPendingSchema = z
   .object({
@@ -390,32 +390,32 @@ export const ProxyConnectionStateSchema = z.object({
 });
 export type ProxyConnectionState = z.infer<typeof ProxyConnectionStateSchema>;
 
-export const Mods = {
-  Routes: CDPModsRoutesSchema,
-  CustomPayload: CDPModsCustomPayloadSchema,
-  Name: CDPModsNameSchema,
-  ZodType: CDPModsZodTypeSchema,
-  PayloadShape: CDPModsPayloadShapeSchema,
-  PayloadSchemaSpec: CDPModsPayloadSchemaSpecSchema,
-  EvaluateParams: CDPModsEvaluateParamsSchema,
-  AddCustomCommandParams: CDPModsAddCustomCommandParamsSchema,
-  AddCustomEventObjectParams: CDPModsAddCustomEventObjectParamsSchema,
-  AddCustomEventParams: CDPModsAddCustomEventParamsSchema,
-  AddMiddlewareParams: CDPModsAddMiddlewareParamsSchema,
-  ConfigureParams: CDPModsConfigureParamsSchema,
-  PingParams: CDPModsPingParamsSchema,
-  PongEvent: CDPModsPongEventSchema,
-  PingLatency: CDPModsPingLatencySchema,
-  CommandParams: CDPModsCommandParamsSchema,
-  CommandResult: CDPModsCommandResultSchema,
-  EvaluateResponse: CDPModsEvaluateResponseSchema,
-  AddCustomCommandResponse: CDPModsAddCustomCommandResponseSchema,
-  AddCustomEventResponse: CDPModsAddCustomEventResponseSchema,
-  AddMiddlewareResponse: CDPModsAddMiddlewareResponseSchema,
-  ConfigureResponse: CDPModsConfigureResponseSchema,
-  PingResponse: CDPModsPingResponseSchema,
-  BindingPayload: CDPModsBindingPayloadSchema,
-  CustomCommandRegistration: CDPModsCustomCommandRegistrationSchema,
-  CustomEventRegistration: CDPModsCustomEventRegistrationSchema,
-  MiddlewareRegistration: CDPModsMiddlewareRegistrationSchema,
+export const Mod = {
+  Routes: CDPModRoutesSchema,
+  CustomPayload: CDPModCustomPayloadSchema,
+  Name: CDPModNameSchema,
+  ZodType: CDPModZodTypeSchema,
+  PayloadShape: CDPModPayloadShapeSchema,
+  PayloadSchemaSpec: CDPModPayloadSchemaSpecSchema,
+  EvaluateParams: CDPModEvaluateParamsSchema,
+  AddCustomCommandParams: CDPModAddCustomCommandParamsSchema,
+  AddCustomEventObjectParams: CDPModAddCustomEventObjectParamsSchema,
+  AddCustomEventParams: CDPModAddCustomEventParamsSchema,
+  AddMiddlewareParams: CDPModAddMiddlewareParamsSchema,
+  ConfigureParams: CDPModConfigureParamsSchema,
+  PingParams: CDPModPingParamsSchema,
+  PongEvent: CDPModPongEventSchema,
+  PingLatency: CDPModPingLatencySchema,
+  CommandParams: CDPModCommandParamsSchema,
+  CommandResult: CDPModCommandResultSchema,
+  EvaluateResponse: CDPModEvaluateResponseSchema,
+  AddCustomCommandResponse: CDPModAddCustomCommandResponseSchema,
+  AddCustomEventResponse: CDPModAddCustomEventResponseSchema,
+  AddMiddlewareResponse: CDPModAddMiddlewareResponseSchema,
+  ConfigureResponse: CDPModConfigureResponseSchema,
+  PingResponse: CDPModPingResponseSchema,
+  BindingPayload: CDPModBindingPayloadSchema,
+  CustomCommandRegistration: CDPModCustomCommandRegistrationSchema,
+  CustomEventRegistration: CDPModCustomEventRegistrationSchema,
+  MiddlewareRegistration: CDPModMiddlewareRegistrationSchema,
 } as const;
