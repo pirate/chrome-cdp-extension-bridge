@@ -218,6 +218,12 @@ function runtimeModuleUrl(relative_path: string) {
   return new URL(relative_path, import.meta.url).href;
 }
 
+function hasCommandExpression(
+  command: CDPModClientCustomCommandParams,
+): command is CDPModClientCustomCommandParams & { expression: string } {
+  return typeof command.expression === "string" && command.expression.length > 0;
+}
+
 export class CDPModClient extends CDPModEventEmitter {
   cdp_url: string | null;
   extension_path: string;
@@ -509,14 +515,12 @@ export class CDPModClient extends CDPModEventEmitter {
   _serverConfigureParams() {
     return {
       ...(this.server ?? {}),
-      custom_commands: this.custom_commands
-        .filter((command) => typeof command.expression === "string" && command.expression.length > 0)
-        .map((command) => ({
-          name: normalizeCDPModName(command.name),
-          expression: command.expression,
-          paramsSchema: null,
-          resultSchema: null,
-        })),
+      custom_commands: this.custom_commands.filter(hasCommandExpression).map((command) => ({
+        name: normalizeCDPModName(command.name),
+        expression: command.expression,
+        paramsSchema: null,
+        resultSchema: null,
+      })),
       custom_events: this.custom_events.map((event) => ({
         name: normalizeCDPModName(event.name),
         bindingName: bindingNameFor(normalizeCDPModName(event.name)),
