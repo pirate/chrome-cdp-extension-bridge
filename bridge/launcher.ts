@@ -103,7 +103,8 @@ export async function launchChrome({
   };
 
   const cdpUrl = `http://127.0.0.1:${usePort}`;
-  const deadline = Date.now() + 15_000;
+  const chromeReadyTimeoutMs = 45_000;
+  const deadline = Date.now() + chromeReadyTimeoutMs;
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`${cdpUrl}/json/version`);
@@ -115,5 +116,5 @@ export async function launchChrome({
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await close();
-  throw new Error(`Chrome at ${cdpUrl} did not become ready within 15s`);
+  throw new Error(`Chrome at ${cdpUrl} did not become ready within ${chromeReadyTimeoutMs / 1000}s`);
 }

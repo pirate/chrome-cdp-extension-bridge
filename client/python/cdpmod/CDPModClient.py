@@ -211,6 +211,7 @@ class CDPModClient:
     def connect(self) -> "CDPModClient":
         connect_started_at = int(time.time() * 1000)
         if self.cdp_url is None:
+            self._prepare_extension_path()
             launched = self._launch_chrome()
             self.cdp_url = launched["cdp_url"]
         input_cdp_url = self.cdp_url
@@ -300,6 +301,9 @@ class CDPModClient:
         }
         return result
 
+    def raw_send(self, method: str, params: ProtocolParams | None = None) -> ProtocolResult:
+        return self._send_frame(method, params or {}, record_raw_timing=True)
+
     def on(self, event: str, handler: Handler) -> "CDPModClient":
         self._handlers.setdefault(event, []).append(handler)
         return self
@@ -386,12 +390,15 @@ class CDPModClient:
             args.append("--headless=new")
         if self.launch_options.get("sandbox", False) is False:
             args.append("--no-sandbox")
+        if self.extension_path:
+            args.append(f"--load-extension={self.extension_path}")
         extra_args = self.launch_options.get("extra_args") or []
         args.extend(extra_args)
         args.append("about:blank")
         self._launched_process = subprocess.Popen([executable_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cdp_url = f"http://127.0.0.1:{port}"
-        deadline = time.time() + 15
+        chrome_ready_timeout_s = 45
+        deadline = time.time() + chrome_ready_timeout_s
         while time.time() < deadline:
             try:
                 with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=0.5) as response:
@@ -400,7 +407,7 @@ class CDPModClient:
             except Exception:
                 time.sleep(0.1)
         self.close()
-        raise RuntimeError(f"Chrome at {cdp_url} did not become ready within 15s")
+        raise RuntimeError(f"Chrome at {cdp_url} did not become ready within {chrome_ready_timeout_s}s")
 
     # --- internals ---------------------------------------------------------
 

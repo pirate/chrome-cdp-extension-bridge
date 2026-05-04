@@ -218,6 +218,17 @@ function runtimeModuleUrl(relative_path: string) {
   return new URL(relative_path, import.meta.url).href;
 }
 
+function launchOptionsWithExtension(
+  launch_options: Record<string, unknown>,
+  extension_path: string,
+): Record<string, unknown> {
+  const extra_args = Array.isArray(launch_options.extra_args) ? [...launch_options.extra_args] : [];
+  if (!extra_args.some((arg) => typeof arg === "string" && arg.startsWith("--load-extension="))) {
+    extra_args.push(`--load-extension=${extension_path}`);
+  }
+  return { ...launch_options, extra_args };
+}
+
 function hasCommandExpression(
   command: CDPModClientCustomCommandParams,
 ): command is CDPModClientCustomCommandParams & { expression: string } {
@@ -355,7 +366,10 @@ export class CDPModClient extends CDPModEventEmitter {
             options: Record<string, unknown>,
           ) => Promise<{ wsUrl: string; close: () => Promise<void> | void }>;
         };
-        this._launched = await launchChrome(this.launch_options);
+        this._prepared_extension ??= await this._prepareExtensionPath();
+        this._launched = await launchChrome(
+          launchOptionsWithExtension(this.launch_options, this._prepared_extension.path),
+        );
         this.cdp_url = this._launched.wsUrl;
       }
     }
@@ -400,7 +414,7 @@ export class CDPModClient extends CDPModEventEmitter {
     const { injectExtensionIfNeeded } = (await import(
       /* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js")
     )) as typeof import("../../bridge/injector.js");
-    this._prepared_extension = await this._prepareExtensionPath();
+    this._prepared_extension ??= await this._prepareExtensionPath();
     ext = await injectExtensionIfNeeded({
       send: (method, params, session_id) => this._sendFrame(method, params, session_id) as Promise<ProtocolResult>,
       session_id_for_target: (target_id) => this.auto_target_sessions.get(target_id) ?? null,
