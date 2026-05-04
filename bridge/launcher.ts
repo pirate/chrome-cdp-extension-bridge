@@ -31,6 +31,7 @@ const DEFAULT_FLAGS = [
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-default-apps",
+  "--disable-dev-shm-usage",
   "--disable-background-networking",
   "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding",

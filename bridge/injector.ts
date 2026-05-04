@@ -66,7 +66,12 @@ export async function injectExtensionIfNeeded({
     service_worker_ready_expression == null || service_worker_ready_expression.length === 0
       ? CDPMOD_READY_EXPRESSION
       : `(${CDPMOD_READY_EXPRESSION}) && Boolean(${service_worker_ready_expression})`;
-  const sendWithTimeout = (method: string, params: ProtocolParams = {}, session_id: string | null = null, ms = 2_000) =>
+  const sendWithTimeout = (
+    method: string,
+    params: ProtocolParams = {},
+    session_id: string | null = null,
+    ms = 10_000,
+  ) =>
     Promise.race([
       send(method, params, session_id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${method} timed out after ${ms}ms`)), ms)),
