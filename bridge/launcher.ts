@@ -46,7 +46,7 @@ export function findChromeBinary(explicit?: string | null) {
     if (candidate && existsSync(candidate)) return candidate;
   }
   throw new Error(
-      `No Chrome/Chromium binary found. Tried: ${[explicit, ...CANDIDATE_PATHS].filter(Boolean).join(", ")}. ` +
+    `No Chrome/Chromium binary found. Tried: ${[explicit, ...CANDIDATE_PATHS].filter(Boolean).join(", ")}. ` +
       `Set CHROME_PATH or pass executable_path.`,
   );
 }

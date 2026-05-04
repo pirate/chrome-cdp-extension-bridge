@@ -11,7 +11,7 @@ const bindingPrefix = "__CDPMod_"
 
 func DefaultClientRoutes() map[string]string {
 	return map[string]string{
-		"Mod.*":  "service_worker",
+		"Mod.*":    "service_worker",
 		"Custom.*": "service_worker",
 		"*.*":      "service_worker",
 	}

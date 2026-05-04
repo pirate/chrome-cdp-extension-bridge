@@ -29,8 +29,8 @@
     "build:package": "tsc -p tsconfig.json",
     "build:extension-assets": "node -e \"const fs = require('node:fs'); fs.mkdirSync('dist/extension/offscreen', { recursive: true }); fs.copyFileSync('extension/manifest.json', 'dist/extension/manifest.json'); fs.copyFileSync('dist/bridge/translate.js', 'dist/extension/translate.js'); fs.copyFileSync('extension/offscreen/keepalive.html', 'dist/extension/offscreen/keepalive.html');\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "oxlint .",
-    "format": "oxfmt .",
+    "lint": "pnpm exec prek run --all-files",
+    "format": "pnpm exec prek run oxfmt --all-files",
     "format:check": "oxfmt --check .",
     "demo:js": "pnpm run build && node dist/client/js/demo.js",
     "demo:python": "pnpm run build && cd client/python && uv run python demo.py",
@@ -38,13 +38,15 @@
     "demo:proxy:playwright": "pnpm run build && node dist/client/js/examples/playwright.js",
     "demo:proxy:puppeteer": "pnpm run build && node dist/client/js/examples/puppeteer.js",
     "proxy": "pnpm run build && node dist/bridge/proxy.js",
-    "test": "pnpm run build && node --test \"dist/test/*.test.js\""
+    "test": "pnpm run build && node --test \"dist/test/*.test.js\"",
+    "prepare": "pnpm exec prek install"
   },
   "dependencies": {
     "ws": "^8.18.0",
     "zod": "^4.4.1"
   },
   "devDependencies": {
+    "@j178/prek": "0.3.10",
     "@types/chrome": "^0.1.40",
     "@types/node": "^25.6.0",
     "@types/ws": "^8.18.1",

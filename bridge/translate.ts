@@ -214,7 +214,10 @@ function wrapServiceWorkerCommand(method: string, params: ProtocolParams = {}, c
   let runtimeParams;
   if (method === "Mod.evaluate") {
     const evaluateParams = params as CDPModEvaluateParams;
-    runtimeParams = wrapCDPModEvaluate({ ...evaluateParams, cdpSessionId: evaluateParams.cdpSessionId ?? cdpSessionId });
+    runtimeParams = wrapCDPModEvaluate({
+      ...evaluateParams,
+      cdpSessionId: evaluateParams.cdpSessionId ?? cdpSessionId,
+    });
   } else if (method === "Mod.addCustomCommand") {
     runtimeParams = wrapCDPModAddCustomCommand(params as CDPModAddCustomCommandParams);
   } else if (method === "Mod.addMiddleware") {

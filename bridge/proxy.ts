@@ -68,12 +68,7 @@ const dbg = (...args) => {
   if (DEBUG) console.log("[proxy:dbg]", ...args);
 };
 
-const MAGIC_METHODS = new Set([
-  "Mod.evaluate",
-  "Mod.addCustomCommand",
-  "Mod.addCustomEvent",
-  "Mod.addMiddleware",
-]);
+const MAGIC_METHODS = new Set(["Mod.evaluate", "Mod.addCustomCommand", "Mod.addCustomEvent", "Mod.addMiddleware"]);
 const ROUTE_TO_SW_RE = /^(Mod|Custom)\./;
 const TARGET_AUTO_ATTACH_PARAMS = {
   autoAttach: true,

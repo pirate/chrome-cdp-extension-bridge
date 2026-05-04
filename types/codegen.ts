@@ -284,7 +284,8 @@ for (const d of domains) {
     `import { z } from "zod";`,
     `import { withCdpMeta } from "./helpers.js";`,
   ];
-  for (const ref of [...refs].sort()) domain_zod.push(`import * as ${domain_file(ref)} from "./${domain_file(ref)}.js";`);
+  for (const ref of [...refs].sort())
+    domain_zod.push(`import * as ${domain_file(ref)} from "./${domain_file(ref)}.js";`);
   domain_zod.push(``);
 
   for (const x of d.types || [])

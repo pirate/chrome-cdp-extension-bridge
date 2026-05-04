@@ -2,10 +2,24 @@
 
 import json
 import time
+from typing import cast
+
+from .types import (
+    CDPModRoutes,
+    JsonObject,
+    JsonValue,
+    ProtocolParams,
+    ProtocolPayload,
+    ProtocolResult,
+    RuntimeEvaluateParams,
+    TranslatedCommand,
+    TranslatedStep,
+    UnwrappedCDPModEvent,
+)
 
 BINDING_PREFIX = "__CDPMod_"
 
-DEFAULT_CLIENT_ROUTES = {
+DEFAULT_CLIENT_ROUTES: CDPModRoutes = {
     "Mod.*": "service_worker",
     "Custom.*": "service_worker",
     "*.*": "service_worker",
@@ -16,13 +30,13 @@ def binding_name_for(event_name: str) -> str:
     return BINDING_PREFIX + event_name.replace(".", "_")
 
 
-def event_name_for(binding_name: str):
+def event_name_for(binding_name: str) -> str | None:
     if not binding_name.startswith(BINDING_PREFIX):
         return None
     return binding_name[len(BINDING_PREFIX):].replace("_", ".")
 
 
-def route_for(method: str, routes: dict) -> str:
+def route_for(method: str, routes: CDPModRoutes) -> str:
     routes = routes or {}
     if method in routes:
         return routes[method]
@@ -42,7 +56,27 @@ def route_for(method: str, routes: dict) -> str:
     return "direct_cdp"
 
 
-def _eval_params(expression: str):
+def _required_string(params: ProtocolParams, name: str) -> str:
+    value = params.get(name)
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"{name} must be a non-empty string")
+    return value
+
+
+def _optional_string(params: ProtocolParams, name: str) -> str | None:
+    value = params.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    return value
+
+
+def _object_or_empty(value: JsonValue | None) -> JsonObject:
+    return value if isinstance(value, dict) else {}
+
+
+def _eval_params(expression: str) -> RuntimeEvaluateParams:
     return {
         "expression": expression,
         "awaitPromise": True,
@@ -51,10 +85,10 @@ def _eval_params(expression: str):
     }
 
 
-def _wrap_cdpmod_evaluate(params: dict, session_id: str):
-    expression = params["expression"]
+def _wrap_cdpmod_evaluate(params: ProtocolParams, session_id: str) -> RuntimeEvaluateParams:
+    expression = _required_string(params, "expression")
     user_params = params.get("params", {})
-    cdp_session_id = params.get("cdpSessionId") or session_id
+    cdp_session_id = _optional_string(params, "cdpSessionId") or session_id
     return _eval_params(
         "(async () => {\n"
         f"  const params = {json.dumps(user_params)};\n"
@@ -67,19 +101,21 @@ def _wrap_cdpmod_evaluate(params: dict, session_id: str):
     )
 
 
-def _wrap_cdpmod_add_custom_command(params: dict):
+def _wrap_cdpmod_add_custom_command(params: ProtocolParams) -> RuntimeEvaluateParams:
+    name = _required_string(params, "name")
+    expression = _required_string(params, "expression")
     return _eval_params(
         "(() => {\n"
         "  return globalThis.CDPMod.addCustomCommand({\n"
-        f"    name: {json.dumps(params['name'])},\n"
+        f"    name: {json.dumps(name)},\n"
         f"    paramsSchema: {json.dumps(params.get('paramsSchema'))},\n"
         f"    resultSchema: {json.dumps(params.get('resultSchema'))},\n"
-        f"    expression: {json.dumps(params['expression'])},\n"
+        f"    expression: {json.dumps(expression)},\n"
         "    handler: async (params, cdpSessionId) => {\n"
         "      const cdp = globalThis.CDPMod.attachToSession(cdpSessionId);\n"
         "      const CDPMod = globalThis.CDPMod;\n"
         "      const chrome = globalThis.chrome;\n"
-        f"      const handler = ({params['expression']});\n"
+        f"      const handler = ({expression});\n"
         "      return await handler(params || {});\n"
         "    },\n"
         "  });\n"
@@ -87,28 +123,32 @@ def _wrap_cdpmod_add_custom_command(params: dict):
     )
 
 
-def _wrap_cdpmod_add_custom_event(params: dict):
+def _wrap_cdpmod_add_custom_event(params: ProtocolParams) -> RuntimeEvaluateParams:
+    name = _required_string(params, "name")
     return _eval_params(
         "globalThis.CDPMod.addCustomEvent({\n"
-        f"  name: {json.dumps(params['name'])},\n"
-        f"  bindingName: {json.dumps(binding_name_for(params['name']))},\n"
+        f"  name: {json.dumps(name)},\n"
+        f"  bindingName: {json.dumps(binding_name_for(name))},\n"
         f"  eventSchema: {json.dumps(params.get('eventSchema'))},\n"
         "})"
     )
 
 
-def _wrap_cdpmod_add_middleware(params: dict):
+def _wrap_cdpmod_add_middleware(params: ProtocolParams) -> RuntimeEvaluateParams:
+    phase = _required_string(params, "phase")
+    expression = _required_string(params, "expression")
+    name = _optional_string(params, "name") or "*"
     return _eval_params(
         "(() => {\n"
         "  return globalThis.CDPMod.addMiddleware({\n"
-        f"    name: {json.dumps(params.get('name', '*'))},\n"
-        f"    phase: {json.dumps(params['phase'])},\n"
-        f"    expression: {json.dumps(params['expression'])},\n"
+        f"    name: {json.dumps(name)},\n"
+        f"    phase: {json.dumps(phase)},\n"
+        f"    expression: {json.dumps(expression)},\n"
         "    handler: async (payload, next, context = {}) => {\n"
         "      const cdp = globalThis.CDPMod.attachToSession(context.cdpSessionId ?? null);\n"
         "      const CDPMod = globalThis.CDPMod;\n"
         "      const chrome = globalThis.chrome;\n"
-        f"      const middleware = ({params['expression']});\n"
+        f"      const middleware = ({expression});\n"
         "      return await middleware(payload, next, context);\n"
         "    },\n"
         "  });\n"
@@ -116,7 +156,7 @@ def _wrap_cdpmod_add_middleware(params: dict):
     )
 
 
-def _wrap_custom_command(method: str, params: dict, session_id: str):
+def _wrap_custom_command(method: str, params: ProtocolParams, session_id: str) -> RuntimeEvaluateParams:
     return _eval_params(
         f"globalThis.CDPMod.handleCommand("
         f"{json.dumps(method)}, {json.dumps(params)}, "
@@ -124,13 +164,14 @@ def _wrap_custom_command(method: str, params: dict, session_id: str):
     )
 
 
-def _wrap_service_worker_command(method: str, params: dict, session_id: str):
+def _wrap_service_worker_command(method: str, params: ProtocolParams, session_id: str) -> list[TranslatedStep]:
     if method == "Mod.ping" and "sentAt" not in params:
         params = {**params, "sentAt": int(time.time() * 1000)}
 
     if method == "Mod.addCustomEvent":
+        name = _required_string(params, "name")
         return [
-            {"method": "Runtime.addBinding", "params": {"name": binding_name_for(params["name"])}},
+            {"method": "Runtime.addBinding", "params": {"name": binding_name_for(name)}},
             {
                 "method": "Runtime.evaluate",
                 "params": _wrap_cdpmod_add_custom_event(params),
@@ -144,16 +185,24 @@ def _wrap_service_worker_command(method: str, params: dict, session_id: str):
     elif method == "Mod.addMiddleware":
         runtime_params = _wrap_cdpmod_add_middleware(params)
     else:
-        runtime_params = _wrap_custom_command(method, params, params.get("cdpSessionId") or session_id)
+        runtime_params = _wrap_custom_command(method, params, _optional_string(params, "cdpSessionId") or session_id)
     return [{"method": "Runtime.evaluate", "params": runtime_params, "unwrap": "evaluate"}]
 
 
-def wrap_command_if_needed(method: str, params=None, *, routes=None, cdp_session_id=None):
+def wrap_command_if_needed(
+    method: str,
+    params: ProtocolParams | None = None,
+    *,
+    routes: CDPModRoutes | None = None,
+    cdp_session_id: str | None = None,
+) -> TranslatedCommand:
     params = params or {}
     route = route_for(method, routes or DEFAULT_CLIENT_ROUTES)
     if route == "direct_cdp":
         return {"route": route, "target": "direct_cdp", "steps": [{"method": method, "params": params}]}
     if route == "service_worker":
+        if cdp_session_id is None:
+            raise RuntimeError(f"service_worker route requires a CDP session id for {method}")
         return {
             "route": route,
             "target": "service_worker",
@@ -162,32 +211,55 @@ def wrap_command_if_needed(method: str, params=None, *, routes=None, cdp_session
     raise RuntimeError(f"Unsupported client route '{route}' for {method}")
 
 
-def _unwrap_evaluate_response(result: dict):
+def _unwrap_evaluate_response(result: ProtocolResult) -> JsonValue:
     if result.get("exceptionDetails"):
-        ex = result["exceptionDetails"]
-        msg = (ex.get("exception") or {}).get("description") or ex.get("text") or "Runtime.evaluate failed"
+        ex = _object_or_empty(result.get("exceptionDetails"))
+        exception = _object_or_empty(ex.get("exception"))
+        description = exception.get("description")
+        text = ex.get("text")
+        msg = (
+            description
+            if isinstance(description, str)
+            else text
+            if isinstance(text, str)
+            else "Runtime.evaluate failed"
+        )
         raise RuntimeError(msg)
-    inner = result.get("result") or {}
+    inner = _object_or_empty(result.get("result"))
     return inner.get("value")
 
 
-def unwrap_response_if_needed(result: dict, unwrap=None):
+def unwrap_response_if_needed(result: ProtocolResult, unwrap: str | None = None) -> JsonValue:
     return _unwrap_evaluate_response(result) if unwrap == "evaluate" else (result or {})
 
 
-def unwrap_event_if_needed(method: str, params: dict, session_id=None, our_session_id=None):
+def unwrap_event_if_needed(
+    method: str,
+    params: ProtocolParams,
+    session_id: str | None = None,
+    our_session_id: str | None = None,
+) -> UnwrappedCDPModEvent | None:
     if method != "Runtime.bindingCalled":
         return None
-    event = event_name_for(params.get("name") or "")
+    binding_name = params.get("name")
+    if not isinstance(binding_name, str):
+        return None
+    event = event_name_for(binding_name)
     if event is None:
         return None
+    raw_payload = params.get("payload")
+    if not isinstance(raw_payload, str):
+        return None
     try:
-        payload = json.loads(params.get("payload") or "{}")
+        parsed: object = json.loads(raw_payload)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict):
+    if not isinstance(parsed, dict):
         return None
+    payload = cast(ProtocolPayload, parsed)
     if our_session_id is not None and payload.get("cdpSessionId") and payload["cdpSessionId"] != our_session_id:
         return None
-    data = payload["data"] if "data" in payload else payload
-    return {"event": event, "data": data, "sessionId": session_id}
+    data_value = payload["data"] if "data" in payload else payload
+    data: ProtocolPayload = data_value if isinstance(data_value, dict) else {"value": data_value}
+    unwrapped: UnwrappedCDPModEvent = {"event": event, "data": data, "sessionId": session_id}
+    return unwrapped

@@ -43,9 +43,7 @@ export type CDPModNamedValue = {
   cdp_event_name?: string;
   id?: string;
   name?: string;
-  meta?: () =>
-    | { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown }
-    | undefined;
+  meta?: () => { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown } | undefined;
 };
 
 export function normalizeCDPModName(value: CDPModName) {

@@ -72,7 +72,9 @@ type ClientOptions = {
   service_worker_ready_expression?: string | null;
   launch_options?: Record<string, unknown>;
   self?: {
-    addEventListener?: (listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void) => unknown;
+    addEventListener?: (
+      listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void,
+    ) => unknown;
     configure?: (params: CDPModConfigureParams) => Promise<ProtocolResult>;
     handleCommand: (method: string, params?: ProtocolParams, cdpSessionId?: string | null) => Promise<ProtocolResult>;
   } | null;
@@ -338,7 +340,9 @@ export class CDPModClient extends CDPModEventEmitter {
           throw new Error("CDPModClient requires cdp_url when running outside Node.");
         }
         const { launchChrome } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/launcher.js"))) as {
-          launchChrome: (options: Record<string, unknown>) => Promise<{ wsUrl: string; close: () => Promise<void> | void }>;
+          launchChrome: (
+            options: Record<string, unknown>,
+          ) => Promise<{ wsUrl: string; close: () => Promise<void> | void }>;
         };
         this._launched = await launchChrome(this.launch_options);
         this.cdp_url = this._launched.wsUrl;
@@ -380,7 +384,9 @@ export class CDPModClient extends CDPModEventEmitter {
 
     let ext;
     const extension_started_at = Date.now();
-    const { injectExtensionIfNeeded } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js"))) as typeof import("../../bridge/injector.js");
+    const { injectExtensionIfNeeded } = (await import(
+      /* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js")
+    )) as typeof import("../../bridge/injector.js");
     this._prepared_extension = await this._prepareExtensionPath();
     ext = await injectExtensionIfNeeded({
       send: (method, params, session_id) => this._sendFrame(method, params, session_id) as Promise<ProtocolResult>,
@@ -536,7 +542,11 @@ export class CDPModClient extends CDPModEventEmitter {
   async _installCustomEventBindings() {
     await Promise.all(
       this.custom_events.map((event) =>
-        this._sendFrame("Runtime.addBinding", { name: bindingNameFor(normalizeCDPModName(event.name)) }, this.ext_session_id),
+        this._sendFrame(
+          "Runtime.addBinding",
+          { name: bindingNameFor(normalizeCDPModName(event.name)) },
+          this.ext_session_id,
+        ),
       ),
     );
   }
@@ -635,7 +645,8 @@ export class CDPModClient extends CDPModEventEmitter {
       if (!this.self) throw new Error(`CDPModClient self route requires a self server.`);
       this._ensureSelfEventListener();
       const [step] = command.steps;
-      const cdp_session_id = ((step.params as CDPModCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
+      const cdp_session_id =
+        ((step.params as CDPModCustomPayload | undefined)?.cdpSessionId as string | undefined) ?? this.ext_session_id;
       return await this.self.handleCommand(step.method, step.params ?? {}, cdp_session_id ?? null);
     }
     if (command.target !== "service_worker") {
@@ -722,7 +733,10 @@ export class CDPModClient extends CDPModEventEmitter {
     if (event.method === "Target.attachedToTarget") {
       const params = (event.params || {}) as Record<string, unknown>;
       const session_id = typeof params.sessionId === "string" ? params.sessionId : null;
-      const target_info = params.targetInfo && typeof params.targetInfo === "object" ? params.targetInfo as Record<string, unknown> : null;
+      const target_info =
+        params.targetInfo && typeof params.targetInfo === "object"
+          ? (params.targetInfo as Record<string, unknown>)
+          : null;
       const target_id = typeof target_info?.targetId === "string" ? target_info.targetId : null;
       if (session_id && target_id) {
         this.auto_target_sessions.set(target_id, session_id);

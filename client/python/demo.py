@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdpmod import CDPModClient
+from cdpmod.types import JsonValue, ProtocolPayload
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXTENSION_PATH = ROOT / "dist" / "extension"
@@ -35,6 +36,12 @@ CHROME = os.environ.get("CHROME_PATH") or (
     if sys.platform == "darwin"
     else "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 )
+
+
+def expect_object(value: JsonValue, label: str) -> ProtocolPayload:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} returned non-object value: {value!r}")
+    return value
 
 
 def client_options_for(mode, cdp_url, launch_options=None):
@@ -132,7 +139,7 @@ def main():
         try: print(f"Browser.getVersion -> {cdp.send('Browser.getVersion')}")
         except Exception as e: print(f"Browser.getVersion -> (rejected by route: {str(e).splitlines()[0]} )")
 
-        cdpmod_eval = cdp.send("Mod.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"})
+        cdpmod_eval = expect_object(cdp.send("Mod.evaluate", {"expression": "({ extensionId: chrome.runtime.id })"}), "Mod.evaluate")
         if cdpmod_eval.get("extensionId") != cdp.extension_id:
             raise RuntimeError(f"unexpected Mod.evaluate result {cdpmod_eval}")
         print(f"Mod.evaluate     -> {cdpmod_eval}")
@@ -183,7 +190,7 @@ def main():
           })'''})
 
         cdp.send("Target.setDiscoverTargets", {"discover": True})
-        created_target = cdp.send("Target.createTarget", {"url": "https://example.com"})
+        created_target = expect_object(cdp.send("Target.createTarget", {"url": "https://example.com"}), "Target.createTarget")
         created_target_id = created_target.get("targetId")
         if not created_target_id:
             raise RuntimeError(f"Target.createTarget returned no targetId: {created_target}")
@@ -209,12 +216,12 @@ def main():
         if not foreground:
             raise RuntimeError(f"expected Custom.foregroundTargetChanged for {created_target_id}")
 
-        tab_from_target = cdp.send("Custom.TabIdFromTargetId", {"targetId": created_target_id})
+        tab_from_target = expect_object(cdp.send("Custom.TabIdFromTargetId", {"targetId": created_target_id}), "Custom.TabIdFromTargetId")
         if tab_from_target.get("tabId") != foreground.get("tabId"):
             raise RuntimeError(f"unexpected Custom.TabIdFromTargetId result {tab_from_target}")
         print(f"Custom.TabIdFromTargetId -> {tab_from_target}")
 
-        target_from_tab = cdp.send("Custom.targetIdFromTabId", {"tabId": foreground["tabId"]})
+        target_from_tab = expect_object(cdp.send("Custom.targetIdFromTabId", {"tabId": foreground["tabId"]}), "Custom.targetIdFromTabId")
         if target_from_tab.get("targetId") != created_target_id or target_from_tab.get("tabId") != foreground.get("tabId"):
             raise RuntimeError(f"unexpected Custom.targetIdFromTabId/middleware result {target_from_tab}")
         print(f"Custom.targetIdFromTabId -> {target_from_tab}")

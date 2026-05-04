@@ -32,8 +32,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
     return globalScope.CDPMod;
 
   const BINDING_PREFIX = "__CDPMod_";
-  const bindingNameFor = (eventName: string) =>
-    BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
+  const bindingNameFor = (eventName: string) => BINDING_PREFIX + eventName.replaceAll(".", "_").replaceAll("*", "all");
   const encodeBindingPayload = ({
     event,
     data,
@@ -408,7 +407,7 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
       if (name !== "*" && (!name || !name.includes("."))) throw new Error("name must be '*' or Domain.name form.");
       if (typeof handler !== "function" && typeof expression === "string") {
         handler = async (payload: ProtocolPayload, next: unknown, context: ProtocolPayload = {}) => {
-          const context_object = context && typeof context === "object" ? context as Record<string, unknown> : {};
+          const context_object = context && typeof context === "object" ? (context as Record<string, unknown>) : {};
           const cdp = CDPModServer.attachToSession(
             typeof context_object.cdpSessionId === "string" ? context_object.cdpSessionId : null,
           );
@@ -544,7 +543,8 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
           console.error("[CDPModServer] event listener failed", error);
         }
       }
-      if (typeof binding === "function") binding(encodeBindingPayload({ event: eventName, data: payload, cdpSessionId }));
+      if (typeof binding === "function")
+        binding(encodeBindingPayload({ event: eventName, data: payload, cdpSessionId }));
       return { event: eventName, emitted: true };
     },
 
@@ -619,7 +619,9 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
         let resolvedTabId = resolvedDebuggee.tabId || null;
         let resolvedTabUrl: string | null = null;
         if (!resolvedTabId) {
-          const [tab] = chromeApi.tabs?.query ? await chromeApi.tabs.query({ active: true, lastFocusedWindow: true }) : [];
+          const [tab] = chromeApi.tabs?.query
+            ? await chromeApi.tabs.query({ active: true, lastFocusedWindow: true })
+            : [];
           resolvedTabId = tab?.id || null;
           resolvedTabUrl = tab?.url || tab?.pendingUrl || null;
         } else if (chromeApi.tabs?.get) {
@@ -628,7 +630,8 @@ export function installCDPModServer(globalScope: typeof globalThis = globalThis)
         }
         if (resolvedTabId && chromeApi.debugger?.getTargets) {
           const targets = await chromeApi.debugger.getTargets();
-          resolvedTargetId = targets.find((target) => target.tabId === resolvedTabId && target.type === "page")?.id || null;
+          resolvedTargetId =
+            targets.find((target) => target.tabId === resolvedTabId && target.type === "page")?.id || null;
         }
         if (!resolvedTargetId) {
           const { targetInfos } = (await callLoopbackWS("Target.getTargets")) as cdp.types.ts.Target.GetTargetsResult;

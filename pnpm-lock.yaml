@@ -15,6 +15,9 @@ importers:
         specifier: ^4.4.1
         version: 4.4.2
     devDependencies:
+      '@j178/prek':
+        specifier: 0.3.10
+        version: 0.3.10
       '@types/chrome':
         specifier: ^0.1.40
         version: 0.1.40
@@ -41,6 +44,118 @@ importers:
         version: 6.0.3
 
 packages:
+
+  '@j178/prek-darwin-arm64@0.3.10':
+    resolution: {integrity: sha512-7KHluUGx5lAEtRKnleVSmZGsc9JNeVMRLbSngwU25e4XiJNdczVPrD5EcNwjngh4qoAm5xs05LE/waH7Kcowrg==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@j178/prek-darwin-x64@0.3.10':
+    resolution: {integrity: sha512-IGW0I1NE0fQmv82VfXtlmqLxnLGw3DaTjRYK6NvlnMlbpRXfCzUmafuaL1JNm4DwzIkdxK+HcmoKDW7MFOhXHA==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@j178/prek-linux-arm-gnueabihf@0.3.10':
+    resolution: {integrity: sha512-DCTNe/uBhYEe8OdBsmm7NjHjPzdSjpqLHQCzgwxMuzTc0TxCbE1xSOjHE/z4iXkmnvCO+5eSHk8MCG8FJmrzqw==}
+    engines: {node: '>=18'}
+    cpu: [arm]
+    os: [linux]
+    libc: [glibc]
+
+  '@j178/prek-linux-arm-musleabihf@0.3.10':
+    resolution: {integrity: sha512-+VXSnujzOBY6LqhKrV3nB41btA8qxYYd1UurDbmTQnu97Pa3bHxkRA/AweyOuEKkCxzYpqBXX73c71sHMOm8ag==}
+    engines: {node: '>=18'}
+    cpu: [arm]
+    os: [linux]
+    libc: [musl]
+
+  '@j178/prek-linux-arm64-gnu@0.3.10':
+    resolution: {integrity: sha512-v5eW3PGrLMJb3C9rkelNU6A0QoGX2VUiw9IF+IfgAlT/3mk376CLJsmEjUvUR/4Licpc5KRLPcTfIjWdAjNGww==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@j178/prek-linux-arm64-musl@0.3.10':
+    resolution: {integrity: sha512-mVtSjMPBcvCBO1DM4TmTKPjhudGYzykT8AGuUf7Iu5Yh8GlLIzeOwWsN6dOYrxRZ3Etykv4sQxcoqaAOjpHp1g==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@j178/prek-linux-armv7-musleabihf@0.3.10':
+    resolution: {integrity: sha512-AbHBE3YkL0fuky0SvUwxKlHzhUki2JIBOWubUqGwxAbmnrVRmLImUJu4iaFjqytxrtZjtLCFtk4nO28DTgHVKQ==}
+    engines: {node: '>=18'}
+    cpu: [arm]
+    os: [linux]
+    libc: [musl]
+
+  '@j178/prek-linux-ia32-gnu@0.3.10':
+    resolution: {integrity: sha512-tk6Xw/HVEMP+jHy5zeNvi+W6F7DAeO30st8eTynrMJHfaMst0fg7+CPA4FNr3tV12gxz55g6HFgLyCoTiTnxBw==}
+    engines: {node: '>=18'}
+    cpu: [ia32]
+    os: [linux]
+    libc: [glibc]
+
+  '@j178/prek-linux-ia32-musl@0.3.10':
+    resolution: {integrity: sha512-9Pde8WU7UoO/VYc1YcseAj0FevKQq5oiXMW+MV4M1JJeXuzP2LWs6d26CgHEkim0TCjIchN9S8Yx/LbEEOq+jA==}
+    engines: {node: '>=18'}
+    cpu: [ia32]
+    os: [linux]
+    libc: [musl]
+
+  '@j178/prek-linux-riscv64-gnu@0.3.10':
+    resolution: {integrity: sha512-0eNmgunCKM51GuKnVkEcvr+u5j88v7iKsUx1Aqh4WqH1OEdtYhSVmIakyqbEV3ykT0henUCxDLx0H6au9x1OFg==}
+    engines: {node: '>=18'}
+    cpu: [riscv64]
+    os: [linux]
+    libc: [glibc]
+
+  '@j178/prek-linux-s390x-gnu@0.3.10':
+    resolution: {integrity: sha512-lkIBbxOGbsZgdK9irRihDDfT8yvuXZeq5EC2KAM1sdCE8P58KMWLUdvKKqBN30sObQzQWsHSelOQ/ZHs+mkyvA==}
+    engines: {node: '>=18'}
+    cpu: [s390x]
+    os: [linux]
+    libc: [glibc]
+
+  '@j178/prek-linux-x64-gnu@0.3.10':
+    resolution: {integrity: sha512-UfbNCEF6RDc0CMQzSyPtD20uTZGWGX6/N+JvQY2QdLPEgeYvKnDJixVcslkYSjLmQe2AdWpht2tVY+qzc9WKEA==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@j178/prek-linux-x64-musl@0.3.10':
+    resolution: {integrity: sha512-IR03/3YKYwQgUMwlzHXJe12r8lYdFK7KhPBe2rUQBVTWD/g0e0Yd1Jb3t+C6ZHXsEtrtr2qEwvbAcaJLqbpp1w==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@j178/prek-win32-arm64-msvc@0.3.10':
+    resolution: {integrity: sha512-m+EJ46A4y4HwWoL8jeqp52O/32HG+qR6iwy5EXTuo/93B+vQ+k7fxzlRJJX7NssbloV8rT6Frv5mkM4bi54GiA==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@j178/prek-win32-ia32-msvc@0.3.10':
+    resolution: {integrity: sha512-ZLfUZuNzySm9V9CThF06gnA1MPjjzmikqzA+OUt/we1zI/7bPd0drP11zEnOa73JgCVM+28zb8rPOFyyqUixEQ==}
+    engines: {node: '>=18'}
+    cpu: [ia32]
+    os: [win32]
+
+  '@j178/prek-win32-x64-msvc@0.3.10':
+    resolution: {integrity: sha512-Ln1/nrk3R+wnxbqP8xELI4xb4Aw49Pd8MlEDKnEnxc0cVChZlO3oHac5Mgm8DHXtMzKT8l0NBOVT1PG29RA7Rw==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [win32]
+
+  '@j178/prek@0.3.10':
+    resolution: {integrity: sha512-vVIFplNy8+OCr7/yOG1yF75GBYdDwhX+qTKG6HAa/frMjcoFCHr8ATXcXoJex9rqpdnAmTOL2U3dNqmJrWatZA==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   '@oxfmt/binding-android-arm-eabi@0.47.0':
     resolution: {integrity: sha512-KrMQRdMi/upr81qT4ijK6X6BNp6jqpMY7FwILQnwIy9QLc3qpnhUx5rsCLGzn4ewsCQ0CNAspN2ogmP1GXLyLw==}
@@ -679,6 +794,73 @@ packages:
     resolution: {integrity: sha512-IynmDyxsEsb9RKzO3J9+4SxXnl2FTFSzNBaKKaMV6tsSk0rw9gYw9gs+JFCq/qk2LCZ78KDwyj+Z289TijSkUw==}
 
 snapshots:
+
+  '@j178/prek-darwin-arm64@0.3.10':
+    optional: true
+
+  '@j178/prek-darwin-x64@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-arm-gnueabihf@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-arm-musleabihf@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-arm64-gnu@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-arm64-musl@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-armv7-musleabihf@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-ia32-gnu@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-ia32-musl@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-riscv64-gnu@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-s390x-gnu@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-x64-gnu@0.3.10':
+    optional: true
+
+  '@j178/prek-linux-x64-musl@0.3.10':
+    optional: true
+
+  '@j178/prek-win32-arm64-msvc@0.3.10':
+    optional: true
+
+  '@j178/prek-win32-ia32-msvc@0.3.10':
+    optional: true
+
+  '@j178/prek-win32-x64-msvc@0.3.10':
+    optional: true
+
+  '@j178/prek@0.3.10':
+    optionalDependencies:
+      '@j178/prek-darwin-arm64': 0.3.10
+      '@j178/prek-darwin-x64': 0.3.10
+      '@j178/prek-linux-arm-gnueabihf': 0.3.10
+      '@j178/prek-linux-arm-musleabihf': 0.3.10
+      '@j178/prek-linux-arm64-gnu': 0.3.10
+      '@j178/prek-linux-arm64-musl': 0.3.10
+      '@j178/prek-linux-armv7-musleabihf': 0.3.10
+      '@j178/prek-linux-ia32-gnu': 0.3.10
+      '@j178/prek-linux-ia32-musl': 0.3.10
+      '@j178/prek-linux-riscv64-gnu': 0.3.10
+      '@j178/prek-linux-s390x-gnu': 0.3.10
+      '@j178/prek-linux-x64-gnu': 0.3.10
+      '@j178/prek-linux-x64-musl': 0.3.10
+      '@j178/prek-win32-arm64-msvc': 0.3.10
+      '@j178/prek-win32-ia32-msvc': 0.3.10
+      '@j178/prek-win32-x64-msvc': 0.3.10
 
   '@oxfmt/binding-android-arm-eabi@0.47.0':
     optional: true
