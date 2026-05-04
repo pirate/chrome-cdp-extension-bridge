@@ -293,8 +293,12 @@ for (const d of domains) {
     );
   for (const x of d.commands || []) {
     const commandName = `${d.domain}.${x.name}`;
+    const paramsExpr =
+      commandName === "CacheStorage.requestCacheNames"
+        ? `${zobj(x.parameters || [], d.domain)}.refine((value) => [value.securityOrigin, value.storageKey, value.storageBucket].filter((item) => item !== undefined).length === 1, { message: "Exactly one of securityOrigin, storageKey, or storageBucket must be provided." })`
+        : zobj(x.parameters || [], d.domain);
     domain_zod.push(
-      `export const ${local_name(params(x.name))} = withCdpMeta(${zobj(x.parameters || [], d.domain)}, ${JSON.stringify(`${commandName}.params`)}, "commandParams", { method: ${JSON.stringify(commandName)} });`,
+      `export const ${local_name(params(x.name))} = withCdpMeta(${paramsExpr}, ${JSON.stringify(`${commandName}.params`)}, "commandParams", { method: ${JSON.stringify(commandName)} });`,
     );
     domain_zod.push(
       `export const ${local_name(result(x.name))} = withCdpMeta(${zobj(x.returns || [], d.domain)}, ${JSON.stringify(`${commandName}.result`)}, "commandResult", { method: ${JSON.stringify(commandName)} });`,

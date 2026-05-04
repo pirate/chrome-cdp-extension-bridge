@@ -10,18 +10,18 @@
   "exports": {
     ".": {
       "types": "./client/js/CDPModsClient.ts",
-      "import": "./client/js/CDPModsClient.ts"
+      "import": "./dist/client/js/CDPModsClient.js"
     },
     "./client": {
       "types": "./client/js/CDPModsClient.ts",
-      "import": "./client/js/CDPModsClient.ts"
+      "import": "./dist/client/js/CDPModsClient.js"
     },
-    "./extension/service_worker.js": "./extension/service_worker.ts",
-    "./extension/CDPModsServer.js": "./extension/CDPModsServer.ts",
-    "./extension/translate.js": "./extension/translate.ts",
-    "./bridge/translate.js": "./bridge/translate.ts",
-    "./types/*": "./types/*",
-    "./types/zod/*": "./types/zod/*"
+    "./extension/service_worker.js": "./dist/extension/service_worker.js",
+    "./extension/CDPModsServer.js": "./dist/extension/CDPModsServer.js",
+    "./extension/translate.js": "./dist/extension/translate.js",
+    "./bridge/translate.js": "./dist/bridge/translate.js",
+    "./types/*": "./dist/types/*",
+    "./types/zod/*": "./dist/types/zod/*"
   },
   "scripts": {
     "clean": "rm -rf dist",
@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "ws": "^8.18.0",
-    "zod": "4.3.6"
+    "zod": "^4.4.1"
   },
   "devDependencies": {
     "@types/chrome": "^0.1.40",

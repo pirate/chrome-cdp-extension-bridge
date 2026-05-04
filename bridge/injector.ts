@@ -1,4 +1,3 @@
-// @ts-nocheck
 // injector.js: inject the CDPMods extension service worker when needed in a
 // running Chrome and return a CDP session attached to it.
 //
@@ -160,7 +159,8 @@ export async function injectExtensionIfNeeded({
       // 3. Wait for the loaded extension's service worker target. Custom extensions
       // can name the worker bundle anything; WXT uses background.js.
       const sw_url_prefix = `chrome-extension://${extension_id}/`;
-      for (;;) {
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
         const target_infos = TargetCommands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
         const target = target_infos.find((candidate) => candidate.type === "service_worker" && candidate.url.startsWith(sw_url_prefix)) as TargetInfo | undefined;
         if (target) {
@@ -169,6 +169,7 @@ export async function injectExtensionIfNeeded({
         }
         await sleep(100);
       }
+      throw new Error(`Timed out after 60s waiting for service worker target for extension ${extension_id}.`);
     }
   }
 

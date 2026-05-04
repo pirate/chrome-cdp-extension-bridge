@@ -1,4 +1,3 @@
-// @ts-nocheck
 // CDPModsClient (JS): importable, no CLI, no demo code.
 //
 // Constructor parameter names match across JS / Python / Go ports:
@@ -28,7 +27,12 @@ import type {
   CdpError,
   CdpEventFrame,
   CdpResponseFrame,
+  RuntimeBindingCalledEvent,
   CDPModsConfigureParams,
+  CDPModsCustomPayload,
+  CDPModsAddCustomCommandParams,
+  CDPModsAddCustomEventObjectParams,
+  CDPModsAddMiddlewareParams,
   CDPModsPingLatency,
   CDPModsPongEvent,
   CDPModsRoutes,
@@ -57,9 +61,9 @@ type ClientOptions = {
   extension_path?: string;
   routes?: CDPModsRoutes;
   server?: CDPModsConfigureParams | null;
-  custom_commands?: Array<Record<string, unknown>>;
-  custom_events?: Array<Record<string, unknown>>;
-  custom_middlewares?: Array<Record<string, unknown>>;
+  custom_commands?: CDPModsAddCustomCommandParams[];
+  custom_events?: CDPModsAddCustomEventObjectParams[];
+  custom_middlewares?: CDPModsAddMiddlewareParams[];
   hydrate_aliases?: boolean;
   service_worker_url_includes?: string[];
   service_worker_url_suffixes?: string[] | null;
@@ -96,7 +100,9 @@ class CDPModsEventEmitter {
   private listeners = new Map<string | symbol, Set<(...args: unknown[]) => void>>();
 
   on(event_name: string | symbol, listener: (...args: unknown[]) => void) {
-    this.listeners.get(event_name)?.add(listener) ?? this.listeners.set(event_name, new Set([listener]));
+    const listeners = this.listeners.get(event_name);
+    if (listeners) listeners.add(listener);
+    else this.listeners.set(event_name, new Set([listener]));
     return this;
   }
 
@@ -120,8 +126,11 @@ class CDPModsEventEmitter {
 }
 
 function defineCustomCommandMethod(client: CDPModsClient, name: string) {
-  const [domain, method] = name.split(".", 2);
-  if (!domain || !method) throw new Error(`Custom command must use Domain.method format, got ${name}`);
+  const parts = name.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error(`Custom command must use Domain.method format, got ${name}`);
+  }
+  const [domain, method] = parts;
   const target = client as unknown as Record<string, Record<string, unknown>>;
   if (method === "*") {
     target[domain] = new Proxy(target[domain] ?? {}, {
@@ -208,9 +217,9 @@ export class CDPModsClient extends CDPModsEventEmitter {
   routes: CDPModsRoutes;
   server: CDPModsConfigureParams | null;
   launch_options: Record<string, unknown>;
-  custom_commands: Array<Record<string, unknown>>;
-  custom_events: Array<Record<string, unknown>>;
-  custom_middlewares: Array<Record<string, unknown>>;
+  custom_commands: CDPModsAddCustomCommandParams[];
+  custom_events: CDPModsAddCustomEventObjectParams[];
+  custom_middlewares: CDPModsAddMiddlewareParams[];
   hydrate_aliases: boolean;
   service_worker_url_includes: string[];
   service_worker_url_suffixes: string[] | null;
@@ -242,7 +251,7 @@ export class CDPModsClient extends CDPModsEventEmitter {
     on: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModsClient;
     once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => CDPModsClient;
   };
-  _launched: { close: () => Promise<void> | void } | null;
+  _launched: { wsUrl: string; close: () => Promise<void> | void } | null;
 
   constructor({
     cdp_url = null,
@@ -301,7 +310,7 @@ export class CDPModsClient extends CDPModsEventEmitter {
 
     this._cdp = {
       send: (method: string, params: ProtocolParams = {}, session_id: string | null = null) =>
-        this._sendFrame(method, params, session_id, { record_raw_timing: true }),
+        this._sendFrame(method, params, session_id, { record_raw_timing: true }) as Promise<ProtocolResult>,
       on: (event_name: string | symbol, listener: (...args: unknown[]) => void) => this.on(event_name, listener),
       once: (event_name: string | symbol, listener: (...args: unknown[]) => void) => this.once(event_name, listener),
     };
@@ -371,22 +380,18 @@ export class CDPModsClient extends CDPModsEventEmitter {
 
     let ext;
     const extension_started_at = Date.now();
-    try {
-      const { injectExtensionIfNeeded } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js"))) as typeof import("../../bridge/injector.js");
-      this._prepared_extension = await this._prepareExtensionPath();
-      ext = await injectExtensionIfNeeded({
-        send: (method, params, session_id) => this._sendFrame(method, params, session_id),
-        session_id_for_target: (target_id) => this.auto_target_sessions.get(target_id) ?? null,
-        extension_path: this._prepared_extension.path,
-        service_worker_url_includes: this.service_worker_url_includes,
-        service_worker_url_suffixes,
-        trust_matched_service_worker: trust_service_worker_target,
-        require_service_worker_target: this.require_service_worker_target,
-        service_worker_ready_expression: this.service_worker_ready_expression,
-      });
-    } catch (error) {
-      throw error;
-    }
+    const { injectExtensionIfNeeded } = (await import(/* @vite-ignore */ runtimeModuleUrl("../../bridge/injector.js"))) as typeof import("../../bridge/injector.js");
+    this._prepared_extension = await this._prepareExtensionPath();
+    ext = await injectExtensionIfNeeded({
+      send: (method, params, session_id) => this._sendFrame(method, params, session_id) as Promise<ProtocolResult>,
+      session_id_for_target: (target_id) => this.auto_target_sessions.get(target_id) ?? null,
+      extension_path: this._prepared_extension.path,
+      service_worker_url_includes: this.service_worker_url_includes,
+      service_worker_url_suffixes,
+      trust_matched_service_worker: trust_service_worker_target,
+      require_service_worker_target: this.require_service_worker_target,
+      service_worker_ready_expression: this.service_worker_ready_expression,
+    });
     const extension_completed_at = Date.now();
     this.extension_id = ext.extension_id;
     this.ext_target_id = ext.target_id;
@@ -493,15 +498,15 @@ export class CDPModsClient extends CDPModsEventEmitter {
       ...(this.server ?? {}),
       custom_commands: this.custom_commands
         .filter((command) => typeof command.expression === "string" && command.expression.length > 0)
-        .map(({ name, expression, paramsSchema, resultSchema }) => ({
-          name: normalizeCDPModsName(name),
-          expression,
+        .map((command) => ({
+          name: normalizeCDPModsName(command.name),
+          expression: command.expression,
           paramsSchema: null,
           resultSchema: null,
         })),
-      custom_events: this.custom_events.map(({ name, eventSchema }) => ({
-        name: normalizeCDPModsName(name),
-        bindingName: bindingNameFor(normalizeCDPModsName(name)),
+      custom_events: this.custom_events.map((event) => ({
+        name: normalizeCDPModsName(event.name),
+        bindingName: bindingNameFor(normalizeCDPModsName(event.name)),
         eventSchema: null,
       })),
       custom_middlewares: this.custom_middlewares.map(({ name, phase, expression }) => ({
@@ -624,7 +629,7 @@ export class CDPModsClient extends CDPModsEventEmitter {
   async _sendRaw(command: TranslatedCommand) {
     if (command.target === "direct_cdp") {
       const [step] = command.steps;
-      return this._sendFrame(step.method, step.params ?? {});
+      return this._sendFrame(step.method, step.params ?? {}) as Promise<ProtocolResult>;
     }
     if (command.target === "self") {
       if (!this.self) throw new Error(`CDPModsClient self route requires a self server.`);
@@ -637,10 +642,10 @@ export class CDPModsClient extends CDPModsEventEmitter {
       throw new Error(`Unsupported command target "${command.target}"`);
     }
 
-    let result = {};
+    let result: ProtocolResult = {};
     let unwrap = null;
     for (const step of command.steps) {
-      result = await this._sendFrame(step.method, step.params ?? {}, this.ext_session_id);
+      result = (await this._sendFrame(step.method, step.params ?? {}, this.ext_session_id)) as ProtocolResult;
       unwrap = step.unwrap ?? null;
     }
     return unwrapResponseIfNeeded(result, unwrap);
@@ -715,16 +720,16 @@ export class CDPModsClient extends CDPModsEventEmitter {
     }
     const event = CdpEventFrameSchema.parse(msg);
     if (event.method === "Target.attachedToTarget") {
-      const params = event.params || {};
+      const params = (event.params || {}) as Record<string, unknown>;
       const session_id = typeof params.sessionId === "string" ? params.sessionId : null;
-      const target_info = params.targetInfo && typeof params.targetInfo === "object" ? params.targetInfo : null;
+      const target_info = params.targetInfo && typeof params.targetInfo === "object" ? params.targetInfo as Record<string, unknown> : null;
       const target_id = typeof target_info?.targetId === "string" ? target_info.targetId : null;
       if (session_id && target_id) {
         this.auto_target_sessions.set(target_id, session_id);
         this.auto_session_targets.set(session_id, target_info as Record<string, unknown>);
       }
     } else if (event.method === "Target.detachedFromTarget") {
-      const params = event.params || {};
+      const params = (event.params || {}) as Record<string, unknown>;
       const session_id = typeof params.sessionId === "string" ? params.sessionId : null;
       if (session_id) {
         const target_info = this.auto_session_targets.get(session_id);
@@ -737,7 +742,7 @@ export class CDPModsClient extends CDPModsEventEmitter {
       if (event.method !== "Runtime.bindingCalled") return;
       const u = unwrapEventIfNeeded(
         event.method,
-        event.params || {},
+        (event.params || {}) as RuntimeBindingCalledEvent,
         event.sessionId || null,
         this.ext_session_id,
       );

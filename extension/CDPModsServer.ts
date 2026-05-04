@@ -1,4 +1,3 @@
-// @ts-nocheck
 // CDPModsServer: lives inside an extension service worker. Owns the registry
 // of custom commands and event bindings, and emits events through the binding
 // API installed by the client (Runtime.addBinding -> globalThis[bindingName]).
@@ -364,7 +363,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       handler,
     }: CDPModsCustomCommandRegistration) {
       name = normalizeCDPModsName(name);
-      if (!name || !name.includes(".")) throw new Error("name must be in Domain.method form.");
+      if (!/^[^.]+\.[^.]+$/.test(name)) throw new Error("name must be in Domain.method form.");
       if (typeof handler !== "function" && typeof expression === "string") {
         handler = async (params: ProtocolParams = {}, cdpSessionId: string | null = null, method: string = name) => {
           const cdp = CDPModsServer.attachToSession(cdpSessionId);
@@ -391,7 +390,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
 
     addCustomEvent({ name, bindingName, eventSchema = null }: CDPModsCustomEventRegistration) {
       name = normalizeCDPModsName(name);
-      if (!name || !name.includes(".")) throw new Error("name must be in Domain.event form.");
+      if (!/^[^.]+\.[^.]+$/.test(name)) throw new Error("name must be in Domain.event form.");
       bindingName ??= bindingNameFor(name);
       eventBindings.set(name, { name, bindingName, eventSchema });
       return { name, bindingName, registered: true };
@@ -409,8 +408,9 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
       if (name !== "*" && (!name || !name.includes("."))) throw new Error("name must be '*' or Domain.name form.");
       if (typeof handler !== "function" && typeof expression === "string") {
         handler = async (payload: ProtocolPayload, next: unknown, context: ProtocolPayload = {}) => {
+          const context_object = context && typeof context === "object" ? context as Record<string, unknown> : {};
           const cdp = CDPModsServer.attachToSession(
-            typeof context?.cdpSessionId === "string" ? context.cdpSessionId : null,
+            typeof context_object.cdpSessionId === "string" ? context_object.cdpSessionId : null,
           );
           const CDPMods = CDPModsServer;
           const chrome = globalScope.chrome;
@@ -717,7 +717,7 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
         chromeApi.debugger.sendCommand(resolvedDebuggee, method, commandParams, (result) => {
           const error = chromeApi.runtime.lastError;
           if (error) reject(new Error(error.message));
-          else resolve(result);
+          else resolve(result as ProtocolResult);
         }),
       );
     },
@@ -754,7 +754,8 @@ export function installCDPModsServer(globalScope: typeof globalThis = globalThis
 
   CDPModsServer.addCustomCommand({
     name: "Mods.evaluate",
-    handler: async ({ expression, params = {}, cdpSessionId = null }: ProtocolParams = {}) => {
+    handler: async (raw_params: ProtocolParams = {}) => {
+      const { expression, params = {}, cdpSessionId = null } = raw_params as Record<string, unknown>;
       const cdp = CDPModsServer.attachToSession(typeof cdpSessionId === "string" ? cdpSessionId : null);
       const CDPMods = CDPModsServer;
       const chrome = globalScope.chrome;

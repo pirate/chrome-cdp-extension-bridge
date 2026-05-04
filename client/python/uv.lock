@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.10"
 
 [[package]]
-name = "cdpmods-python-client"
+name = "cdpmods"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [

@@ -301,9 +301,9 @@ export function unwrapEventIfNeeded(
     return null;
   }
   if (payload == null || typeof payload !== "object") return null;
-  const event =
-    typeof payload.event === "string" && payload.event.length > 0 ? payload.event : eventNameFor(params?.name || "");
+  const event = eventNameFor(params?.name || "");
   if (!event) return null;
+  if (typeof payload.event === "string" && payload.event.length > 0 && payload.event !== event) return null;
   if (ourSessionId != null && payload.cdpSessionId && payload.cdpSessionId !== ourSessionId) return null;
   const data = Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
   return { event, data, sessionId };

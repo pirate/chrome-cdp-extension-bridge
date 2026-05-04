@@ -792,7 +792,8 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 	}
 
 	swURLPrefix := fmt.Sprintf("chrome-extension://%s/", extID)
-	for {
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
 		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 		if err != nil {
 			return nil, err
@@ -811,6 +812,7 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	return nil, fmt.Errorf("timed out after 60s waiting for service worker target for extension %s", extID)
 }
 
 func (c *CDPModsClient) serviceWorkerTargetMatches(target map[string]any) bool {

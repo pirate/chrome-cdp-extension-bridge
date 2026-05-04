@@ -8,10 +8,10 @@ const isZodType = (value: unknown): value is z.ZodType =>
 export const CdpCommandParamsSchema = z.object({}).passthrough();
 export type CdpCommandParams = z.infer<typeof CdpCommandParamsSchema>;
 
-export const CdpCommandResultSchema = z.unknown();
+export const CdpCommandResultSchema = z.object({}).passthrough();
 export type CdpCommandResult = z.infer<typeof CdpCommandResultSchema>;
 
-export const CdpEventParamsSchema = z.unknown();
+export const CdpEventParamsSchema = z.object({}).passthrough();
 export type CdpEventParams = z.infer<typeof CdpEventParamsSchema>;
 
 export const RuntimeBindingCalledEventSchema = z
@@ -91,9 +91,10 @@ export type CDPModsPayloadSchemaSpec = z.infer<typeof CDPModsPayloadSchemaSpecSc
 export function normalizeCDPModsPayloadSchema(schema: CDPModsPayloadSchemaSpec | null | undefined) {
   if (!schema) return null;
   if (isZodType(schema)) return schema;
-  if (Object.values(schema).every(isZodType)) return z.object(schema as CDPModsPayloadShape).passthrough();
+  if (Object.values(schema).length > 0 && Object.values(schema).every(isZodType))
+    return z.object(schema as CDPModsPayloadShape).passthrough();
   if (schema.type === "object") return z.object({}).passthrough();
-  return z.unknown();
+  throw new Error("Unsupported payload schema; pass a Zod schema, Zod shape, or object JSON schema.");
 }
 
 export const CDPModsEvaluateParamsSchema = z.object({
@@ -115,6 +116,7 @@ export const CDPModsAddCustomEventObjectParamsSchema = z.object({
   name: CDPModsNameSchema,
   eventSchema: CDPModsPayloadSchemaSpecSchema.nullable().optional(),
 });
+export type CDPModsAddCustomEventObjectParams = z.infer<typeof CDPModsAddCustomEventObjectParamsSchema>;
 export const CDPModsAddCustomEventParamsSchema = z.union([CDPModsZodTypeSchema, CDPModsAddCustomEventObjectParamsSchema]);
 export type CDPModsAddCustomEventParams = z.infer<typeof CDPModsAddCustomEventParamsSchema>;
 
@@ -169,8 +171,8 @@ export const CDPModsCommandParamsSchema = z.union([
 export type CDPModsCommandParams = z.infer<typeof CDPModsCommandParamsSchema>;
 
 export const CDPModsCommandResultSchema = z.union([
-  CDPModsCustomPayloadSchema,
   z.object({ ok: z.boolean() }).passthrough(),
+  CDPModsCustomPayloadSchema,
 ]);
 export type CDPModsCommandResult = z.infer<typeof CDPModsCommandResultSchema>;
 
@@ -233,16 +235,16 @@ export const CdpDebuggeeCommandParamsSchema = CDPModsCustomPayloadSchema.extend(
 });
 export type CdpDebuggeeCommandParams = z.infer<typeof CdpDebuggeeCommandParamsSchema>;
 
-export const ProtocolParamsSchema = z.union([CdpCommandParamsSchema, CDPModsCommandParamsSchema]);
+export const ProtocolParamsSchema = z.union([CDPModsCommandParamsSchema, CdpCommandParamsSchema]);
 export type ProtocolParams = z.infer<typeof ProtocolParamsSchema>;
 
-export const ProtocolResultSchema = z.union([CdpCommandResultSchema, CDPModsCommandResultSchema]);
+export const ProtocolResultSchema = z.union([CDPModsCommandResultSchema, CdpCommandResultSchema]);
 export type ProtocolResult = z.infer<typeof ProtocolResultSchema>;
 
 export const ProtocolEventParamsSchema = z.union([
-  CdpEventParamsSchema,
-  CDPModsCustomPayloadSchema,
   CDPModsPongEventSchema,
+  CDPModsCustomPayloadSchema,
+  CdpEventParamsSchema,
 ]);
 export type ProtocolEventParams = z.infer<typeof ProtocolEventParamsSchema>;
 

@@ -1,3 +1,3 @@
-from CDPModsClient import CDPModsClient
+from .CDPModsClient import CDPModsClient
 
 __all__ = ["CDPModsClient"]

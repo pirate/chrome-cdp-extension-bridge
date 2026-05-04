@@ -492,9 +492,9 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
     if (!u) return;
     // emit to root + every known client session, so any CDPSession listener
     // (Playwright per-target sessions) fires.
-    sendToClient(state, { method: u.event, params: u.data ?? {} });
+    sendToClient(state, { method: u.event, params: (u.data ?? {}) as Record<string, unknown> });
     for (const sid of state.clientSessionIds) {
-      sendToClient(state, { method: u.event, params: u.data ?? {}, sessionId: sid });
+      sendToClient(state, { method: u.event, params: (u.data ?? {}) as Record<string, unknown>, sessionId: sid });
     }
     return;
   }

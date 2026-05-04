@@ -24,7 +24,7 @@ from queue import Queue, Empty
 
 from websocket import create_connection
 
-from translate import (
+from .translate import (
     DEFAULT_CLIENT_ROUTES,
     binding_name_for,
     wrap_command_if_needed,
@@ -46,7 +46,7 @@ class _DomainMethods:
         self._domain = domain
 
     def __getattr__(self, method):
-        async def call(*args, **kwargs):
+        def call(*args, **kwargs):
             if len(args) > 1:
                 raise TypeError(f"{self._domain}.{method} accepts at most one positional params object")
             params = dict(args[0]) if args else {}
@@ -246,7 +246,7 @@ class CDPModsClient:
         }
         return result
 
-    async def raw_send(self, method, params=None):
+    def raw_send(self, method, params=None):
         return self._send_frame(method, params or {}, record_raw_timing=True)
 
     def on(self, event, handler):
@@ -534,7 +534,8 @@ class CDPModsClient:
 
         # 3. Wait for the loaded extension's SW.
         sw_url_prefix = f"chrome-extension://{extension_id}/"
-        while True:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] == "service_worker" and t["url"].startswith(sw_url_prefix):
                     result = probe_target(t)
@@ -544,6 +545,7 @@ class CDPModsClient:
                             "target_id": t["targetId"], "url": t["url"], "session_id": result["session_id"],
                         }
             time.sleep(0.1)
+        raise RuntimeError(f"Timed out after 60s waiting for service worker target for extension {extension_id}.")
 
     def _service_worker_target_matches(self, target):
         url = target.get("url") or ""
