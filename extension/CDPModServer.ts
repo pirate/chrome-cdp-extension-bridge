@@ -112,7 +112,9 @@ export function installCDPModServer(globalScope: CDPModGlobalScope = globalThis 
           cdp_event_name?: string;
           id?: string;
           name?: string;
-          meta?: () => { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown };
+          meta?: () =>
+            | { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown }
+            | undefined;
         }
       | string,
   ) {
@@ -699,14 +701,15 @@ export function installCDPModServer(globalScope: CDPModGlobalScope = globalThis 
       } = params as CdpDebuggeeCommandParams;
       const resolvedDebuggee = debuggee ?? compactDebuggee({ tabId, targetId, extensionId });
       if (Object.keys(resolvedDebuggee).length === 0) {
-        let [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
+        let tab: chrome.tabs.Tab | undefined;
+        [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab?.id) [tab] = await chromeApi.tabs.query({});
         if (!tab?.id) {
           try {
             tab = await chromeApi.tabs.create({ url: "https://example.com/#cdpmod", active: true });
           } catch {
             const win = await chromeApi.windows.create({ url: "https://example.com/#cdpmod", focused: true });
-            tab = win.tabs?.[0];
+            tab = win?.tabs?.[0];
           }
         }
         if (!tab?.id) throw new Error(`chrome_debugger route for ${method} could not find an active tab.`);

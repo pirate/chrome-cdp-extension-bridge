@@ -567,7 +567,7 @@ export class CDPModClient extends CDPModEventEmitter {
   }
 
   on(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
-    if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
+    if (typeof event_name !== "string" && typeof event_name !== "symbol") {
       const name = normalizeCDPModName(event_name);
       this.event_schemas.set(name, event_name);
       return super.on(name, listener);
@@ -576,7 +576,7 @@ export class CDPModClient extends CDPModEventEmitter {
   }
 
   once(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
-    if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
+    if (typeof event_name !== "string" && typeof event_name !== "symbol") {
       const name = normalizeCDPModName(event_name);
       this.event_schemas.set(name, event_name);
       return super.once(name, listener);
@@ -585,7 +585,7 @@ export class CDPModClient extends CDPModEventEmitter {
   }
 
   off(event_name: CDPModEventNameInput, listener: (...args: unknown[]) => void) {
-    if (typeof event_name !== "string" && typeof event_name !== "symbol" && event_name?.parse) {
+    if (typeof event_name !== "string" && typeof event_name !== "symbol") {
       return super.off(normalizeCDPModName(event_name), listener);
     }
     return super.off(typeof event_name === "symbol" ? event_name : normalizeCDPModName(event_name), listener);

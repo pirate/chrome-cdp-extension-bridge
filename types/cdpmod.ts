@@ -43,7 +43,7 @@ export type CDPModNamedValue = {
   cdp_event_name?: string;
   id?: string;
   name?: string;
-  meta?: () => { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown };
+  meta?: () => { cdp_command_name?: unknown; cdp_event_name?: unknown; id?: unknown; name?: unknown } | undefined;
 };
 
 export function normalizeCDPModName(value: CDPModName) {
@@ -269,6 +269,7 @@ export const CDPModCustomEventRegistrationSchema = CDPModAddCustomEventObjectPar
 export type CDPModCustomEventRegistration = z.infer<typeof CDPModCustomEventRegistrationSchema>;
 
 export const CDPModMiddlewareRegistrationSchema = CDPModAddMiddlewareParamsSchema.extend({
+  expression: z.string().nullable().optional(),
   handler:
     z.custom<
       (
