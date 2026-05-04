@@ -107,7 +107,6 @@ class CDPModsClient:
         trust_service_worker_target=False,
         require_service_worker_target=False,
         service_worker_ready_expression=None,
-        discovery_wait_ms=10000,
         launch_options=None,
     ):
         self.cdp_url = cdp_url
@@ -122,7 +121,6 @@ class CDPModsClient:
         self.trust_service_worker_target = trust_service_worker_target
         self.require_service_worker_target = require_service_worker_target
         self.service_worker_ready_expression = service_worker_ready_expression
-        self.discovery_wait_ms = discovery_wait_ms
         self.launch_options = dict(launch_options or {})
 
         self.extension_id = None
@@ -170,13 +168,7 @@ class CDPModsClient:
         self._send_frame("Target.setDiscoverTargets", {"discover": True})
 
         extension_started_at = int(time.time() * 1000)
-        original_discovery_wait_ms = self.discovery_wait_ms
-        if self._launched_process is not None:
-            self.discovery_wait_ms = min(self.discovery_wait_ms, 600)
-        try:
-            ext = self._ensure_extension()
-        finally:
-            self.discovery_wait_ms = original_discovery_wait_ms
+        ext = self._ensure_extension()
         extension_completed_at = int(time.time() * 1000)
         self.extension_id = ext["extension_id"]
         self.ext_target_id = ext["target_id"]
@@ -289,7 +281,9 @@ class CDPModsClient:
             return CDPMODS_READY_EXPRESSION
         return f"({CDPMODS_READY_EXPRESSION}) && Boolean({self.service_worker_ready_expression})"
 
-    def _session_id_for_target(self, target_id, timeout=1.0):
+    def _session_id_for_target(self, target_id, timeout=0):
+        if timeout <= 0:
+            return self._target_sessions.get(target_id)
         deadline = time.time() + timeout
         while time.time() <= deadline:
             session_id = self._target_sessions.get(target_id)
@@ -487,8 +481,8 @@ class CDPModsClient:
 
     def _ensure_extension(self):
         ready_expression = self._ready_expression()
-        def probe_target(target, wait=1.0):
-            session_id = self._session_id_for_target(target["targetId"], wait)
+        def probe_target(target):
+            session_id = self._session_id_for_target(target["targetId"])
             if not session_id:
                 return None
             probe = self._send_frame("Runtime.evaluate", {
@@ -503,31 +497,27 @@ class CDPModsClient:
                 "url": target["url"],
                 "session_id": session_id,
             }
-        # 1. Discover an existing CDPMods service worker. Poll briefly because
-        # preinstalled service workers can take a moment to spin up.
-        deadline = time.time() + (self.discovery_wait_ms / 1000)
-        while time.time() <= deadline:
-            target_infos = self._send_frame("Target.getTargets")["targetInfos"]
-            if self.trust_service_worker_target:
-                for t in target_infos:
-                    if self._service_worker_target_matches(t):
-                        result = probe_target(t)
-                        if result:
-                            return {"source": "trusted", **result}
+        # 1. Discover an existing CDPMods service worker from the current CDP
+        # target snapshot. If none is already ready, use explicit injection.
+        target_infos = self._send_frame("Target.getTargets")["targetInfos"]
+        if self.trust_service_worker_target:
             for t in target_infos:
-                if t["type"] != "service_worker": continue
-                if not t["url"].startswith("chrome-extension://"): continue
-                try:
-                    result = probe_target(t, wait=0.05)
-                except Exception:
-                    continue
-                if result:
-                    return {"source": "discovered", **result}
-            if time.time() >= deadline: break
-            time.sleep(0.1)
+                if self._service_worker_target_matches(t):
+                    result = probe_target(t)
+                    if result:
+                        return {"source": "trusted", **result}
+        for t in target_infos:
+            if t["type"] != "service_worker": continue
+            if not t["url"].startswith("chrome-extension://"): continue
+            try:
+                result = probe_target(t)
+            except Exception:
+                continue
+            if result:
+                return {"source": "discovered", **result}
         if self.require_service_worker_target:
             raise RuntimeError(
-                f"Required CDPMods service worker target was not ready within {self.discovery_wait_ms}ms "
+                "Required CDPMods service worker target was not visible in the current CDP target snapshot "
                 f"({', '.join([*self.service_worker_url_includes, *self.service_worker_url_suffixes]) or 'no matcher'})."
             )
 
@@ -544,8 +534,7 @@ class CDPModsClient:
 
         # 3. Wait for the loaded extension's SW.
         sw_url_prefix = f"chrome-extension://{extension_id}/"
-        deadline = time.time() + 10.0
-        while time.time() < deadline:
+        while True:
             for t in (self._send_frame("Target.getTargets")["targetInfos"]):
                 if t["type"] == "service_worker" and t["url"].startswith(sw_url_prefix):
                     result = probe_target(t)
@@ -555,7 +544,6 @@ class CDPModsClient:
                             "target_id": t["targetId"], "url": t["url"], "session_id": result["session_id"],
                         }
             time.sleep(0.1)
-        raise RuntimeError(f"Extensions.loadUnpacked installed {extension_id} but its SW did not appear")
 
     def _service_worker_target_matches(self, target):
         url = target.get("url") or ""

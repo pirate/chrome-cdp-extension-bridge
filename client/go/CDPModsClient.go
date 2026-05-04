@@ -130,7 +130,6 @@ type Options struct {
 	TrustServiceWorkerTarget     bool
 	RequireServiceWorkerTarget   bool
 	ServiceWorkerReadyExpression string
-	DiscoveryWaitMilliseconds    int
 	LaunchOptions                LaunchOptions
 }
 
@@ -188,9 +187,6 @@ func New(opts Options) *CDPModsClient {
 	if opts.ServiceWorkerURLSuffixes == nil {
 		opts.ServiceWorkerURLSuffixes = []string{"/service_worker.js", "/background.js"}
 	}
-	if opts.DiscoveryWaitMilliseconds <= 0 {
-		opts.DiscoveryWaitMilliseconds = 10000
-	}
 	return &CDPModsClient{
 		opts:           opts,
 		pending:        map[int64]chan map[string]any{},
@@ -246,12 +242,7 @@ func (c *CDPModsClient) Connect() error {
 	// once the reader goroutine is running, any further error must call Close
 	// to tear it down; otherwise the goroutine + ws connection leak.
 	extensionStartedAt := time.Now().UnixMilli()
-	originalDiscoveryWaitMilliseconds := c.opts.DiscoveryWaitMilliseconds
-	if c.launchedProcess != nil && c.opts.DiscoveryWaitMilliseconds > 600 {
-		c.opts.DiscoveryWaitMilliseconds = 600
-	}
 	ext, err := c.ensureExtension()
-	c.opts.DiscoveryWaitMilliseconds = originalDiscoveryWaitMilliseconds
 	if err != nil {
 		c.Close()
 		return err
@@ -747,41 +738,34 @@ func targetIDFromEventParams(params map[string]any) string {
 }
 
 func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
-	deadline := time.Now().Add(time.Duration(c.opts.DiscoveryWaitMilliseconds) * time.Millisecond)
-	for time.Now().Before(deadline.Add(time.Millisecond)) {
-		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
-		if err != nil {
-			return nil, err
-		}
-		targetsRaw, _ := targetsResp["targetInfos"].([]any)
-		if c.opts.TrustServiceWorkerTarget {
-			for _, t := range targetsRaw {
-				ti, _ := t.(map[string]any)
-				if !c.serviceWorkerTargetMatches(ti) {
-					continue
-				}
-				if probed, ok := c.probeReadyTarget(ti, time.Second); ok {
-					probed["source"] = "trusted"
-					return probed, nil
-				}
-			}
-		}
+	targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
+	if err != nil {
+		return nil, err
+	}
+	targetsRaw, _ := targetsResp["targetInfos"].([]any)
+	if c.opts.TrustServiceWorkerTarget {
 		for _, t := range targetsRaw {
 			ti, _ := t.(map[string]any)
-			ttype, _ := ti["type"].(string)
-			turl, _ := ti["url"].(string)
-			if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
+			if !c.serviceWorkerTargetMatches(ti) {
 				continue
 			}
-			if probed, ok := c.probeReadyTarget(ti, 50*time.Millisecond); ok {
-				probed["source"] = "discovered"
+			if probed, ok := c.probeReadyTarget(ti, 0); ok {
+				probed["source"] = "trusted"
 				return probed, nil
 			}
 		}
-		if !time.Now().Before(deadline) {
-			break
+	}
+	for _, t := range targetsRaw {
+		ti, _ := t.(map[string]any)
+		ttype, _ := ti["type"].(string)
+		turl, _ := ti["url"].(string)
+		if ttype != "service_worker" || !strings.HasPrefix(turl, "chrome-extension://") {
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		if probed, ok := c.probeReadyTarget(ti, 0); ok {
+			probed["source"] = "discovered"
+			return probed, nil
+		}
 	}
 	if c.opts.RequireServiceWorkerTarget {
 		matchers := append(append([]string{}, c.opts.ServiceWorkerURLIncludes...), c.opts.ServiceWorkerURLSuffixes...)
@@ -789,7 +773,7 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 		if matcherText == "" {
 			matcherText = "no matcher"
 		}
-		return nil, fmt.Errorf("required CDPMods service worker target was not ready within %dms (%s)", c.opts.DiscoveryWaitMilliseconds, matcherText)
+		return nil, fmt.Errorf("required CDPMods service worker target was not visible in the current CDP target snapshot (%s)", matcherText)
 	}
 
 	loadResp, err := c.sendFrame("Extensions.loadUnpacked", map[string]any{"path": c.opts.ExtensionPath}, "")
@@ -808,8 +792,7 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 	}
 
 	swURLPrefix := fmt.Sprintf("chrome-extension://%s/", extID)
-	deadline = time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		targetsResp, err := c.sendFrame("Target.getTargets", map[string]any{}, "")
 		if err != nil {
 			return nil, err
@@ -828,7 +811,6 @@ func (c *CDPModsClient) ensureExtension() (map[string]any, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("Extensions.loadUnpacked installed %s but its SW did not appear", extID)
 }
 
 func (c *CDPModsClient) serviceWorkerTargetMatches(target map[string]any) bool {
@@ -865,6 +847,12 @@ func (c *CDPModsClient) readyExpression() string {
 }
 
 func (c *CDPModsClient) sessionIDForTarget(targetID string, timeout time.Duration) string {
+	if timeout <= 0 {
+		c.targetSessionsMu.Lock()
+		sessionID := c.targetSessions[targetID]
+		c.targetSessionsMu.Unlock()
+		return sessionID
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline.Add(time.Millisecond)) {
 		c.targetSessionsMu.Lock()

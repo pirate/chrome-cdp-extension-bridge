@@ -51,8 +51,6 @@ export async function injectExtensionIfNeeded({
   trust_matched_service_worker = false,
   require_service_worker_target = false,
   service_worker_ready_expression = null,
-  timeout_ms = 10_000,
-  discovery_wait_ms = 10_000,
 }: {
   send: SendCDP;
   session_id_for_target?: ((target_id: string) => string | null | undefined) | null;
@@ -62,8 +60,6 @@ export async function injectExtensionIfNeeded({
   trust_matched_service_worker?: boolean;
   require_service_worker_target?: boolean;
   service_worker_ready_expression?: string | null;
-  timeout_ms?: number;
-  discovery_wait_ms?: number;
 }) {
   if (typeof send !== "function") throw new Error("injectExtensionIfNeeded requires { send }");
   const ready_expression =
@@ -81,17 +77,12 @@ export async function injectExtensionIfNeeded({
   // extension loaded don't have to provide a path at all.
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  const sessionIdForTarget = async (target_id: string, wait_ms = 1_000) => {
-    const deadline = Date.now() + wait_ms;
-    while (Date.now() <= deadline) {
-      const session_id = session_id_for_target?.(target_id);
-      if (typeof session_id === "string" && session_id.length > 0) return session_id;
-      await sleep(20);
-    }
-    return null;
+  const sessionIdForTarget = (target_id: string) => {
+    const session_id = session_id_for_target?.(target_id);
+    return typeof session_id === "string" && session_id.length > 0 ? session_id : null;
   };
-  const probeTarget = async (target: TargetInfo, wait_ms = 1_000) => {
-    const session_id = await sessionIdForTarget(target.targetId, wait_ms);
+  const probeTarget = async (target: TargetInfo) => {
+    const session_id = sessionIdForTarget(target.targetId);
     if (session_id == null) return null;
     const probe = commands["Runtime.evaluate"].result.parse(
       await sendWithTimeout(
@@ -112,36 +103,30 @@ export async function injectExtensionIfNeeded({
     };
   };
 
-  // 1. Discover an existing CDPMods service worker. Preinstalled extensions
-  // can take a moment to spin their SW *and*
-  // for the SW's top-level module init to run. The client has already enabled
-  // flattened auto-attach, so probing uses the existing target->session map.
-  const discovery_deadline = Date.now() + discovery_wait_ms;
-  while (Date.now() <= discovery_deadline) {
-    const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
-    if (trust_matched_service_worker) {
-      const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as TargetInfo | undefined;
-      if (trusted_target) {
-        const probed = await probeTarget(trusted_target);
-        if (probed) return { source: "trusted", ...probed };
-      }
+  // 1. Discover an existing CDPMods service worker from the current CDP target
+  // snapshot. If no already-ready worker is visible, move on to the explicit
+  // injection path instead of waiting on a guessed preinstalled-extension budget.
+  const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+  if (trust_matched_service_worker) {
+    const trusted_target = target_infos.find((candidate) => serviceWorkerTargetMatches(candidate)) as TargetInfo | undefined;
+    if (trusted_target) {
+      const probed = await probeTarget(trusted_target);
+      if (probed) return { source: "trusted", ...probed };
     }
-    for (const candidate of target_infos) {
-      if (candidate.type !== "service_worker") continue;
-      if (!candidate.url.startsWith("chrome-extension://")) continue;
-      try {
-        const probed = await probeTarget(candidate as TargetInfo, 50);
-        if (probed) return { source: "discovered", ...probed };
-      } catch {
-        continue;
-      }
+  }
+  for (const candidate of target_infos) {
+    if (candidate.type !== "service_worker") continue;
+    if (!candidate.url.startsWith("chrome-extension://")) continue;
+    try {
+      const probed = await probeTarget(candidate as TargetInfo);
+      if (probed) return { source: "discovered", ...probed };
+    } catch {
+      continue;
     }
-    if (Date.now() >= discovery_deadline) break;
-    await sleep(100);
   }
   if (require_service_worker_target) {
     throw new Error(
-      `Required CDPMods service worker target was not ready within ${discovery_wait_ms}ms ` +
+      `Required CDPMods service worker target was not visible in the current CDP target snapshot ` +
         `(${[...service_worker_url_includes, ...service_worker_url_suffixes].join(", ") || "no matcher"}).`,
     );
   }
@@ -174,8 +159,7 @@ export async function injectExtensionIfNeeded({
       // 3. Wait for the loaded extension's service worker target. Custom extensions
       // can name the worker bundle anything; WXT uses background.js.
       const sw_url_prefix = `chrome-extension://${extension_id}/`;
-      const deadline = Date.now() + timeout_ms;
-      while (Date.now() < deadline) {
+      for (;;) {
         const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
         const target = target_infos.find((candidate) => candidate.type === "service_worker" && candidate.url.startsWith(sw_url_prefix)) as TargetInfo | undefined;
         if (target) {
@@ -184,10 +168,6 @@ export async function injectExtensionIfNeeded({
         }
         await sleep(100);
       }
-      throw new Error(
-        `Extensions.loadUnpacked installed extension ${extension_id} but its service worker target ` +
-          `under ${sw_url_prefix} did not appear within ${timeout_ms}ms.`,
-      );
     }
   }
 
@@ -202,14 +182,14 @@ export async function injectExtensionIfNeeded({
     has_tabs?: boolean;
     has_debugger?: boolean;
   }[] = [];
-  const target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
-  for (const target of target_infos) {
+  const borrowed_target_infos = commands["Target.getTargets"].result.parse(await send("Target.getTargets")).targetInfos;
+  for (const target of borrowed_target_infos) {
     if (target.type !== "service_worker") continue;
     if (!target.url.startsWith("chrome-extension://")) continue;
 
     let session_id: string | null = null;
     try {
-      session_id = await sessionIdForTarget(target.targetId, 50);
+      session_id = sessionIdForTarget(target.targetId);
       if (session_id == null) continue;
       await send("Runtime.enable", {}, session_id).catch(() => {});
       const bootstrap = commands["Runtime.evaluate"].result.parse(

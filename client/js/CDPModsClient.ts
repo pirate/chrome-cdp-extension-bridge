@@ -66,7 +66,6 @@ type ClientOptions = {
   trust_service_worker_target?: boolean;
   require_service_worker_target?: boolean;
   service_worker_ready_expression?: string | null;
-  discovery_wait_ms?: number;
   launch_options?: Record<string, unknown>;
   self?: {
     addEventListener?: (listener: (event: string, data: ProtocolPayload, cdpSessionId: string | null) => void) => unknown;
@@ -218,7 +217,6 @@ export class CDPModsClient extends CDPModsEventEmitter {
   trust_service_worker_target: boolean;
   require_service_worker_target: boolean;
   service_worker_ready_expression: string | null;
-  discovery_wait_ms: number;
   ws: WebSocket | null;
   self: ClientOptions["self"];
   next_id: number;
@@ -260,7 +258,6 @@ export class CDPModsClient extends CDPModsEventEmitter {
     trust_service_worker_target = false,
     require_service_worker_target = false,
     service_worker_ready_expression = null,
-    discovery_wait_ms = 10_000,
     launch_options = {},
     self = null,
   }: ClientOptions = {}) {
@@ -278,7 +275,6 @@ export class CDPModsClient extends CDPModsEventEmitter {
     this.trust_service_worker_target = trust_service_worker_target;
     this.require_service_worker_target = require_service_worker_target;
     this.service_worker_ready_expression = service_worker_ready_expression;
-    this.discovery_wait_ms = discovery_wait_ms;
     this.launch_options = launch_options;
     this.self = self;
 
@@ -387,7 +383,6 @@ export class CDPModsClient extends CDPModsEventEmitter {
         trust_matched_service_worker: trust_service_worker_target,
         require_service_worker_target: this.require_service_worker_target,
         service_worker_ready_expression: this.service_worker_ready_expression,
-        discovery_wait_ms: this._launched != null ? Math.min(this.discovery_wait_ms, 600) : this.discovery_wait_ms,
       });
     } catch (error) {
       throw error;
