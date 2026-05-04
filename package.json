@@ -35,6 +35,8 @@
     "demo:js": "pnpm run build && node dist/client/js/demo.js",
     "demo:python": "pnpm run build && cd client/python && uv run python demo.py",
     "demo:go": "pnpm run build && (cd client/go && go run .)",
+    "demo:proxy:playwright": "pnpm run build && node dist/client/js/examples/playwright.js",
+    "demo:proxy:puppeteer": "pnpm run build && node dist/client/js/examples/puppeteer.js",
     "proxy": "pnpm run build && node dist/bridge/proxy.js",
     "test": "pnpm run build && node --test \"dist/test/*.test.js\""
   },
@@ -49,6 +51,7 @@
     "oxfmt": "^0.47.0",
     "oxlint": "^1.62.0",
     "playwright": "^1.59.1",
+    "puppeteer-core": "^24.42.0",
     "typescript": "^6.0.3"
   },
   "engines": {

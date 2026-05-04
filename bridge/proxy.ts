@@ -74,7 +74,12 @@ const MAGIC_METHODS = new Set([
   "Mods.addCustomEvent",
   "Mods.addMiddleware",
 ]);
-const ROUTE_TO_SW_RE = /^(CDPMods|Custom)\./;
+const ROUTE_TO_SW_RE = /^(Mods|Custom)\./;
+const TARGET_AUTO_ATTACH_PARAMS = {
+  autoAttach: true,
+  waitForDebuggerOnStart: false,
+  flatten: true,
+};
 const isWsUrl = (url) => /^wss?:\/\//i.test(url);
 
 function liveBrowserWsUrl(endpoint: string) {
@@ -108,8 +113,9 @@ export async function startProxy({
   const server = http.createServer(async (req, res) => {
     try {
       await ensureUpstream(upstreamState, { autoLaunch, launchOptions });
+      const requestUrl = req.url === "/json/version/" ? "/json/version" : req.url;
       if (isWsUrl(upstreamState.url)) {
-        if (req.url === "/json/version") {
+        if (requestUrl === "/json/version") {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://${req.headers.host}/devtools/browser/proxy` }));
         } else {
@@ -118,7 +124,7 @@ export async function startProxy({
         }
         return;
       }
-      const upstreamRes = await fetch(`${upstreamState.url}${req.url}`);
+      const upstreamRes = await fetch(`${upstreamState.url}${requestUrl}`);
       const text = await upstreamRes.text();
       const contentType = upstreamRes.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
@@ -255,6 +261,7 @@ async function handleConnection(
     extTargetId: null,
     hiddenSessionIds: new Set(), // sessions we attached for ourselves
     hiddenTargetIds: new Set(), // SW target the client must never see
+    targetSessionIds: new Map(),
     clientSessionIds: new Set(), // session ids the client has attached
     bootstrapped: false,
     queuedFromClient: [],
@@ -301,7 +308,14 @@ async function handleConnection(
       upstream.send(JSON.stringify(message));
     });
 
-  const ext = await injectExtensionIfNeeded({ send: sendInternal, extension_path: extensionPath });
+  await sendInternal("Target.setAutoAttach", TARGET_AUTO_ATTACH_PARAMS);
+  await sendInternal("Target.setDiscoverTargets", { discover: true });
+
+  const ext = await injectExtensionIfNeeded({
+    send: sendInternal,
+    session_id_for_target: (target_id) => state.targetSessionIds.get(target_id) || null,
+    extension_path: extensionPath,
+  });
   state.extSessionId = ext.session_id;
   state.extTargetId = ext.target_id;
   state.hiddenSessionIds.add(ext.session_id);
@@ -447,6 +461,25 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
   }
 
   const event = CdpEventFrameSchema.parse(msg);
+
+  if (event.method === "Target.attachedToTarget") {
+    const attached = TargetEvents["Target.attachedToTarget"].parse(event.params || {});
+    state.targetSessionIds.set(attached.targetInfo.targetId, attached.sessionId);
+  }
+  if (event.method === "Target.detachedFromTarget") {
+    const eventSessionId =
+      event.params &&
+      typeof event.params === "object" &&
+      "sessionId" in event.params &&
+      typeof event.params.sessionId === "string"
+        ? event.params.sessionId
+        : null;
+    if (eventSessionId) {
+      for (const [target_id, session_id] of state.targetSessionIds) {
+        if (session_id === eventSessionId) state.targetSessionIds.delete(target_id);
+      }
+    }
+  }
 
   // event
   if (event.method === "Runtime.bindingCalled" && event.sessionId === state.extSessionId) {
