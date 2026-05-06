@@ -205,7 +205,7 @@ test("service-worker routed standard CDP commands and events can be transformed"
     });
 
     await cdp.Target.setDiscoverTargets({ discover: true });
-    await cdp._sendFrame("Target.createTarget", { url: "about:blank#modcdp-event-test" });
+    await cdp._sendFrame("Target.createTarget", { url: "chrome://newtab/" });
 
     const event = events["Target.targetCreated"].parse(await forwardedEvent);
     assert.ok(Object.hasOwn(event.targetInfo, "tabId"), "transformed event targetInfo should include tabId");

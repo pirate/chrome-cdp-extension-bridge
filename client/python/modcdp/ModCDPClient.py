@@ -13,6 +13,7 @@ Synchronous (blocking) API; one background thread reads frames off the WS.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -328,25 +329,47 @@ class ModCDPClient:
         return _DomainMethods(self, domain)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        if self._launched_process is not None and self._ws is not None:
+            try:
+                self._send_frame("Browser.close", {}, timeout=1)
+            except Exception:
+                pass
         self._closed = True
         try:
             if self._ws:
                 self._ws.close()
         except Exception:
             pass
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1)
+        self._ws = None
         if self._launched_process is not None:
             self._launched_process.terminate()
             try:
                 self._launched_process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self._launched_process.kill()
+                self._launched_process.wait(timeout=2)
             self._launched_process = None
         if self._profile_dir is not None:
-            self._profile_dir.cleanup()
+            self._cleanup_temp_dir(self._profile_dir)
             self._profile_dir = None
         if self._prepared_extension_dir is not None:
-            self._prepared_extension_dir.cleanup()
+            self._cleanup_temp_dir(self._prepared_extension_dir)
             self._prepared_extension_dir = None
+
+    def _cleanup_temp_dir(self, temp_dir: tempfile.TemporaryDirectory[str]) -> None:
+        for attempt in range(20):
+            try:
+                temp_dir.cleanup()
+                return
+            except OSError:
+                if attempt == 19:
+                    shutil.rmtree(temp_dir.name, ignore_errors=True)
+                    return
+                time.sleep(0.1)
 
     def _ready_expression(self) -> str:
         if not self.service_worker_ready_expression:

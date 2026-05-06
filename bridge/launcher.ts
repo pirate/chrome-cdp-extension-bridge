@@ -83,11 +83,12 @@ export async function launchChrome({
   const exe = findChromeBinary(executable_path);
   const usePort = port || (await freePort());
   const profileDir = await mkdtemp(path.join(tmpdir(), "modcdp."));
+  const needsNoSandbox = headless && process.platform === "linux" && !process.env.DISPLAY && sandbox !== true;
   const flags = [
     ...DEFAULT_FLAGS,
     headless ? "--headless=new" : null,
     "--disable-gpu",
-    sandbox === false ? "--no-sandbox" : null,
+    needsNoSandbox ? "--no-sandbox" : null,
     `--user-data-dir=${profileDir}`,
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${usePort}`,

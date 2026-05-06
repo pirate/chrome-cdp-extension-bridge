@@ -26,12 +26,14 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        require_serial: true
       - id: test
         name: test
         entry: pnpm run test
         language: system
         pass_filenames: false
         always_run: true
+        require_serial: true
       - id: ty-check
         name: ty-check
         entry: uv --directory client/python run ty check

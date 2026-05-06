@@ -21,6 +21,7 @@ import type {
 import type { cdp } from "../types/cdp.js";
 
 export const BINDING_PREFIX = "__ModCDP_";
+export const UPSTREAM_EVENT_BINDING_NAME = "__ModCDP_event_from_upstream__";
 
 export const DEFAULT_CLIENT_ROUTES = {
   "Mod.*": "service_worker",
@@ -288,8 +289,8 @@ export function unwrapResponseIfNeeded(
 }
 
 // Returns { event, data } or null when the binding is not a ModCDP event,
-// when the payload is scoped to a different cdpSessionId than ourSessionId,
-// or when the payload string is not valid JSON.
+// when a custom binding payload is scoped to a different cdpSessionId than
+// ourSessionId, or when the payload string is not valid JSON.
 export function unwrapEventIfNeeded(
   method: string,
   params: RuntimeBindingCalledEvent,
@@ -304,12 +305,20 @@ export function unwrapEventIfNeeded(
     return null;
   }
   if (payload == null || typeof payload !== "object") return null;
-  const event = eventNameFor(params?.name || "");
+  const bindingName = params?.name || "";
+  const isUpstreamEventBinding = bindingName === UPSTREAM_EVENT_BINDING_NAME;
+  const event = isUpstreamEventBinding ? UPSTREAM_EVENT_BINDING_NAME : eventNameFor(bindingName);
   if (!event) return null;
-  if (typeof payload.event === "string" && payload.event.length > 0 && payload.event !== event) return null;
-  if (ourSessionId != null && payload.cdpSessionId && payload.cdpSessionId !== ourSessionId) return null;
+  const payloadEvent = typeof payload.event === "string" && payload.event.length > 0 ? payload.event : null;
+  if (!isUpstreamEventBinding && payloadEvent != null && payloadEvent !== event) return null;
+  const resolvedEvent = isUpstreamEventBinding && payloadEvent != null ? payloadEvent : event;
+  if (resolvedEvent === UPSTREAM_EVENT_BINDING_NAME) return null;
+  if (!isUpstreamEventBinding && ourSessionId != null && payload.cdpSessionId && payload.cdpSessionId !== ourSessionId)
+    return null;
   const data = Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
-  return { event, data, sessionId };
+  const sourceSessionId =
+    isUpstreamEventBinding && typeof payload.cdpSessionId === "string" ? payload.cdpSessionId : sessionId;
+  return { event: resolvedEvent, data, sessionId: sourceSessionId };
 }
 
 // --- shared encoder used by the extension service worker --------------------

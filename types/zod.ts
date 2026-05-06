@@ -57,7 +57,190 @@ import * as WebAudio from "./zod/WebAudio.js";
 import * as WebAuthn from "./zod/WebAuthn.js";
 import * as WebMCP from "./zod/WebMCP.js";
 
-export const zod = {
+export type CdpZodSchemas = {
+  readonly Mod: typeof Mod;
+  readonly Accessibility: typeof Accessibility.zod;
+  readonly Animation: typeof Animation.zod;
+  readonly Audits: typeof Audits.zod;
+  readonly Autofill: typeof Autofill.zod;
+  readonly BackgroundService: typeof BackgroundService.zod;
+  readonly BluetoothEmulation: typeof BluetoothEmulation.zod;
+  readonly Browser: typeof Browser.zod;
+  readonly CacheStorage: typeof CacheStorage.zod;
+  readonly Cast: typeof Cast.zod;
+  readonly Console: typeof Console.zod;
+  readonly CrashReportContext: typeof CrashReportContext.zod;
+  readonly CSS: typeof CSS.zod;
+  readonly Debugger: typeof Debugger.zod;
+  readonly DeviceAccess: typeof DeviceAccess.zod;
+  readonly DeviceOrientation: typeof DeviceOrientation.zod;
+  readonly DOM: typeof DOM.zod;
+  readonly DOMDebugger: typeof DOMDebugger.zod;
+  readonly DOMSnapshot: typeof DOMSnapshot.zod;
+  readonly DOMStorage: typeof DOMStorage.zod;
+  readonly Emulation: typeof Emulation.zod;
+  readonly EventBreakpoints: typeof EventBreakpoints.zod;
+  readonly Extensions: typeof Extensions.zod;
+  readonly FedCm: typeof FedCm.zod;
+  readonly Fetch: typeof Fetch.zod;
+  readonly FileSystem: typeof FileSystem.zod;
+  readonly HeadlessExperimental: typeof HeadlessExperimental.zod;
+  readonly HeapProfiler: typeof HeapProfiler.zod;
+  readonly IndexedDB: typeof IndexedDB.zod;
+  readonly Input: typeof Input.zod;
+  readonly Inspector: typeof Inspector.zod;
+  readonly IO: typeof IO.zod;
+  readonly LayerTree: typeof LayerTree.zod;
+  readonly Log: typeof Log.zod;
+  readonly Media: typeof Media.zod;
+  readonly Memory: typeof Memory.zod;
+  readonly Network: typeof Network.zod;
+  readonly Overlay: typeof Overlay.zod;
+  readonly Page: typeof Page.zod;
+  readonly Performance: typeof Performance.zod;
+  readonly PerformanceTimeline: typeof PerformanceTimeline.zod;
+  readonly Preload: typeof Preload.zod;
+  readonly Profiler: typeof Profiler.zod;
+  readonly PWA: typeof PWA.zod;
+  readonly Runtime: typeof Runtime.zod;
+  readonly Schema: typeof Schema.zod;
+  readonly Security: typeof Security.zod;
+  readonly ServiceWorker: typeof ServiceWorker.zod;
+  readonly SmartCardEmulation: typeof SmartCardEmulation.zod;
+  readonly Storage: typeof Storage.zod;
+  readonly SystemInfo: typeof SystemInfo.zod;
+  readonly Target: typeof Target.zod;
+  readonly Tethering: typeof Tethering.zod;
+  readonly Tracing: typeof Tracing.zod;
+  readonly WebAudio: typeof WebAudio.zod;
+  readonly WebAuthn: typeof WebAuthn.zod;
+  readonly WebMCP: typeof WebMCP.zod;
+};
+
+export type CdpCommandSchemas =
+  typeof Accessibility.commands
+  & typeof Animation.commands
+  & typeof Audits.commands
+  & typeof Autofill.commands
+  & typeof BackgroundService.commands
+  & typeof BluetoothEmulation.commands
+  & typeof Browser.commands
+  & typeof CacheStorage.commands
+  & typeof Cast.commands
+  & typeof Console.commands
+  & typeof CrashReportContext.commands
+  & typeof CSS.commands
+  & typeof Debugger.commands
+  & typeof DeviceAccess.commands
+  & typeof DeviceOrientation.commands
+  & typeof DOM.commands
+  & typeof DOMDebugger.commands
+  & typeof DOMSnapshot.commands
+  & typeof DOMStorage.commands
+  & typeof Emulation.commands
+  & typeof EventBreakpoints.commands
+  & typeof Extensions.commands
+  & typeof FedCm.commands
+  & typeof Fetch.commands
+  & typeof FileSystem.commands
+  & typeof HeadlessExperimental.commands
+  & typeof HeapProfiler.commands
+  & typeof IndexedDB.commands
+  & typeof Input.commands
+  & typeof Inspector.commands
+  & typeof IO.commands
+  & typeof LayerTree.commands
+  & typeof Log.commands
+  & typeof Media.commands
+  & typeof Memory.commands
+  & typeof Network.commands
+  & typeof Overlay.commands
+  & typeof Page.commands
+  & typeof Performance.commands
+  & typeof PerformanceTimeline.commands
+  & typeof Preload.commands
+  & typeof Profiler.commands
+  & typeof PWA.commands
+  & typeof Runtime.commands
+  & typeof Schema.commands
+  & typeof Security.commands
+  & typeof ServiceWorker.commands
+  & typeof SmartCardEmulation.commands
+  & typeof Storage.commands
+  & typeof SystemInfo.commands
+  & typeof Target.commands
+  & typeof Tethering.commands
+  & typeof Tracing.commands
+  & typeof WebAudio.commands
+  & typeof WebAuthn.commands
+  & typeof WebMCP.commands;
+
+export type CdpEventSchemas =
+  typeof Accessibility.events
+  & typeof Animation.events
+  & typeof Audits.events
+  & typeof Autofill.events
+  & typeof BackgroundService.events
+  & typeof BluetoothEmulation.events
+  & typeof Browser.events
+  & typeof CacheStorage.events
+  & typeof Cast.events
+  & typeof Console.events
+  & typeof CrashReportContext.events
+  & typeof CSS.events
+  & typeof Debugger.events
+  & typeof DeviceAccess.events
+  & typeof DeviceOrientation.events
+  & typeof DOM.events
+  & typeof DOMDebugger.events
+  & typeof DOMSnapshot.events
+  & typeof DOMStorage.events
+  & typeof Emulation.events
+  & typeof EventBreakpoints.events
+  & typeof Extensions.events
+  & typeof FedCm.events
+  & typeof Fetch.events
+  & typeof FileSystem.events
+  & typeof HeadlessExperimental.events
+  & typeof HeapProfiler.events
+  & typeof IndexedDB.events
+  & typeof Input.events
+  & typeof Inspector.events
+  & typeof IO.events
+  & typeof LayerTree.events
+  & typeof Log.events
+  & typeof Media.events
+  & typeof Memory.events
+  & typeof Network.events
+  & typeof Overlay.events
+  & typeof Page.events
+  & typeof Performance.events
+  & typeof PerformanceTimeline.events
+  & typeof Preload.events
+  & typeof Profiler.events
+  & typeof PWA.events
+  & typeof Runtime.events
+  & typeof Schema.events
+  & typeof Security.events
+  & typeof ServiceWorker.events
+  & typeof SmartCardEmulation.events
+  & typeof Storage.events
+  & typeof SystemInfo.events
+  & typeof Target.events
+  & typeof Tethering.events
+  & typeof Tracing.events
+  & typeof WebAudio.events
+  & typeof WebAuthn.events
+  & typeof WebMCP.events;
+
+export type CdpRuntimeTypes = { readonly zod: CdpZodSchemas };
+export type CdpRuntime = {
+  readonly types: CdpRuntimeTypes;
+  readonly commands: CdpCommandSchemas;
+  readonly events: CdpEventSchemas;
+};
+
+export const zod: CdpZodSchemas = {
   Mod,
   Accessibility: Accessibility.zod,
   Animation: Animation.zod,
@@ -115,8 +298,8 @@ export const zod = {
   WebAudio: WebAudio.zod,
   WebAuthn: WebAuthn.zod,
   WebMCP: WebMCP.zod,
-} as const;
-export const commands = {
+};
+export const commands: CdpCommandSchemas = {
   ...Accessibility.commands,
   ...Animation.commands,
   ...Audits.commands,
@@ -173,8 +356,8 @@ export const commands = {
   ...WebAudio.commands,
   ...WebAuthn.commands,
   ...WebMCP.commands,
-} as const;
-export const events = {
+};
+export const events: CdpEventSchemas = {
   ...Accessibility.events,
   ...Animation.events,
   ...Audits.events,
@@ -231,6 +414,6 @@ export const events = {
   ...WebAudio.events,
   ...WebAuthn.events,
   ...WebMCP.events,
-} as const;
-export const types = { zod } as const;
-export const cdp = { types, commands, events } as const;
+};
+export const types: CdpRuntimeTypes = { zod };
+export const cdp: CdpRuntime = { types, commands, events };
