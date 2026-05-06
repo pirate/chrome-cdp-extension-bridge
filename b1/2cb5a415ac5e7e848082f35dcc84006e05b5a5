@@ -1,0 +1,21 @@
+client/go/ModCDPClient.go
+  s_b97125cfd29900::t_252e4167000b00 492
+client/python/modcdp/ModCDPClient.py
+  s_b97125cfd29900::t_10f37491c6a80b 436
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.1",
+  "base_commit_sha": "b12cb5a415ac5e7e848082f35dcc84006e05b5a5",
+  "prompts": {},
+  "sessions": {
+    "s_b97125cfd29900": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dfbaf-cdd3-7450-a6a6-0d68da00b802",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Nick Sweeting <git@sweeting.me>"
+    }
+  }
+}
