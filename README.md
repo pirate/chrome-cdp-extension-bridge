@@ -15,12 +15,12 @@ While I had high hopes for WebDriver BiDi, unfortunately it solves almost none o
 ModCDP does not aim to solve all of these issues directly either. Instead it solves a simpler problem: allowing us to customize and extend CDP with new commands.
 Then we use those basic primitives to fix the shortcomings in CDP by implementing our own custom events (all sent over a normal CDP websocket to a stock Chromium browser).
 
-| Primitive                | What it does                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| Primitive              | What it does                                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
 | `Mod.evaluate`         | Run an expression in the ModCDP extension service worker, with `chrome.*` and a `cdp` bridge in scope |
-| `Mod.addCustomCommand` | Register a `Custom.*` method handler that lives in the SW                                               |
-| `Mod.addCustomEvent`   | Register a `Custom.*` event your SW handlers can `emit()`                                               |
-| `Mod.addMiddleware`    | Intercept service-worker-routed requests, responses, or events by name or `*`                           |
+| `Mod.addCustomCommand` | Register a `Custom.*` method handler that lives in the SW                                             |
+| `Mod.addCustomEvent`   | Register a `Custom.*` event your SW handlers can `emit()`                                             |
+| `Mod.addMiddleware`    | Intercept service-worker-routed requests, responses, or events by name or `*`                         |
 
 Instead of inventing yet another browser driver library, ModCDP fixes the issue at the root.
 
@@ -143,7 +143,7 @@ pnpm run proxy -- --upstream http://127.0.0.1:9222 --port 9223
 | ------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | `--loopback`  | client → SW → SW dials its own WS back to localhost:9222 → CDP     | Default. You need the SW to intercept/inspect/rewrite normal traffic.           |
 | `--debugger`  | client → SW → `chrome.debugger.sendCommand` against the active tab | The browser exposes no remote CDP port and you only have extension permissions. |
-| `--direct`    | client → sends non-ModCDP commands to browser CDP directly        | You already have a CDP endpoint and don't need extension interception.          |
+| `--direct`    | client → sends non-ModCDP commands to browser CDP directly         | You already have a CDP endpoint and don't need extension interception.          |
 
 Pass via `routes: { "*.*": "direct_cdp" | "service_worker" }` on the client and `server: { routes: { "*.*": "loopback_cdp" | "chrome_debugger" } }` for the SW side. The demos default to `--loopback` (the most powerful mode).
 
@@ -168,7 +168,7 @@ dist/                     Built JS output used by the extension and Node CLI scr
 
 ## Requirements
 
-- Stock Google Chrome can be used without relaunch flags: visit `chrome://inspect/#remote-debugging` to expose the current browser at `http://127.0.0.1:9222`, and load/install the ModCDP extension in that profile. If no `cdp_url` is passed, the JS client probes that endpoint before auto-launching a test browser.
+- Stock Google Chrome can be used without relaunch flags: visit `chrome://inspect/#remote-debugging` to expose the current browser at `http://127.0.0.1:9222`, and load/install the ModCDP extension in that profile. Pass that endpoint as `cdp_url`, or set `scan_for_existing_localhost_9222: true` to let the JS client probe it before auto-launching a test browser.
 - Automated/test browsers can still preload the extension with `--load-extension=<path>`. `Extensions.loadUnpacked` is used as a fallback when the connected browser exposes it over CDP.
 - Node ≥ 22, Python ≥ 3.11 with `websocket-client`, Go ≥ 1.24 with `gobwas/ws`.
 
@@ -179,7 +179,7 @@ dist/                     Built JS output used by the extension and Node CLI scr
 
 ### Connect
 
-1. Open a raw CDP websocket to the browser. If no `cdp_url` is supplied, the JS client first tries the live stock-Chrome endpoint at `http://127.0.0.1:9222`, then auto-launches a test browser only if that is not reachable.
+1. Open a raw CDP websocket to the browser. If no `cdp_url` is supplied, the JS client auto-launches a test browser. Set `scan_for_existing_localhost_9222: true` to opt into trying the live stock-Chrome endpoint at `http://127.0.0.1:9222` before auto-launching.
 2. `bridge/injector.js` either discovers an existing ModCDP service worker target or installs the extension via `Extensions.loadUnpacked` when the connected browser permits it.
 3. Attach a session to that SW target and `Runtime.enable` on it.
 4. Call `globalThis.ModCDP.configure(...)` to push the resolved loopback websocket and any explicit server route overrides into the SW. The clients do this automatically by default.
@@ -278,7 +278,7 @@ flowchart LR
     direction LR
     CDP["CDP router<br/>localhost:9222"]
     SW["Extension service worker<br/>CDP target / JS context"]
-    Page["Page target<br/>about:blank"]
+    Page["Page target<br/>chrome://newtab/"]
     CDP -->|"5. dispatch to page target"| Page
   end
 
@@ -426,7 +426,7 @@ Tested browsers:
 
 Latency columns:
 
-- `direct` — ModCDP client to browser raw CDP `Page.getFrameTree` against an attached `about:blank` page target.
+- `direct` — ModCDP client to browser raw CDP `Page.getFrameTree` against an attached `chrome://newtab/` page target.
 - `pong` — ModCDP client to browser to extension service worker `Mod.pong` round trip.
 - `loopback` — ModCDP client to browser to extension service worker to loopback CDP to browser `Page.getFrameTree`.
 - `debugger` — ModCDP client to browser to extension service worker to `chrome.debugger.sendCommand` `Page.getFrameTree`.
@@ -469,17 +469,17 @@ Live/default-profile status:
 
 Minimum viable macOS CLI args:
 
-| Mode                  | Browsers                          | Args                                                                                                                              |
-| --------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `--direct` headful    | all three                         | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                                       |
-| `--direct` headless   | all three                         | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                        |
-| `--loopback` headful  | all three                         | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> --remote-allow-origins=* about:blank`                              |
-| `--loopback` headless | all three                         | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> --remote-allow-origins=* about:blank`               |
-| `--debugger`          | Chrome Beta 148                   | no working set found; `chrome.debugger` is unavailable in the extension service worker                                            |
-| `--debugger` headful  | Chrome Canary 149                 | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                                       |
-| `--debugger` headless | Chrome Canary 149                 | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> about:blank`                                        |
-| `--debugger` headful  | Playwright Chrome for Testing 147 | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> --load-extension=<repo>/dist/extension about:blank`                |
-| `--debugger` headless | Playwright Chrome for Testing 147 | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> --load-extension=<repo>/dist/extension about:blank` |
+| Mode                  | Browsers                          | Args                                                                                                                                   |
+| --------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--direct` headful    | all three                         | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> chrome://newtab/`                                                       |
+| `--direct` headless   | all three                         | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> chrome://newtab/`                                        |
+| `--loopback` headful  | all three                         | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> --remote-allow-origins=* chrome://newtab/`                              |
+| `--loopback` headless | all three                         | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> --remote-allow-origins=* chrome://newtab/`               |
+| `--debugger`          | Chrome Beta 148                   | no working set found; `chrome.debugger` is unavailable in the extension service worker                                                 |
+| `--debugger` headful  | Chrome Canary 149                 | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> chrome://newtab/`                                                       |
+| `--debugger` headless | Chrome Canary 149                 | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> chrome://newtab/`                                        |
+| `--debugger` headful  | Playwright Chrome for Testing 147 | `--remote-debugging-port=<port> --user-data-dir=<temp-profile> --load-extension=<repo>/dist/extension chrome://newtab/`                |
+| `--debugger` headless | Playwright Chrome for Testing 147 | `--headless=new --remote-debugging-port=<port> --user-data-dir=<temp-profile> --load-extension=<repo>/dist/extension chrome://newtab/` |
 
 Recommended full macOS launch args:
 
@@ -499,7 +499,7 @@ Recommended full macOS launch args:
 --disable-sync
 --password-store=basic
 --use-mock-keychain
-about:blank
+chrome://newtab/
 ```
 
 Add `--headless=new` for headless launches. Do not pass `--no-sandbox`, `--disable-gpu`, or `--remote-debugging-address` on macOS. On Linux only, pass `--no-sandbox` when there is no usable sandbox/display environment.

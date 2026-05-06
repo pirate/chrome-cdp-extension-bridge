@@ -102,8 +102,16 @@ const cdp = [
   `export const EVENT = "event" as const;`,
   ``,
   `export { zod, commands, events };`,
-  `export const cdp = { types: runtimeTypes, commands, events, REQUEST, RESPONSE, EVENT } as const;`,
-  `export const types = cdp.types;`,
+  `export type CdpRuntime = {`,
+  `  readonly types: typeof runtimeTypes;`,
+  `  readonly commands: typeof commands;`,
+  `  readonly events: typeof events;`,
+  `  readonly REQUEST: typeof REQUEST;`,
+  `  readonly RESPONSE: typeof RESPONSE;`,
+  `  readonly EVENT: typeof EVENT;`,
+  `};`,
+  `export const cdp: CdpRuntime = { types: runtimeTypes, commands, events, REQUEST, RESPONSE, EVENT };`,
+  `export const types: typeof runtimeTypes = cdp.types;`,
   ``,
   `export namespace cdp {`,
   `  export namespace types {`,
@@ -340,16 +348,41 @@ const zod = [
   `import { Mod } from "./modcdp.js";`,
 ];
 for (const d of domains) zod.push(`import * as ${domain_file(d.domain)} from "./zod/${domain_file(d.domain)}.js";`);
-zod.push(``, `export const zod = {`, `  Mod,`);
+zod.push(``, `export type CdpZodSchemas = {`, `  readonly Mod: typeof Mod;`);
+for (const d of domains) zod.push(`  readonly ${word(d.domain)}: typeof ${domain_file(d.domain)}.zod;`);
+zod.push(`};`, ``);
+zod.push(`export type CdpCommandSchemas =`);
+domains.forEach((d, index) => {
+  const prefix = index === 0 ? `  ` : `  & `;
+  zod.push(`${prefix}typeof ${domain_file(d.domain)}.commands${index === domains.length - 1 ? `;` : ``}`);
+});
+zod.push(``);
+zod.push(`export type CdpEventSchemas =`);
+domains.forEach((d, index) => {
+  const prefix = index === 0 ? `  ` : `  & `;
+  zod.push(`${prefix}typeof ${domain_file(d.domain)}.events${index === domains.length - 1 ? `;` : ``}`);
+});
+zod.push(
+  ``,
+  `export type CdpRuntimeTypes = { readonly zod: CdpZodSchemas };`,
+  `export type CdpRuntime = {`,
+  `  readonly types: CdpRuntimeTypes;`,
+  `  readonly commands: CdpCommandSchemas;`,
+  `  readonly events: CdpEventSchemas;`,
+  `};`,
+  ``,
+  `export const zod: CdpZodSchemas = {`,
+  `  Mod,`,
+);
 for (const d of domains) zod.push(`  ${word(d.domain)}: ${domain_file(d.domain)}.zod,`);
-zod.push(`} as const;`, `export const commands = {`);
+zod.push(`};`, `export const commands: CdpCommandSchemas = {`);
 for (const d of domains) zod.push(`  ...${domain_file(d.domain)}.commands,`);
-zod.push(`} as const;`, `export const events = {`);
+zod.push(`};`, `export const events: CdpEventSchemas = {`);
 for (const d of domains) zod.push(`  ...${domain_file(d.domain)}.events,`);
 zod.push(
-  `} as const;`,
-  `export const types = { zod } as const;`,
-  `export const cdp = { types, commands, events } as const;`,
+  `};`,
+  `export const types: CdpRuntimeTypes = { zod };`,
+  `export const cdp: CdpRuntime = { types, commands, events };`,
   ``,
 );
 

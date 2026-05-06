@@ -9,6 +9,9 @@
 //     rewrite Mod.* /
 //     Custom.* outbound and Runtime.bindingCalled inbound; forward everything
 //     else unchanged.
+//   - Keep mirrored upstream events private by default so vanilla CDP clients
+//     only see native upstream CDP frames. Set forwardMirroredUpstreamEvents to
+//     true when debugging the service-worker mirror path itself.
 //
 // Run as a CLI:
 //   node proxy.js --port 9223 --upstream http://127.0.0.1:9222
@@ -23,6 +26,7 @@ import type { RawData, WebSocket as ClientWebSocket } from "ws";
 
 import { ModCDPClient } from "../client/js/ModCDPClient.js";
 import {
+  UPSTREAM_EVENT_BINDING_NAME,
   bindingNameFor,
   wrapModCDPEvaluate,
   wrapModCDPAddCustomCommand,
@@ -73,10 +77,12 @@ export async function startProxy({
   port = DEFAULT_PORT,
   upstream = DEFAULT_UPSTREAM,
   extensionPath = DEFAULT_EXTENSION_PATH,
+  forwardMirroredUpstreamEvents = false,
 }: {
   port?: number;
   upstream?: string;
   extensionPath?: string;
+  forwardMirroredUpstreamEvents?: boolean;
 } = {}) {
   const server = http.createServer(async (req, res) => {
     try {
@@ -120,6 +126,7 @@ export async function startProxy({
     handleConnection(client, earlyBuffer, earlyHandler, {
       upstream,
       extensionPath,
+      forwardMirroredUpstreamEvents,
     }).catch((err) => {
       log("connection failed:", err.message);
       try {
@@ -155,7 +162,11 @@ async function handleConnection(
   client: ClientWebSocket,
   earlyBuffer: RawData[],
   earlyHandler: (buf: RawData) => void,
-  { upstream, extensionPath }: { upstream: string; extensionPath: string },
+  {
+    upstream,
+    extensionPath,
+    forwardMirroredUpstreamEvents,
+  }: { upstream: string; extensionPath: string; forwardMirroredUpstreamEvents: boolean },
 ) {
   const cdp = new ModCDPClient({
     cdp_url: upstream,
@@ -178,6 +189,7 @@ async function handleConnection(
     hiddenTargetIds: new Set(), // SW target the client must never see
     targetSessionIds: cdp.auto_target_sessions,
     clientSessionIds: new Set(), // session ids the client has attached
+    forwardMirroredUpstreamEvents,
     bootstrapped: false,
     queuedFromClient: [],
   };
@@ -372,12 +384,9 @@ function handleUpstreamMessage(state: ProxyConnectionState, msg: CdpResponseFram
 
   // event
   if (event.method === "Runtime.bindingCalled" && event.sessionId === state.extSessionId) {
-    const u = unwrapEventIfNeeded(
-      event.method,
-      RuntimeEvents["Runtime.bindingCalled"].parse(event.params || {}),
-      event.sessionId || null,
-      null,
-    );
+    const binding = RuntimeEvents["Runtime.bindingCalled"].parse(event.params || {});
+    if (binding.name === UPSTREAM_EVENT_BINDING_NAME && !state.forwardMirroredUpstreamEvents) return;
+    const u = unwrapEventIfNeeded(event.method, binding, event.sessionId || null, null);
     if (!u) return;
     // emit to root + every known client session, so any CDPSession listener
     // (Playwright per-target sessions) fires.
@@ -470,7 +479,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(argv.port || DEFAULT_PORT);
   const upstream = argv.upstream || DEFAULT_UPSTREAM;
   const extensionPath = argv.extension ? path.resolve(argv.extension) : DEFAULT_EXTENSION_PATH;
-  startProxy({ port, upstream, extensionPath }).catch((e) => {
+  const forwardMirroredUpstreamEvents = argv["forward-mirrored-upstream-events"] === "true";
+  startProxy({ port, upstream, extensionPath, forwardMirroredUpstreamEvents }).catch((e) => {
     console.error(e);
     process.exitCode = 1;
   });

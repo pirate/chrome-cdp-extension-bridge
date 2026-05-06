@@ -384,6 +384,7 @@ export const ProxyConnectionStateSchema = z.object({
   hiddenTargetIds: z.custom<Set<string>>(),
   targetSessionIds: z.custom<Map<string, string>>(),
   clientSessionIds: z.custom<Set<string>>(),
+  forwardMirroredUpstreamEvents: z.boolean(),
   bootstrapped: z.boolean(),
   queuedFromClient: z.array(z.custom<import("ws").RawData>()),
 });

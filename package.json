@@ -10,15 +10,21 @@
   "exports": {
     ".": {
       "types": "./client/js/ModCDPClient.ts",
-      "import": "./dist/client/js/ModCDPClient.js"
+      "import": "./dist/client/js/ModCDPClient.js",
+      "default": "./dist/client/js/ModCDPClient.js"
     },
     "./client": {
       "types": "./client/js/ModCDPClient.ts",
-      "import": "./dist/client/js/ModCDPClient.js"
+      "import": "./dist/client/js/ModCDPClient.js",
+      "default": "./dist/client/js/ModCDPClient.js"
     },
     "./extension/service_worker.js": "./dist/extension/service_worker.js",
     "./extension/ModCDPServer.js": "./dist/extension/ModCDPServer.js",
     "./extension/translate.js": "./dist/extension/translate.js",
+    "./bridge/launcher.js": {
+      "types": "./bridge/launcher.ts",
+      "import": "./dist/bridge/launcher.js"
+    },
     "./bridge/translate.js": "./dist/bridge/translate.js",
     "./types/*": "./dist/types/*",
     "./types/zod/*": "./dist/types/zod/*"
