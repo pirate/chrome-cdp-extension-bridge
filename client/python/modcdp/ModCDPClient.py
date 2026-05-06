@@ -433,7 +433,7 @@ class ModCDPClient:
             args.append(f"--load-extension={self.extension_path}")
         extra_args = self.launch_options.get("extra_args") or []
         args.extend(extra_args)
-        args.append("chrome://newtab/")
+        args.append("about:blank")
         self._launched_process = subprocess.Popen([executable_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cdp_url = f"http://127.0.0.1:{port}"
         chrome_ready_timeout_s = 45

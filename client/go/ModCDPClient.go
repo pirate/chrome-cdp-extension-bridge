@@ -489,7 +489,7 @@ func (c *ModCDPClient) launchChrome() (string, error) {
 		args = append(args, fmt.Sprintf("--load-extension=%s", c.opts.ExtensionPath))
 	}
 	args = append(args, c.opts.LaunchOptions.ExtraArgs...)
-	args = append(args, "chrome://newtab/")
+	args = append(args, "about:blank")
 	c.launchedProcess = exec.Command(executablePath, args...)
 	if err := c.launchedProcess.Start(); err != nil {
 		_ = os.RemoveAll(profileDir)
